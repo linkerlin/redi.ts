@@ -1,0 +1,27 @@
+{
+  "name": "redi.ts",
+  "version": "1.0.0",
+  "description": "A 1:1 Clone for using Redisson in TypeScript!",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://localhost:26831/linkerlin/redi.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ioredis": "^5.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "ioredis-mock": "^8.13.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}
