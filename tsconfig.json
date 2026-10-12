@@ -7,7 +7,9 @@
     "declaration": true,
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"],
+    "noImplicitAny": false
   },
   "include": ["src"]
 }

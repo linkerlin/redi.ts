@@ -1,0 +1,328 @@
+/**
+ * Atomic structures + adders + id generator.
+ * Wire: plain decimal strings (StringCodec semantics), BaseAdder pub/sub protocol.
+ */
+import type { Redis } from 'ioredis';
+import { RedisDataStructure } from './base';
+import type { Codec } from './codec';
+import { JsonCodec } from './codec';
+import { luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber } from './util';
+
+const ATOMIC_CAS = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;
+if tonumber(v) == tonumber(ARGV[1]) then redis.call('set', KEYS[1], ARGV[2]); return 1 else return 0 end`;
+
+const ATOMIC_DEL = `local v = redis.call('get', KEYS[1]);
+if v ~= false and v == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+
+export class RAtomicLong extends RedisDataStructure {
+  constructor(redis: Redis, name: string) {
+    super(redis, name, new JsonCodec());
+  }
+  async get(): Promise<number> {
+    const v = await this.redis.get(this.name);
+    return v === null ? 0 : Number(v);
+  }
+  async set(value: number): Promise<void> {
+    await this.redis.set(this.name, String(value));
+  }
+  async getAndSet(value: number): Promise<number> {
+    const old = await this.redis.getset(this.name, String(value));
+    return old === null ? 0 : Number(old);
+  }
+  async getAndDelete(): Promise<number | null> {
+    const v = await (this.redis as any).getdel?.(this.name);
+    if (v !== undefined) return v === null ? null : Number(v);
+    const old = await this.redis.get(this.name);
+    if (old !== null) await this.redis.del(this.name);
+    return old === null ? null : Number(old);
+  }
+  async incrementAndGet(): Promise<number> {
+    return this.redis.incr(this.name);
+  }
+  async decrementAndGet(): Promise<number> {
+    return this.redis.decr(this.name);
+  }
+  async addAndGet(delta: number): Promise<number> {
+    return this.redis.incrby(this.name, delta);
+  }
+  async getAndAdd(delta: number): Promise<number> {
+    const n = await this.addAndGet(delta);
+    return n - delta;
+  }
+  async compareAndSet(expect: number, update: number): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_CAS, 1, this.name, String(expect), String(update))) === 1;
+  }
+  async compareAndDelete(expect: number): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_DEL, 1, this.name, String(expect))) === 1;
+  }
+  override async delete(): Promise<boolean> {
+    return super.delete();
+  }
+}
+
+export class RAtomicDouble extends RedisDataStructure {
+  constructor(redis: Redis, name: string) {
+    super(redis, name, new JsonCodec());
+  }
+  async get(): Promise<number> {
+    const v = await this.redis.get(this.name);
+    return v === null ? 0 : Number(v);
+  }
+  async set(value: number): Promise<void> {
+    await this.redis.set(this.name, String(value));
+  }
+  async getAndSet(value: number): Promise<number> {
+    const old = await this.redis.getset(this.name, String(value));
+    return old === null ? 0 : Number(old);
+  }
+  async addAndGet(delta: number): Promise<number> {
+    return Number(await this.redis.incrbyfloat(this.name, delta));
+  }
+  async getAndAdd(delta: number): Promise<number> {
+    const n = await this.addAndGet(delta);
+    return n - delta;
+  }
+  async compareAndSet(expect: number, update: number): Promise<boolean> {
+    const s = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;
+if tonumber(v) == tonumber(ARGV[1]) then redis.call('set', KEYS[1], ARGV[2]); return 1 else return 0 end`;
+    return toNumber(await luaEval(this.redis, s, 1, this.name, String(expect), String(update))) === 1;
+  }
+}
+
+// -- BaseAdder (Redisson protocol, source-verified): -------------------------------
+// channel {name}:adder-topic     messages "1:<reqId>" = SUM, "0:<reqId>" = CLEAR
+// string {name}:<reqId>:counter  flush target: every live instance INCRBYs its
+//                                full local total here; requester GETDELs it.
+//                                Sum returns the counter ONLY (requester is a
+//                                subscriber, so its own flush is included).
+// string {name}:<reqId>:semaphore barrier: PUBLISH returns subscriber count n;
+//                                requester acquires n permits then DELs it.
+// All companion keys are hash-tagged (suffixName), matching redi.go/Java.
+
+const ADDER_ACQUIRE = `local value = redis.call('get', KEYS[1])
+if (value ~= false and tonumber(value) >= tonumber(ARGV[1])) then
+    redis.call('decrby', KEYS[1], ARGV[1])
+    return 1
+end
+return 0`;
+
+const ADDER_RELEASE = `local value = redis.call('incrby', KEYS[1], ARGV[1])
+redis.call('publish', KEYS[2], ARGV[1])
+return value`;
+
+abstract class RBaseAdder extends RedisDataStructure {
+  private local = 0;
+  private localD = 0;
+  private isDouble: boolean;
+  private sub: Redis | null = null;
+  private readyP: Promise<void> = Promise.resolve();
+
+  constructor(redis: Redis, name: string, isDouble: boolean) {
+    super(redis, name);
+    this.isDouble = isDouble;
+    this.readyP = this.ensureListener();
+  }
+
+  private topic(): string {
+    return suffixName(this.name, 'adder-topic');
+  }
+  private counterKey(id: string): string {
+    return suffixName(this.name, `${id}:counter`);
+  }
+  private semKey(id: string): string {
+    return suffixName(this.name, `${id}:semaphore`);
+  }
+  private semChannel(sem: string): string {
+    return prefixName('redisson_sc', sem);
+  }
+
+  private async ensureListener(): Promise<void> {
+    try {
+      const Dup = (this.redis as any).duplicate?.bind(this.redis);
+      if (!Dup) return;
+      this.sub = Dup();
+      // attach BEFORE subscribe so no broadcast is lost in the gap
+      (this.sub as any).on('message', (_ch: string, msg: string) => {
+        void this.handle(msg);
+      });
+      await (this.sub as any).subscribe(this.topic());
+    } catch {
+      this.sub = null;
+    }
+  }
+
+  private async handle(msg: string): Promise<void> {
+    const idx = msg.indexOf(':');
+    if (idx < 0) return;
+    const kind = msg.slice(0, idx);
+    const id = msg.slice(idx + 1);
+    try {
+      if (kind === '1') {
+        // SUM: flush full local total (non-destructive, like Java/Go).
+        if (this.isDouble) {
+          const v = this.localD;
+          if (v !== 0) await this.redis.incrbyfloat(this.counterKey(id), v);
+        } else {
+          const v = this.local;
+          if (v !== 0) await this.redis.incrby(this.counterKey(id), v);
+        }
+      } else if (kind === '0') {
+        if (this.isDouble) this.localD = 0;
+        else this.local = 0;
+      } else {
+        return;
+      }
+      // release one barrier permit
+      const sem = this.semKey(id);
+      await luaEval(this.redis, ADDER_RELEASE, 2, sem, this.semChannel(sem), '1');
+    } catch { /* noop */ }
+  }
+
+  protected addLocal(n: number): void {
+    if (this.isDouble) this.localD += n;
+    else this.local += Math.trunc(n);
+  }
+
+  private async request(kind: '1' | '0'): Promise<number> {
+    await this.readyP;
+    const id = randomHex(16);
+    let n = 0;
+    try {
+      n = toNumber(await this.redis.publish(this.topic(), `${kind}:${id}`));
+    } catch {
+      n = 0;
+    }
+    if (n === 0) {
+      // No live subscribers (own listener included): local buffer is everything.
+      // Only reachable when pub/sub is unavailable (e.g. mock without dup).
+      return this.isDouble ? this.localD : this.local;
+    }
+    const sem = this.semKey(id);
+    const deadline = Date.now() + 60000;
+    for (;;) {
+      const ok = toNumber(await luaEval(this.redis, ADDER_ACQUIRE, 1, sem, String(n)));
+      if (ok === 1) break;
+      if (Date.now() >= deadline) throw new Error(`redi: adder ${this.name} sum barrier timed out waiting for ${n} instances`);
+      await sleep(10);
+    }
+    try {
+      if (kind === '1') {
+        const raw = await this.redis.getdel(this.counterKey(id));
+        return raw === null ? 0 : Number(raw);
+      }
+      return 0;
+    } finally {
+      try {
+        await this.redis.del(sem);
+      } catch { /* noop */ }
+    }
+  }
+
+  async sum(): Promise<number> {
+    return this.request('1');
+  }
+
+  async reset(): Promise<void> {
+    await this.request('0');
+  }
+
+  async sumThenReset(): Promise<number> {
+    const s = await this.sum();
+    await this.reset();
+    return s;
+  }
+
+  async destroy(): Promise<void> {
+    try {
+      await (this.sub as any)?.unsubscribe?.(this.topic());
+      (this.sub as any)?.disconnect?.();
+    } catch { /* noop */ }
+    this.sub = null;
+  }
+}
+
+export class RLongAdder extends RBaseAdder {
+  constructor(redis: Redis, name: string) {
+    super(redis, name, false);
+  }
+  async add(x: number): Promise<void> {
+    this.addLocal(Math.trunc(x));
+  }
+  async increment(): Promise<void> {
+    this.addLocal(1);
+  }
+  async decrement(): Promise<void> {
+    this.addLocal(-1);
+  }
+}
+
+export class RDoubleAdder extends RBaseAdder {
+  constructor(redis: Redis, name: string) {
+    super(redis, name, true);
+  }
+  async add(x: number): Promise<void> {
+    this.addLocal(x);
+  }
+  async increment(): Promise<void> {
+    this.addLocal(1);
+  }
+  async decrement(): Promise<void> {
+    this.addLocal(-1);
+  }
+}
+
+// -- RIdGenerator --------------------------------------------------------------
+
+export class RIdGenerator extends RedisDataStructure {
+  private next = 0;
+  private maxId = 0;
+  private allocSize = 5000;
+  constructor(redis: Redis, name: string) {
+    super(redis, name);
+  }
+  private allocKey(): string {
+    return suffixName(this.name, 'allocation');
+  }
+  async tryInit(value: number, allocationSize = 5000): Promise<boolean> {
+    const s = `local a = redis.call('setnx', KEYS[1], ARGV[1])
+local b = redis.call('setnx', KEYS[2], ARGV[2])
+if a == 1 and b == 1 then return 1 else return 0 end`;
+    const r = await luaEval(this.redis, s, 2, this.name, this.allocKey(), String(value), String(allocationSize));
+    if (toNumber(r) === 1) {
+      this.allocSize = allocationSize;
+      return true;
+    }
+    return false;
+  }
+  private async allocate(): Promise<void> {
+    const s = `local alloc = redis.call('get', KEYS[2])
+if alloc == false then
+    redis.call('set', KEYS[2], '5000')
+    alloc = '5000'
+end
+local v = redis.call('get', KEYS[1])
+if v == false then
+    redis.call('set', KEYS[1], '1')
+    v = '1'
+else
+    v = tostring(tonumber(v))
+end
+redis.call('incrby', KEYS[1], alloc)
+return {v, alloc}`;
+    const r: any = await luaEval(this.redis, s, 2, this.name, this.allocKey());
+    const start = Array.isArray(r) ? toNumber(r[0], 1) : 1;
+    const size = Array.isArray(r) ? toNumber(r[1], 5000) : 5000;
+    this.next = start;
+    this.maxId = start + size;
+    this.allocSize = size;
+  }
+  async nextId(): Promise<number> {
+    if (this.next >= this.maxId) await this.allocate();
+    return this.next++;
+  }
+  async nextIds(count: number): Promise<number[]> {
+    const out: number[] = [];
+    for (let i = 0; i < count; i++) out.push(await this.nextId());
+    return out;
+  }
+}

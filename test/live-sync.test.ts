@@ -1,0 +1,119 @@
+/**
+ * Phase 2 live interop: mutual exclusion (RLock), shared semaphore permits,
+ * shared rate-limiter window. Needs real Redis + probe (see live-interop.test.ts).
+ */
+import { describe, it, expect } from 'vitest';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import Redis from 'ioredis';
+import { Redisson } from '../src';
+
+const execAsync = promisify(exec);
+const NS = 'TsJavaT:sync:';
+const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const POM = path.join(ROOT, 'interop', 'pom.xml');
+const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
+
+async function redisUp(): Promise<boolean> {
+  try {
+    const r = new Redis(REDIS_URL, { lazyConnect: true, connectTimeout: 3000, maxRetriesPerRequest: 1 });
+    await r.ping();
+    r.disconnect();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function probe(probeArgs: string): Promise<string> {
+  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${probeArgs}"`;
+  const { stdout } = await execAsync(cmd, { timeout: 300000, cwd: ROOT });
+  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  // last non-warning line is the verdict
+  const verdict = [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J'));
+  return verdict ?? '';
+}
+
+const hasRedis = await redisUp();
+
+describe('live interop phase 2: locks/semaphore/ratelimiter', () => {
+  it('TS-held lock blocks Java, release lets Java in', async () => {
+    if (!hasRedis) return;
+    const r = Redisson.create({ address: REDIS_URL });
+    const name = `${NS}lock:a`;
+    try {
+      await r.getKeys().delete(name);
+      const l = r.getLock(name);
+      await l.lock(30000, 1);
+      expect(await probe(`lock-try ${name}`)).toBe('CONTENDED');
+      await l.unlock(1);
+      expect(await probe(`lock-try ${name}`)).toBe('ACQUIRED');
+    } finally {
+      await r.shutdown();
+    }
+  }, 120000);
+
+  it('Java-held lock blocks TS, release lets TS in', async () => {
+    if (!hasRedis) return;
+    const r = Redisson.create({ address: REDIS_URL });
+    const name = `${NS}lock:b`;
+    try {
+      await r.getKeys().delete(name);
+      // hold in background: probe prints HELD, sleeps 4s, prints RELEASED
+      const hold = execAsync(
+        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${name} 4000"`,
+        { timeout: 60000, cwd: ROOT },
+      );
+      // wait until HELD is observable
+      let held = false;
+      for (let i = 0; i < 100 && !held; i++) {
+        await new Promise((x) => setTimeout(x, 100));
+        held = await r.getLock(name).isLocked();
+      }
+      expect(held).toBe(true);
+      expect(await r.getLock(name).tryLock(0, 5000, 99)).toBe(false);
+      await hold; // released
+      expect(await r.getLock(name).tryLock(0, 5000, 99)).toBe(true);
+      await r.getLock(name).unlock(99);
+    } finally {
+      await r.shutdown();
+    }
+  }, 120000);
+
+  it('semaphore permits are shared across languages', async () => {
+    if (!hasRedis) return;
+    const r = Redisson.create({ address: REDIS_URL });
+    const name = `${NS}sem:shared`;
+    try {
+      await r.getKeys().delete(name);
+      const sem = r.getSemaphore(name);
+      expect(await sem.trySetPermits(1)).toBe(true);
+      expect(await sem.tryAcquire(1)).toBe(true); // TS drains the only permit
+      expect(await probe(`sem-try ${name}`)).toBe('false'); // Java sees 0
+      await sem.release(1);
+      expect(await probe(`sem-try ${name}`)).toBe('true'); // Java gets it
+    } finally {
+      await r.shutdown();
+    }
+  }, 120000);
+
+  it('rate limiter window is shared across languages', async () => {
+    if (!hasRedis) return;
+    const r = Redisson.create({ address: REDIS_URL });
+    const name = `${NS}ratelimit:shared`;
+    try {
+      await r.getKeys().delete(`{${name}}:value`, `{${name}}:permits`, name);
+      const rl = r.getRateLimiter(name);
+      await rl.setRate('OVERALL', 3, 60000);
+      expect(await rl.tryAcquire(1)).toBe(true); // 2 left
+      expect(await probe(`rate-try ${name} 1`)).toBe('true'); // 1 left
+      expect(await probe(`rate-try ${name} 1`)).toBe('true'); // 0 left
+      expect(await rl.tryAcquire(1)).toBe(false); // exhausted on both sides
+    } finally {
+      await r.shutdown();
+    }
+  }, 120000);
+});

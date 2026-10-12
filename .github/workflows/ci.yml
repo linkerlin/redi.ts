@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # Mock + wire + (skipped without redi.py) codec suites. No services needed:
+      # live-* files skip when Redis is unreachable, interop skips without python.
+      - run: npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts
+
+  # Direct TS ↔ Redisson 4.6.1 interop. Separate job so the main gate stays
+  # fast when only Node is needed; fails the PR if the probe regresses.
+  java-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+      - run: npm ci
+      - run: npm run build
+      - name: Full suite (incl. live bidirectional probes)
+        run: npm test

@@ -1,19 +1,18 @@
 {
   "name": "redi.ts",
-  "version": "1.0.0",
-  "description": "A 1:1 Clone for using Redisson in TypeScript!",
-  "main": "index.js",
+  "version": "1.7.0",
+  "description": "TypeScript 1:1 port of Redisson — wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md", "README_EN.md", "COMPATIBILITY.md", "CHANGELOG.md", "AGENTS.md"],
   "scripts": {
     "test": "vitest run",
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
   },
-  "repository": {
-    "type": "git",
-    "url": "http://localhost:26831/linkerlin/redi.ts"
-  },
-  "keywords": [],
+  "keywords": ["redis", "redisson", "distributed", "lock", "map", "queue", "topic", "rate-limiter", "bloom-filter"],
   "author": "",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "dependencies": {
     "ioredis": "^5.11.1"
   },
