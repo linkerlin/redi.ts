@@ -1,4 +1,20 @@
-# Changelog
+## 1.8.0 — 2026-10-12
+
+Phase 10 live interop (93 → 99 tests green, 6/6 PASS first run):
+
+- BlockingDeque 双向交接；batch Set/Atomic 写 Java 可见；Bucket TTL；
+  MapCache TTL+maxIdle 组合；SetCache idle（presence 共享、过期 TS 侧，
+  4.6.1 本无 idle 概念）；MapCache `destroy()` 清数据 + companion。
+
+## 1.7.1 — 2026-10-12
+
+- Fix real bug: `RSetCache` maxIdle never expired anything (`contains`
+  unconditionally renewed; without last-touch tracking expiry is
+  unrepresentable). Now deadline-tracked via `{name}:redisson_touch`
+  (Java-invisible, presence stays cross-readable), enforced + refreshed on
+  `contains`, swept in `size`/`readAll`, cleaned on `remove`/`purge`.
+  Redisson itself has no SetCache-idle concept (TTL-only, verified in
+  4.6.1 + current sources) — ours is a documented extension.
 
 ## 1.7.0 — 2026-10-12
 
@@ -14,6 +30,8 @@ Phase 9 live interop (86 → 93 tests green, 5/7 first run → 7/7):
   后 subscribe（同 adder 一类）。
 - 测试卫生：监听类就绪一律 NUMSUB 等待（固定 sleep 赌 JVM 启动必输）。
 
+## 1.6.0 — 2026-10-12
+
 Phase 8 live interop (78 → 86 tests green, 8/8 PASS first run):
 
 - LocalCachedMap 数据层 = RMap wire（Java 直读）+ TS↔TS 失效广播；
@@ -27,19 +45,7 @@ Phase 8 live interop (78 → 86 tests green, 8/8 PASS first run):
 
 ## 1.5.0 — 2026-10-12
 
-Phase 5/6/7 live interop (52 → 69... 78 tests green with phase files):
-
-Phase 4 live interop (topic/stream/multimap/bq/ring/idgen/batch/mc-ttl):
-
-- Topic 双向投递（PUBSUB NUMSUB 就绪后发布）；Stream 消费组跨语言读
-  （`StreamCreateGroupArgs.makeStream`，空流建组须 MKSTREAM，id 默认 NEWEST）；
-  SetMultimap 内部 id 字节级一致；BoundedBlockingQueue/RingBuffer 容量共享；
-  IdGenerator 区间交错无冲突；Batch 双向；MapCache 单条目 TTL 跨语言过期。
-- 修复测试基建：companion 键清理改精确 `DEL`（Redis glob 的 `{a,b}` 是交替
-  语法，`SCAN MATCH` 会漏删花括号键）；长驻探针发布前等订阅就绪；
-  探针 verdict 键是 JsonJacksonCodec bucket，TS 读须解码（裸 GET 会带引号）。
-
-## 1.5.0 — 2026-10-12
+Phase 5/6/7 live interop (52 → 78 tests green):
 
 - Phase 5：Pattern/Sharded Topic 双向（含 `smessage` 事件修复）、BlockingQueue
   交接、Latch 开门、Geo/BitSet/HLL 互读、SetCache TTL、MapCache maxIdle 刷新、
@@ -62,6 +68,20 @@ Phase 4 live interop (topic/stream/multimap/bq/ring/idgen/batch/mc-ttl):
 - 测试卫生：Multimap 清理必须 `clear()` 先行（经 HASH 反查集合；顺序反了会
   静默 no-op，确定性 id 导致残留复用——Java 同行为）。
 
+## 1.4.0 — 2026-10-12
+
+Phase 4 live interop (topic/stream/multimap/bq/ring/idgen/batch/mc-ttl):
+
+- Topic 双向投递（PUBSUB NUMSUB 就绪后发布）；Stream 消费组跨语言读
+  （`StreamCreateGroupArgs.makeStream`，空流建组须 MKSTREAM，id 默认 NEWEST）；
+  SetMultimap 内部 id 字节级一致；BoundedBlockingQueue/RingBuffer 容量共享；
+  IdGenerator 区间交错无冲突；Batch 双向；MapCache 单条目 TTL 跨语言过期。
+- 修复测试基建：companion 键清理改精确 `DEL`（Redis glob 的 `{a,b}` 是交替
+  语法，`SCAN MATCH` 会漏删花括号键）；长驻探针发布前等订阅就绪；
+  探针 verdict 键是 JsonJacksonCodec bucket，TS 读须解码（裸 GET 会带引号）。
+
+## 1.3.0 — 2026-10-12
+
 Phase 3 live interop vs Redisson 4.6.1 (all PASS, 8/8):
 
 - `RReadWriteLock` 读写互斥双向 + 共享读；`RFencedLock` token 跨语言单调递增；
@@ -76,6 +96,8 @@ Phase 3 live interop vs Redisson 4.6.1 (all PASS, 8/8):
   `longadder-cohort` 常驻 JVM；长驻探针 verdict 双写 Redis 键 + stdout。
 - Total: 44 tests green.
 
+## 1.2.0 — 2026-10-12
+
 Live interop vs Java Redisson 4.6.1 (local Redis 8.10.2):
 
 - New `interop/` Maven probe (`redits-java-probe`, Redisson 4.6.1 +
@@ -89,6 +111,8 @@ Live interop vs Java Redisson 4.6.1 (local Redis 8.10.2):
   semaphore shared permits, rate-limiter shared window — all PASS.
 - Total: 36 tests green. Next: RWLock/fenced/delayed-queue/reliable-topic
   cross-language timing suites.
+
+## 1.1.0 — 2026-10-12
 
 Full 1:1 TypeScript port of Redisson (Java normative, `redi.go` Lua baseline):
 

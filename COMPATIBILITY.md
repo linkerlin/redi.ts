@@ -47,7 +47,7 @@
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
 | RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段） | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） |
 | RMapCacheNative | plain HASH + `HPEXPIRE` (≥7.4) | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） |
-| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations | WIRE_OK + live bidirectional ✅ |
+| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable) | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) |
 | RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids | WIRE_OK |
 | RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE` | WIRE_OK / NATIVE_OK |
 | RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试 (Java binary protocol not ported — disable near-cache for mixed deploys) | PARTIAL |
@@ -71,7 +71,7 @@
 
 ## Verification
 
-- `npm test`: 93 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 99 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -85,7 +85,8 @@
   `live-phase8` (lcm/deque-list-set/atomicdouble-bucket-cas/pes-multi/
   rate-update/downgrade/watchdog/zset-drain, 8/8 PASS),
   `live-phase9` (multilock-redlock/lcm-strategies/cache-paths/misc + slot
-  parity + mock contention, 7/7 PASS).
+  parity + mock contention, 7/7 PASS),
+  `live-phase10` (bdeque/batch/bucket-ttl/mc-combo/sc-idle/destroy, 6/6 PASS).
 
   探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
   （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。

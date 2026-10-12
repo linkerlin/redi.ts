@@ -212,11 +212,18 @@ describe('live interop phase 5: pattern/sharded/blocking/latch/geo/bits/hll/cach
     const r = Redisson.create({ address: REDIS_URL });
     try {
       const sc = `${NS}sc5:shared`;
-      await cleanExact(r, sc, `redisson__idle__set:{${sc}}`);
+      await cleanExact(r, sc, `redisson__idle__set:{${sc}}`, `{${sc}}:redisson_touch`);
       await probe(`setcache-add-ttl ${sc} scv 5000`);
       expect(await r.getSetCache<string>(sc).contains('scv')).toBe(true);
       await new Promise((x) => setTimeout(x, 5500));
       expect(await r.getSetCache<string>(sc).contains('scv')).toBe(false);
+      // idle (TS extension): sliding window enforced + refreshed on read
+      const scc = r.getSetCache<string>(sc);
+      expect(await scc.add('iv', 0, 3000)).toBe(true);
+      expect(await probe(`sc-contains ${sc} iv`)).toBe('SC_HAS:true');
+      await new Promise((x) => setTimeout(x, 3500));
+      expect(await scc.contains('iv')).toBe(false);
+      expect(await scc.size()).toBe(0);
 
       const mc = `${NS}mc5:shared`;
       await cleanExact(r, mc, `redisson__timeout__set:{${mc}}`, `redisson__idle__set:{${mc}}`);

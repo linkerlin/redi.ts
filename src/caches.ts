@@ -288,17 +288,33 @@ export class RMapCacheNative<K = any, V = any> extends RedisDataStructure {
 
 export class RSetCache<V = any> extends RedisDataStructure {
   private idleKey: string;
+  private touchKey: string;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.idleKey = prefixName('redisson__idle__set', name);
+    // TS extension (Redisson has no SetCache maxIdle): last-touch timestamps.
+    // Java never reads this key, so cross-language presence is unaffected.
+    this.touchKey = suffixName(name, 'redisson_touch');
   }
+  // NOTE on idle semantics: idle ZSET holds the DURATION; last-touch rides in
+  // touchKey. contains() enforces now-lastTouch<=duration and refreshes the
+  // touch (sliding window, like RMapCache maxIdle). Without the touch record
+  // an entry would either never expire or die on first read — both wrong.
   private async purge(now: number): Promise<void> {
     try {
       const expired: string[] = await this.redis.zrangebyscore(this.name, '0', String(now));
       if (expired.length > 0) {
         await this.redis.zrem(this.name, ...expired);
         await this.redis.zrem(this.idleKey, ...expired);
+        await this.redis.hdel(this.touchKey, ...expired);
       }
+    } catch { /* noop */ }
+  }
+  private async evictOne(enc: string): Promise<void> {
+    try {
+      await this.redis.zrem(this.name, enc);
+      await this.redis.zrem(this.idleKey, enc);
+      await this.redis.hdel(this.touchKey, enc);
     } catch { /* noop */ }
   }
   async add(value: V, ttlMs = 0, maxIdleMs = 0): Promise<boolean> {
@@ -308,8 +324,13 @@ export class RSetCache<V = any> extends RedisDataStructure {
     const expiry = ttlMs > 0 ? now + ttlMs : 9223372036854775807;
     const exists = await this.redis.zscore(this.name, enc);
     await this.redis.zadd(this.name, String(expiry), enc);
-    if (maxIdleMs > 0) await this.redis.zadd(this.idleKey, String(maxIdleMs), enc);
-    else await this.redis.zrem(this.idleKey, enc);
+    if (maxIdleMs > 0) {
+      await this.redis.zadd(this.idleKey, String(maxIdleMs), enc);
+      await this.redis.hset(this.touchKey, enc, String(now));
+    } else {
+      await this.redis.zrem(this.idleKey, enc);
+      await this.redis.hdel(this.touchKey, enc);
+    }
     return exists === null;
   }
   async contains(value: V): Promise<boolean> {
@@ -320,7 +341,13 @@ export class RSetCache<V = any> extends RedisDataStructure {
     if (score === null) return false;
     const idle = await this.redis.zscore(this.idleKey, enc);
     if (idle !== null) {
-      await this.redis.zadd(this.name, String(now + Number(idle)), enc);
+      const touched = await this.redis.hget(this.touchKey, enc);
+      const lastTouch = touched === null ? now : Number(touched);
+      if (now - lastTouch > Number(idle)) {
+        await this.evictOne(enc);
+        return false;
+      }
+      await this.redis.hset(this.touchKey, enc, String(now));
     }
     return true;
   }
@@ -328,17 +355,55 @@ export class RSetCache<V = any> extends RedisDataStructure {
     const enc = this.encodeValue(value);
     const n = await this.redis.zrem(this.name, enc);
     await this.redis.zrem(this.idleKey, enc);
+    await this.redis.hdel(this.touchKey, enc);
     return n > 0;
   }
+  /** Drop idle-expired members from a candidate list (bulk touch lookup). */
+  private async sweepIdle(members: string[], now: number): Promise<string[]> {
+    if (members.length === 0) return members;
+    let durs: (string | null)[];
+    let touches: (string | null)[];
+    try {
+      const pipe = this.redis.pipeline();
+      for (const m of members) pipe.zscore(this.idleKey, m);
+      const r1: any[] = (await pipe.exec()) ?? [];
+      durs = r1.map((r) => (r?.[1] === null || r?.[1] === undefined ? null : String(r[1])));
+      const needTouch = durs.some((d) => d !== null);
+      touches = members.map(() => null);
+      if (needTouch) {
+        touches = await this.redis.hmget(this.touchKey, ...members);
+      }
+    } catch {
+      return members;
+    }
+    const alive: string[] = [];
+    for (let i = 0; i < members.length; i++) {
+      const dur = durs[i];
+      if (dur === null) {
+        alive.push(members[i]);
+        continue;
+      }
+      const lastTouch = touches[i] === null ? now : Number(touches[i]);
+      if (now - lastTouch > Number(dur)) {
+        await this.evictOne(members[i]);
+      } else {
+        alive.push(members[i]);
+      }
+    }
+    return alive;
+  }
   async size(): Promise<number> {
-    await this.purge(await serverNowMs(this.redis));
-    return this.redis.zcard(this.name);
+    const now = await serverNowMs(this.redis);
+    await this.purge(now);
+    const members: string[] = await this.redis.zrangebyscore(this.name, '0', '9223372036854775807');
+    return (await this.sweepIdle(members, now)).length;
   }
   async readAll(): Promise<V[]> {
     const now = await serverNowMs(this.redis);
     await this.purge(now);
     const m = await this.redis.zrangebyscore(this.name, String(now + 1), '9223372036854775807');
-    return m.map((x) => this.decodeValue(x) as V);
+    const alive = await this.sweepIdle(m, now);
+    return alive.map((x) => this.decodeValue(x) as V);
   }
 }
 
