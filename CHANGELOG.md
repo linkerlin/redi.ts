@@ -1,3 +1,15 @@
+## 1.8.3 — 2026-10-13
+
+P1 quick win (see `docs/GAP_ANALYSIS.md` §2 `RMap`):
+
+- `RMap.put` / single-key `remove` / `putIfAbsent`: GET+HSET(HDEL) multi-RTT
+  rewritten as single-Lua atomic old-value return (same pattern as existing
+  `putIfExists`; zero wire change, mock-safe — same `hget/hset/hsetnx`
+  commands the mock already runs).
+- `RRateLimiter` acquire-path config caching documented in matrix
+  (instance-cached after first load, `getConfig` always fresh — mirrors
+  Java instance fields; decision: keep, P0-4 tail closed).
+
 ## 1.8.2 — 2026-10-13
 
 P0 follow-ups (see `docs/GAP_ANALYSIS.md` §1):

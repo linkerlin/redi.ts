@@ -156,16 +156,22 @@ export class RMap<K = any, V = any> extends RedisDataStructure {
     return out;
   }
   async put(key: K, value: V): Promise<V | null> {
-    const old = await this.get(key);
-    await this.redis.hset(this.name, this.encodeKey(key), this.encodeValue(value));
-    return old;
+    // Single Lua (was GET+HSET): atomic old-value return under concurrency.
+    const s = `local old = redis.call('hget', KEYS[1], ARGV[1])
+redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+return old`;
+    const raw = await luaEval(this.redis, s, 1, this.name, this.encodeKey(key), this.encodeValue(value));
+    return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
   }
   async fastPut(key: K, value: V): Promise<boolean> {
     return ((await this.redis.hset(this.name, this.encodeKey(key), this.encodeValue(value))) as number) === 1;
   }
   async putIfAbsent(key: K, value: V): Promise<V | null> {
-    const ok = await this.redis.hsetnx(this.name, this.encodeKey(key), this.encodeValue(value));
-    return ok === 1 ? null : this.get(key);
+    // Single Lua: HSETNX + old-value return without a TOCTOU window.
+    const s = `if redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]) == 1 then
+return nil else return redis.call('hget', KEYS[1], ARGV[1]) end`;
+    const raw = await luaEval(this.redis, s, 1, this.name, this.encodeKey(key), this.encodeValue(value));
+    return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
   }
   async putIfExists(key: K, value: V): Promise<V | null> {
     const ek = this.encodeKey(key);
@@ -197,9 +203,12 @@ if cur == ARGV[2] then redis.call('hset', KEYS[1], ARGV[1], ARGV[3]); return 1 e
   }
   async remove(key: K, value?: V): Promise<V | null | boolean> {
     if (value === undefined) {
-      const old = await this.get(key);
-      await this.redis.hdel(this.name, this.encodeKey(key));
-      return old;
+      // Single Lua (was GET+HDEL): atomic old-value return under concurrency.
+      const s = `local old = redis.call('hget', KEYS[1], ARGV[1])
+redis.call('hdel', KEYS[1], ARGV[1])
+return old`;
+      const raw = await luaEval(this.redis, s, 1, this.name, this.encodeKey(key));
+      return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
     }
     const s = `local cur = redis.call('hget', KEYS[1], ARGV[1])
 if cur == ARGV[2] then return redis.call('hdel', KEYS[1], ARGV[1]) else return 0 end`;

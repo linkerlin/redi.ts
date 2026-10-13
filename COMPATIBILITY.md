@@ -62,7 +62,7 @@
 | RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2` 无 label；unpack 与 n/t 无关故双向兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节） | WIRE_OK + live phase 3 |
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128 | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
-| RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`) OVERALL/PER_CLIENT | WIRE_OK + live shared-window ✅ |
+| RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads) | WIRE_OK + live shared-window ✅ |
 | RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
 | RSortedSet / RTransaction / RRemoteService / RExecutorService / LiveObject / reactive | — | REFUSE_AS_FAKE |

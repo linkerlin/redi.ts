@@ -31,7 +31,7 @@
 
 **`RStream`**：缺组运维（`removeGroup/createConsumer/removeConsumer/updateGroupMessageId`）、pending 全套（`claim/autoClaim/fastClaim/pendingRange/listPending/getPendingInfo`）、`readGroup` 完整版（`NOACK/claim`）、`range/rangeReversed` 精确版、`add` 完整版（`MINID`/`=`严格/`LIMIT`/`NOMKSTREAM`/幂等）、`ack(StreamAckArgs)` + `nack`、`getInfo/listGroups/listConsumers`、`addListener`。
 
-**`RMap`**：`put` 是 GET+HSET 两次 RTT（应改为单 Lua，零 wire 风险）；缺 `keySet/values/entrySet` 惰性批视图（只有全量快照，大 key OOM）、`getLockByKey` 六件套、`putAllWithTTL`（在 `RMapCache.putAll`）、`randomKeys/randomEntries`、`valueSize`、`replace(K,old,new)`（TS 叫 `replaceWithCheck`，须改名）、`remove` 联合返回须收窄。
+**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；缺 `keySet/values/entrySet` 惰性批视图（只有全量快照，大 key OOM）、`getLockByKey` 六件套、`putAllWithTTL`（在 `RMapCache.putAll`）、`randomKeys/randomEntries`、`valueSize`、`replace(K,old,new)`（TS 叫 `replaceWithCheck`，须改名）、`remove` 联合返回须收窄。
 
 **`RMapCache`**：缺 `expireEntry/expireEntries` 族、`getWithTTLOnly`（TS `get` 必刷新，无等价）、`remainTimeToLive`、`compute*`、`RLeasedMap` 全族、`putAll`（TTL 批量）、`getMaxSize`、事件订阅（只发不收）。
 
