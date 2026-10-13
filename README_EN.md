@@ -78,7 +78,7 @@ wrappers, so bare JSON from redi.py and raw strings also read fine.
 ## Tests
 
 ```sh
-npm test      # 99 tests green: wire vectors, mock functional,
+npm test      # 102 tests green: wire vectors, mock functional,
               # live python interop, and live bidirectional suites vs Redisson 4.6.1
 npm run build # tsc
 ```

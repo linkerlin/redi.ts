@@ -71,7 +71,7 @@
 
 ## Verification
 
-- `npm test`: 99 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 102 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
