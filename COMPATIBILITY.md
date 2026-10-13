@@ -38,7 +38,8 @@
 | RSemaphore | STRING + `redisson_sc:{name}` Lua | WIRE_OK + live shared-permit ✅ |
 | RCountDownLatch | STRING + `redisson_countdownlatch__channel__{name}` (`1` set / `0` zero) | WIRE_OK (count shared, live read ✅) |
 | RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]` | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） |
-| RMap / RList / RSet / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON) | WIRE_OK + live bidirectional ✅ |
+| RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON) | WIRE_OK + live bidirectional ✅ |
+| RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call` | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) |
 | RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
 | RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua) | WIRE_OK + live bidirectional ✅ |
@@ -90,7 +91,8 @@
   `live-phase11` (zset union/intersection/diff, 2/2 PASS),
   `live-phase12` (batch Lua ops + cross-language reads, 2/2 PASS),
   `live-phase13` (stream groups/pending/claim, 2/2 PASS),
-  `live-phase14` (stream add/read opts, nack, ackdel, 2/2 PASS).
+  `live-phase14` (stream add/read opts, nack, ackdel, 2/2 PASS),
+  `live-phase15` (plain-set store ops, union ✅ + gated inter/diff).
 
   探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
   （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。

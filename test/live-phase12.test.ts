@@ -48,15 +48,18 @@ describe('live interop phase 12: batch lua ops + cross-language reads', () => {
     if (!hasRedis) return;
     const r = Redisson.create({ address: REDIS_URL });
     const name = `${NS}bmap`;
+    const aname = `${NS}batomic`;
     try {
-      await cleanExact(r, name);
+      // NOTE: every key this test touches must be cleaned — CAS asserts on
+      // exact values, so cross-run residue flips results (caught in full15).
+      await cleanExact(r, name, aname);
       const batch = r.createBatch();
       const m = batch.getMap<string, number>(name);
       const p1 = m.put('k', 1);
       const p2 = m.put('k', 2);
       const pa = m.putIfAbsent('k', 99);
       const rm = m.remove('k');
-      const a = batch.getAtomicLong(`${NS}batomic`);
+      const a = batch.getAtomicLong(aname);
       const cas = a.compareAndSet(0, 5);
       await batch.execute();
       expect(await p1).toBeNull();

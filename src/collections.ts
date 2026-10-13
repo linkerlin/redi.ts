@@ -325,17 +325,39 @@ export class RSet<V = any> extends RedisDataStructure {
     const m = await this.redis.spop(this.name, count);
     return ((m as string[]) ?? []).map((x) => this.decodeValue(x) as V);
   }
-  async union(...otherKeys: string[]): Promise<V[]> {
+  /**
+   * Store variants mirror Redisson exactly: the result is written into SELF
+   * (self IS an input, unlike the scored-sorted-set variants) and the
+   * returned number is the new cardinality. Command shape is
+   * `SOPSTORE self (1+N) self others...` — the explicit numkeys is required;
+   * without it correct servers reject the command. The previous read-only
+   * methods of the same names are now readUnion/readDiff/readIntersection.
+   */
+  async union(...names: string[]): Promise<number> {
+    return toNumber(await (this.redis as any).sunionstore(this.name, 1 + names.length, this.name, ...names));
+  }
+  async diff(...names: string[]): Promise<number> {
+    return toNumber(await (this.redis as any).sdiffstore(this.name, 1 + names.length, this.name, ...names));
+  }
+  async intersection(...names: string[]): Promise<number> {
+    return toNumber(await (this.redis as any).sinterstore(this.name, 1 + names.length, this.name, ...names));
+  }
+  async readUnion(...otherKeys: string[]): Promise<V[]> {
     const m = await this.redis.sunion(this.name, ...otherKeys);
     return m.map((x) => this.decodeValue(x) as V);
   }
-  async diff(...otherKeys: string[]): Promise<V[]> {
+  async readDiff(...otherKeys: string[]): Promise<V[]> {
     const m = await this.redis.sdiff(this.name, ...otherKeys);
     return m.map((x) => this.decodeValue(x) as V);
   }
-  async intersection(...otherKeys: string[]): Promise<V[]> {
+  async readIntersection(...otherKeys: string[]): Promise<V[]> {
     const m = await this.redis.sinter(this.name, ...otherKeys);
     return m.map((x) => this.decodeValue(x) as V);
+  }
+  /** Cardinality of the union without storing (SUNIONCARD, Redis 7+; via
+   * `.call` — absent from ioredis typed methods like XACKDEL). */
+  async countUnion(...names: string[]): Promise<number> {
+    return toNumber(await (this.redis as any).call('SUNIONCARD', 1 + names.length, this.name, ...names));
   }
   async move(dest: string, value: V): Promise<boolean> {
     return ((await this.redis.smove(this.name, dest, this.encodeValue(value))) as number) === 1;

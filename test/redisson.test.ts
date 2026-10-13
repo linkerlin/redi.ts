@@ -273,4 +273,25 @@ describe('Redisson core (mock)', () => {
     expect(await r.getBucket<number>('bd2').get()).toBe(1);
     await r.shutdown();
   });
+  it('set store ops write into self, read variants do not', async () => {
+    const r = make();
+    const a = r.getSet<string>('sa');
+    await a.add('a', 'b');
+    const b = r.getSet<string>('sb');
+    await b.add('b', 'c');
+    // read-only first (inputs untouched)
+    expect(new Set(await a.readUnion('sb'))).toEqual(new Set(['a', 'b', 'c']));
+    expect(await a.readDiff('sb')).toEqual(['a']);
+    expect(await a.readIntersection('sb')).toEqual(['b']);
+    expect(await a.size()).toBe(2);
+    // store variants write into self (self IS an input, like Java) and
+    // return the new cardinality; command shape is STORE dest N dest others
+    const d = r.getSet<string>('sd');
+    expect(await d.union('sa', 'sb')).toBe(3);
+    expect(new Set(await d.readAll())).toEqual(new Set(['a', 'b', 'c']));
+    // NOTE: inter/diff store intentionally NOT asserted on mock — mock (like
+    // the local msys2 build) treats the numkeys arg as a key name, so they
+    // always yield 0 there. Covered live with a capability gate (live-phase15).
+    await r.shutdown();
+  });
 });

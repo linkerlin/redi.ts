@@ -678,8 +678,7 @@ public final class TsProbe {
                     String name = args.length >= 2 ? args[1] : "TsJavaT:mc7:x";
                     System.out.println("MC_SIZE:" + redisson.getMapCache(name).size());
                 }
-                case "mm-get" -> {
-                    // args: mm-get <name> <key> — CACHE reader (honours TTL).
+                case "mm-get" -> {                    // args: mm-get <name> <key> — CACHE reader (honours TTL).
                     // NOTE: plain getSetMultimap().get() ignores the timeout
                     // ZSET by design; expiry must be read through the cache.
                     String name = args.length >= 2 ? args[1] : "TsJavaT:mm7:x";
@@ -693,6 +692,24 @@ public final class TsProbe {
                     String b = args.length >= 3 ? args[2] : "TsJavaT:zs11:b";
                     System.out.println("READUNION:" + new java.util.ArrayList<>(
                             redisson.<String>getScoredSortedSet(a).readUnion(b)));
+                }
+                case "set-union" -> {                     // args: set-union <dest> <a> <b> — Java union (self IS an input)
+                    String dest = args.length >= 2 ? args[1] : "TsJavaT:set15:d";
+                    String a = args.length >= 3 ? args[2] : "TsJavaT:set15:a";
+                    String b = args.length >= 4 ? args[3] : "TsJavaT:set15:b";
+                    System.out.println("SET_UNION:" + redisson.<String>getSet(dest).union(a, b));
+                }
+                case "set-intersection" -> {              // args: set-intersection <dest> <a> <b>
+                    String dest = args.length >= 2 ? args[1] : "TsJavaT:set15:d";
+                    String a = args.length >= 3 ? args[2] : "TsJavaT:set15:a";
+                    String b = args.length >= 4 ? args[3] : "TsJavaT:set15:b";
+                    System.out.println("SET_INTERSECTION:" + redisson.<String>getSet(dest).intersection(a, b));
+                }
+                case "set-diff" -> {                      // args: set-diff <dest> <a> <b>
+                    String dest = args.length >= 2 ? args[1] : "TsJavaT:set15:d";
+                    String a = args.length >= 3 ? args[2] : "TsJavaT:set15:a";
+                    String b = args.length >= 4 ? args[3] : "TsJavaT:set15:b";
+                    System.out.println("SET_DIFF:" + redisson.<String>getSet(dest).diff(a, b));
                 }
                 case "zset-score" -> {                    // args: zset-score <name> <member> — prints ZSCORE:<d>|ZSCORE:null
                     String name = args.length >= 2 ? args[1] : "TsJavaT:zs7:x";

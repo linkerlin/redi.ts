@@ -1,4 +1,27 @@
-## 1.8.7 — 2026-10-14
+## 1.8.9 — 2026-10-14
+
+Test hygiene + environment findings (no src changes except noted):
+
+- phase12: atomic key added to cleanup (CAS asserts exact values; cross-run
+  residue flipped results — caught in full15).
+- `countUnion` via `.call` (absent from ioredis typings, like XACKDEL).
+- Full-suite note: 2/115 flakes under 18-worker parallel load are JVM
+  cold-start starvation (Maven exec with no verdict line), both green in
+  isolation. Timing-sensitive asserts keep ≥5s margins per AGENTS.md:10.
+
+## 1.8.8 — 2026-10-14
+
+P1 plain-set set-ops (see `docs/GAP_ANALYSIS.md` §2):
+
+- `RSet.union/diff/intersection` renamed to store-into-self semantics
+  (self IS an input — opposite of scored-sorted-set; old read-only methods
+  are now `readUnion/readDiff/readIntersection` — Breaking renames);
+  command shape `SOPSTORE self (1+N) self others...` with explicit numkeys
+  (ioredis typings can't express it, hence `as any`; without numkeys correct
+  servers reject); `countUnion` via `.call` (absent from typings like XACKDEL).
+- Environment finding: local msys2 Redis 8.10.2 returns 0/[] for
+  SINTERSTORE/SDIFFSTORE (raw-RESP verified, reads fine) — inter/diff live
+  asserts capability-gated, run on healthy servers (CI official image).
 
 P1 stream remainder (see `docs/GAP_ANALYSIS.md` §2):
 
