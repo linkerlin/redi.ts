@@ -275,11 +275,69 @@ export interface StreamInfo {
   lastEntry: StreamEntry | null;
 }
 
+export interface StreamEntry<V = any> {
+  id: string;
+  fields: Record<string, V>;
+}
+
+/** Trim strategy for XADD (mirrors StreamTrimArgs subset). */
+export interface StreamTrimOptions {
+  maxLen?: number;
+  minId?: string;
+  /** default false → '~' marker (Redisson default non-strict) */
+  strict?: boolean;
+  limit?: number;
+}
+
+/** Full XADD options (mirrors StreamAddArgs subset). */
+export interface StreamAddOptions extends StreamTrimOptions {
+  id?: string;
+  noMakeStream?: boolean;
+  idempotentProducerId?: string;
+  idempotentId?: string;
+}
+
+/** Full XREADGROUP options (mirrors StreamReadGroupArgs subset). */
+export interface StreamReadGroupOptions {
+  count?: number;
+  blockMs?: number;
+  noAck?: boolean;
+  /** min-idle-time CLAIM takeover, ms */
+  claimIdleMs?: number;
+}
+
+export type StreamNackMode = 'SILENT' | 'FAIL' | 'FATAL';
+export type StreamAckRefPolicy = 'KEEPREF' | 'DELREF' | 'ACKED';
+
 export class RStream extends RedisDataStructure {
   async add(fields: Record<string, any>, id = '*', maxLen?: number): Promise<string> {
+    // Legacy path always creates the stream, so the id is never null.
+    return (await this.addWithOptions(fields, { id, ...(maxLen !== undefined ? { maxLen } : {}) })) as string;
+  }
+  async addWithOptions(fields: Record<string, any>, opts: StreamAddOptions = {}): Promise<string | null> {
+    // Order mirrors RedissonStream.addCustomAsync exactly: NOMKSTREAM,
+    // IDMP/IDMPAUTO, MAXLEN [~], MINID [~], LIMIT, id, fields.
+    const args: (string | number)[] = [this.name];
+    if (opts.noMakeStream) args.push('NOMKSTREAM');
+    if (opts.idempotentProducerId !== undefined && opts.idempotentId !== undefined) {
+      args.push('IDMP', opts.idempotentProducerId, opts.idempotentId);
+    } else if (opts.idempotentProducerId !== undefined) {
+      args.push('IDMPAUTO', opts.idempotentProducerId);
+    }
+    if (opts.maxLen !== undefined && opts.maxLen > 0) {
+      args.push('MAXLEN');
+      if (!opts.strict) args.push('~');
+      args.push(opts.maxLen);
+    }
+    if (opts.minId !== undefined) {
+      args.push('MINID');
+      if (!opts.strict) args.push('~');
+      args.push(opts.minId);
+    }
+    if (opts.limit !== undefined && opts.limit > 0) args.push('LIMIT', opts.limit);
     const flat: string[] = [];
     for (const [k, v] of Object.entries(fields)) flat.push(this.encodeKey(k), this.encodeValue(v));
-    const args: (string | number)[] = maxLen !== undefined ? [this.name, 'MAXLEN', '~', maxLen, id, ...flat] : [this.name, id, ...flat];
+    args.push(opts.id ?? '*', ...flat);
     return (this.redis as any).xadd(...args);
   }
   async read(count = 10, lastId = '0'): Promise<StreamEntry[]> {
@@ -332,20 +390,53 @@ export class RStream extends RedisDataStructure {
     await (this.redis as any).xgroup('CREATE', this.name, group, lastId, 'MKSTREAM');
   }
   async readGroup(group: string, consumer: string, count = 10, blockMs = -1): Promise<StreamEntry[]> {
-    const args: (string | number | undefined)[] = ['GROUP', group, consumer, 'COUNT', count];
-    if (blockMs >= 0) args.push('BLOCK', blockMs);
+    return this.readGroupWith(group, consumer, { count, ...(blockMs >= 0 ? { blockMs } : {}) });
+  }
+  /**
+   * Full XREADGROUP (mirrors StreamReadGroupArgs subset): GROUP g c
+   * [COUNT n] [BLOCK ms] [CLAIM ms] [NOACK] STREAMS key >.
+   * Default read position is '>' (never delivered), like Redisson.
+   */
+  async readGroupWith(group: string, consumer: string, opts: StreamReadGroupOptions = {}): Promise<StreamEntry[]> {
+    const args: (string | number)[] = ['GROUP', group, consumer];
+    if (opts.count !== undefined && opts.count > 0) args.push('COUNT', opts.count);
+    if (opts.blockMs !== undefined && opts.blockMs >= 0) args.push('BLOCK', opts.blockMs);
+    if (opts.claimIdleMs !== undefined && opts.claimIdleMs > 0) args.push('CLAIM', opts.claimIdleMs);
+    if (opts.noAck) args.push('NOACK');
     args.push('STREAMS', this.name, '>');
-    const res: any = await (this.redis as any).xreadgroup(...args.filter((a) => a !== undefined));
+    const res: any = await (this.redis as any).xreadgroup(...args);
     if (!res) return [];
     const out: StreamEntry[] = [];
     for (const stream of res) {
-      for (const [eid, f] of stream[1] ?? []) out.push({ id: eid, fields: this.decodeFields(f) });
+      for (const [eid, f] of stream[1] ?? []) out.push({ id: String(eid), fields: this.decodeFields(f) });
     }
     return out;
   }
   async ack(group: string, ...ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
     return (this.redis as any).xack(this.name, group, ...ids);
+  }
+  /**
+   * Conditional ack-and-delete (XACKDEL, Redis 8.2+):
+   * XACKDEL key group [refpolicy] IDS n ids... Returns per-id status codes.
+   */
+  async ackWithDelete(group: string, refPolicy: StreamAckRefPolicy, ...ids: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (ids.length === 0) return out;
+    const res: any[] = (await (this.redis as any).call('XACKDEL', this.name, group, refPolicy, 'IDS', ids.length, ...ids)) ?? [];
+    ids.forEach((id, i) => out.set(id, Number(res[i] ?? -1)));
+    return out;
+  }
+  /**
+   * Requeue pending entries (XNACK, Redis 8.8+):
+   * XNACK key group mode IDS n ids... [RETRYCOUNT n] [FORCE].
+   */
+  async nack(group: string, mode: StreamNackMode, ids: string[], retryCount?: number, force?: boolean): Promise<number> {
+    if (ids.length === 0) return 0;
+    const args: (string | number)[] = [this.name, group, mode, 'IDS', ids.length, ...ids];
+    if (retryCount !== undefined) args.push('RETRYCOUNT', retryCount);
+    if (force) args.push('FORCE');
+    return toNumber(await (this.redis as any).xnack(...args));
   }
   async removeGroup(group: string): Promise<boolean> {
     return toNumber(await (this.redis as any).xgroup('DESTROY', this.name, group)) === 1;

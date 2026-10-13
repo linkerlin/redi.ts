@@ -1,3 +1,14 @@
+## 1.8.7 — 2026-10-14
+
+P1 stream remainder (see `docs/GAP_ANALYSIS.md` §2):
+
+- `RStream.addWithOptions/readGroupWith/nack/ackWithDelete` (arg order verbatim
+  vs RedissonStream: NOMKSTREAM, IDMP/IDMPAUTO, MAXLEN/MINID [~], LIMIT, id;
+  GROUP g c [COUNT] [BLOCK] [CLAIM] [NOACK]; XNACK/XACKDEL; live phase 14
+  2/2 PASS incl. XNACK-delivery-count semantics + `.call` fallback for
+  untyped ioredis methods).
+- Remaining: `fastClaim/fastAutoClaim` variants, multi-stream reads, listeners.
+
 ## 1.8.6 — 2026-10-13
 
 P1 stream batch (see `docs/GAP_ANALYSIS.md` §2):

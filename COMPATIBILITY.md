@@ -53,7 +53,7 @@
 | RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试 (Java binary protocol not ported — disable near-cache for mixed deploys) | PARTIAL |
 | RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件） | WIRE_OK / NATIVE_OK + live phase 4/5（Topic/Sharded/Pattern 双向 ✅） |
 | RReliableTopic | STREAM field **`m`** + per-subscriber group + `{name}:timeout` | WIRE_OK + live phase 3 (双向投递） |
-| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list | WIRE_OK + live bidirectional ✅ + live phase 13 (groups/pending/claim ✅) |
+| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel | WIRE_OK + live bidirectional ✅ + live phase 13/14 ✅ |
 | RDelayedQueue | ZSET `redisson_delay_queue_timeout:{name}` + LIST `redisson_delay_queue:{name}` (`Bc0Lc0`) + channel（offer id 走 Buffer 保真；消费侧迁移须由 DelayedQueue 包装类调度，直接 poll 目标队列不会迁移） | WIRE_OK + live phase 3 (双向迁移） |
 | RRingBuffer | LIST + `redisson_rb:{name}` capacity | WIRE_OK |
 | RGeo | GEOADD/SEARCH, members JSON-encoded | WIRE_OK + live bidirectional ✅ |
@@ -71,7 +71,7 @@
 
 ## Verification
 
-- `npm test`: 108 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 110 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -89,7 +89,8 @@
   `live-phase10` (bdeque/batch/bucket-ttl/mc-combo/sc-idle/destroy, 6/6 PASS),
   `live-phase11` (zset union/intersection/diff, 2/2 PASS),
   `live-phase12` (batch Lua ops + cross-language reads, 2/2 PASS),
-  `live-phase13` (stream groups/pending/claim, 2/2 PASS).
+  `live-phase13` (stream groups/pending/claim, 2/2 PASS),
+  `live-phase14` (stream add/read opts, nack, ackdel, 2/2 PASS).
 
   探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
   （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。
