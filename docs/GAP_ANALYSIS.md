@@ -29,7 +29,7 @@
 
 **`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；仍缺 `entryRange/valueRange` 反向/分页全族、`addIfExists/Less/Greater`、`addScore` 系列、`first/lastScore`、`random`、`pollFirst/Last` 阻塞版及 `FromAny`（`BZMPOP`）、`ZRANGESTORE`、迭代器；`rank` 回 `-1` 而 Java 回 `null`（移植判空必改）；`rangeByScore` 调已废弃 `ZRANGEBYSCORE`。
 
-**`RStream`**：缺组运维（`removeGroup/createConsumer/removeConsumer/updateGroupMessageId`）、pending 全套（`claim/autoClaim/fastClaim/pendingRange/listPending/getPendingInfo`）、`readGroup` 完整版（`NOACK/claim`）、`range/rangeReversed` 精确版、`add` 完整版（`MINID`/`=`严格/`LIMIT`/`NOMKSTREAM`/幂等）、`ack(StreamAckArgs)` + `nack`、`getInfo/listGroups/listConsumers`、`addListener`。
+**`RStream`**：组运维 ✅ (1.8.6：`removeGroup/createConsumer/removeConsumer/updateGroupMessageId`)、pending 全套 ✅ (`getPendingInfo/listPending/pendingRange`)、`claim/autoClaim` ✅、`getInfo/listGroups/listConsumers` ✅；仍缺 `readGroup` 完整版（`NOACK/claim`）、`range/rangeReversed` 精确版、`add` 完整版（`MINID`/`=`严格/`LIMIT`/`NOMKSTREAM`/幂等）、`ack(StreamAckArgs)` + `nack`、`addListener`。
 
 **`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；缺 `keySet/values/entrySet` 惰性批视图（只有全量快照，大 key OOM）、`getLockByKey` 六件套、`putAllWithTTL`（在 `RMapCache.putAll`）、`randomKeys/randomEntries`、`valueSize`、`replace(K,old,new)`（TS 叫 `replaceWithCheck`，须改名）、`remove` 联合返回须收窄。
 
@@ -84,5 +84,5 @@
 ## §5 路线图
 
 - P0 剩余：RateLimiter 配置重读（`getConfig` 已是 fresh-read；acquire 路径沿用实例缓存，与 Java 实例字段行为大体一致，待决策是否加 refresh）。
-- P1 按文件：stream claim/pending/info；`RMap.put` 原子 Lua ✅ (1.8.3)；zset 交并差 ✅ (1.8.4)；`RBatch` 决策（补类型或文档锁死）。
+- P1 按文件：stream claim/pending/info ✅ (1.8.6)；`RMap.put` 原子 Lua ✅ (1.8.3)；zset 交并差 ✅ (1.8.4)；`RBatch` 决策 ✅ (1.8.5)。
 - 不做：§4。

@@ -238,6 +238,43 @@ export interface StreamEntry<V = any> {
   fields: Record<string, V>;
 }
 
+export interface StreamPendingEntry {
+  id: string;
+  consumer: string;
+  idleMs: number;
+  deliveredCount: number;
+}
+
+export interface StreamPendingInfo {
+  count: number;
+  minId: string | null;
+  maxId: string | null;
+  consumers: Record<string, number>;
+}
+
+export interface StreamGroupInfo {
+  name: string;
+  lastDeliveredId: string | null;
+  entriesRead: number | null;
+  lag: number | null;
+  pelCount: number | null;
+}
+
+export interface StreamConsumerInfo {
+  name: string;
+  pending: number | null;
+  idleMs: number | null;
+  inactiveMs: number | null;
+}
+
+export interface StreamInfo {
+  length: number | null;
+  groups: number | null;
+  lastGeneratedId: string | null;
+  firstEntry: StreamEntry | null;
+  lastEntry: StreamEntry | null;
+}
+
 export class RStream extends RedisDataStructure {
   async add(fields: Record<string, any>, id = '*', maxLen?: number): Promise<string> {
     const flat: string[] = [];
@@ -309,6 +346,117 @@ export class RStream extends RedisDataStructure {
   async ack(group: string, ...ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
     return (this.redis as any).xack(this.name, group, ...ids);
+  }
+  async removeGroup(group: string): Promise<boolean> {
+    return toNumber(await (this.redis as any).xgroup('DESTROY', this.name, group)) === 1;
+  }
+  async createConsumer(group: string, consumer: string): Promise<boolean> {
+    return toNumber(await (this.redis as any).xgroup('CREATECONSUMER', this.name, group, consumer)) === 1;
+  }
+  async removeConsumer(group: string, consumer: string): Promise<number> {
+    return toNumber(await (this.redis as any).xgroup('DELCONSUMER', this.name, group, consumer));
+  }
+  async updateGroupMessageId(group: string, id: string): Promise<void> {
+    await (this.redis as any).xgroup('SETID', this.name, group, id);
+  }
+  /** XPENDING summary: [count, minId, maxId, [[consumer, count], ...]]. */
+  async getPendingInfo(group: string): Promise<StreamPendingInfo> {
+    const r: any = await (this.redis as any).xpending(this.name, group);
+    if (!r) return { count: 0, minId: null, maxId: null, consumers: {} };
+    const consumers: Record<string, number> = {};
+    for (const [c, n] of r[3] ?? []) consumers[String(c)] = Number(n);
+    return {
+      count: Number(r[0] ?? 0),
+      minId: r[1] == null ? null : String(r[1]),
+      maxId: r[2] == null ? null : String(r[2]),
+      consumers,
+    };
+  }
+  /** XPENDING range (detailed per-entry rows). */
+  async listPending(group: string, start = '-', end = '+', count = 10, consumer?: string): Promise<StreamPendingEntry[]> {
+    const args: (string | number)[] = [this.name, group, start, end, count];
+    if (consumer !== undefined) args.push(consumer);
+    const rows: any[] = (await (this.redis as any).xpending(...args)) ?? [];
+    return rows.map(([id, c, idle, delivered]: any[]) => ({
+      id: String(id),
+      consumer: String(c),
+      idleMs: Number(idle),
+      deliveredCount: Number(delivered),
+    }));
+  }
+  /** XPENDING range + fetch each entry body (mirrors pendingRange). */
+  async pendingRange(group: string, start = '-', end = '+', count = 10): Promise<StreamEntry[]> {
+    const rows = await this.listPending(group, start, end, count);
+    const out: StreamEntry[] = [];
+    for (const row of rows) {
+      const got: any = await (this.redis as any).xrange(this.name, row.id, row.id);
+      for (const [eid, f] of got ?? []) out.push({ id: String(eid), fields: this.decodeFields(f) });
+    }
+    return out;
+  }
+  /** XCLAIM: take ownership of idle pending entries. */
+  async claim(group: string, consumer: string, minIdleMs: number, ...ids: string[]): Promise<StreamEntry[]> {
+    if (ids.length === 0) return [];
+    const res: any = await (this.redis as any).xclaim(this.name, group, consumer, minIdleMs, ...ids);
+    return (res ?? []).map(([eid, f]: [string, string[]]) => ({ id: String(eid), fields: this.decodeFields(f) }));
+  }
+  /** XAUTOCLAIM: cursor-scan ownership transfer. Returns next cursor + entries. */
+  async autoClaim(group: string, consumer: string, minIdleMs: number, startId = '0-0', count = 10): Promise<{ nextId: string; entries: StreamEntry[] }> {
+    const res: any = await (this.redis as any).xautoclaim(this.name, group, consumer, minIdleMs, startId, 'COUNT', count);
+    if (!res) return { nextId: '0-0', entries: [] };
+    const [cursor, rows] = res;
+    return {
+      nextId: String(cursor),
+      entries: ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })),
+    };
+  }
+  async getInfo(): Promise<StreamInfo> {
+    const flat: any[] = (await (this.redis as any).xinfo('STREAM', this.name)) ?? [];
+    const m = new Map<string, any>();
+    for (let i = 0; i + 1 < flat.length; i += 2) m.set(String(flat[i]), flat[i + 1]);
+    const num = (k: string) => (m.has(k) && m.get(k) !== null ? Number(m.get(k)) : null);
+    const entry = (k: string): StreamEntry | null => {
+      const e = m.get(k);
+      if (!e) return null;
+      return { id: String(e[0]), fields: this.decodeFields(e[1]) };
+    };
+    return {
+      length: num('length'),
+      groups: num('groups'),
+      lastGeneratedId: m.has('last-generated-id') ? String(m.get('last-generated-id')) : null,
+      firstEntry: entry('first-entry'),
+      lastEntry: entry('last-entry'),
+    };
+  }
+  async listGroups(): Promise<StreamGroupInfo[]> {
+    const groups: any[] = (await (this.redis as any).xinfo('GROUPS', this.name)) ?? [];
+    return groups.map((g: any[]) => {
+      const m = new Map<string, any>();
+      for (let i = 0; i + 1 < g.length; i += 2) m.set(String(g[i]), g[i + 1]);
+      const num = (k: string) => (m.has(k) && m.get(k) !== null ? Number(m.get(k)) : null);
+      const str = (k: string) => (m.has(k) && m.get(k) !== null ? String(m.get(k)) : null);
+      return {
+        name: String(m.get('name')),
+        lastDeliveredId: str('last-delivered-id'),
+        entriesRead: num('entries-read'),
+        lag: num('lag'),
+        pelCount: num('pel-count'),
+      };
+    });
+  }
+  async listConsumers(group: string): Promise<StreamConsumerInfo[]> {
+    const consumers: any[] = (await (this.redis as any).xinfo('CONSUMERS', this.name, group)) ?? [];
+    return consumers.map((c: any[]) => {
+      const m = new Map<string, any>();
+      for (let i = 0; i + 1 < c.length; i += 2) m.set(String(c[i]), c[i + 1]);
+      const num = (k: string) => (m.has(k) && m.get(k) !== null ? Number(m.get(k)) : null);
+      return {
+        name: String(m.get('name')),
+        pending: num('pending'),
+        idleMs: num('idle'),
+        inactiveMs: num('inactive'),
+      };
+    });
   }
 }
 

@@ -1,4 +1,12 @@
-## 1.8.5 — 2026-10-13
+## 1.8.6 — 2026-10-13
+
+P1 stream batch (see `docs/GAP_ANALYSIS.md` §2):
+
+- `RStream` 组运维 + pending/claim 全套：`removeGroup/createConsumer/`
+  `removeConsumer/updateGroupMessageId/getPendingInfo/listPending/`
+  `pendingRange/claim/autoClaim/getInfo/listGroups/listConsumers`
+  （live phase 13 双向 2/2 PASS：SETID 回拨重投、跨语言 claim 交接、
+  autoClaim 整组接管）。剩余：`readGroup` 完整版、`add` 精确裁剪、`nack`。
 
 RBatch decision closed (see `docs/GAP_ANALYSIS.md` §2): typed facades over
 deferred promises instead of doc-lock — `BatchBucket/Map/List/Set/Queue/

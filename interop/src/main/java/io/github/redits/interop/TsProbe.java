@@ -723,10 +723,35 @@ public final class TsProbe {
                             .add(org.redisson.api.stream.StreamAddArgs.entries(f));
                     System.out.println("STREAM_ADDED:" + id);
                 }
-                case "stream-size" -> {
-                    // args: stream-size <stream> — prints STREAM_SIZE:<n>
+                case "stream-size" -> {                    // args: stream-size <stream> — prints STREAM_SIZE:<n>
                     String stream = args.length >= 2 ? args[1] : "TsJavaT:st7:x";
                     System.out.println("STREAM_SIZE:" + redisson.getStream(stream).size());
+                }
+                case "stream-pending" -> {                // args: stream-pending <stream> <group> — prints PENDING:<n>
+                    String stream = args.length >= 2 ? args[1] : "TsJavaT:st13:x";
+                    String group = args.length >= 3 ? args[2] : "g1";
+                    int n = redisson.<String, String>getStream(stream).listPending(
+                            group,
+                            org.redisson.api.stream.StreamMessageId.MIN,
+                            org.redisson.api.stream.StreamMessageId.MAX, 100).size();
+                    System.out.println("PENDING:" + n);
+                }
+                case "stream-groups" -> {                 // args: stream-groups <stream> — prints GROUPS:[g1, g2]
+                    String stream = args.length >= 2 ? args[1] : "TsJavaT:st13:x";
+                    var names = new java.util.ArrayList<String>();
+                    for (var g : redisson.getStream(stream).listGroups()) names.add(g.getName());
+                    System.out.println("GROUPS:" + names);
+                }
+                case "stream-claim" -> {                  // args: stream-claim <stream> <group> <consumer> <id>
+                    String stream = args.length >= 2 ? args[1] : "TsJavaT:st13:x";
+                    String group = args.length >= 3 ? args[2] : "g1";
+                    String consumer = args.length >= 4 ? args[3] : "rescuer";
+                    String[] parts = (args.length >= 5 ? args[4] : "0-0").split("-");
+                    var claimed = redisson.<String, String>getStream(stream).claim(
+                            group, consumer, 0, java.util.concurrent.TimeUnit.MILLISECONDS,
+                            new org.redisson.api.stream.StreamMessageId(
+                                    Long.parseLong(parts[0]), Long.parseLong(parts[1])));
+                    System.out.println("CLAIMED:" + claimed.size());
                 }
                 case "bbq-take" -> {                    // args: bbq-take <queue> <timeoutMs> <resultKey> — bounded blocking take
                     String q = args.length >= 2 ? args[1] : "TsJavaT:bbq7:x";
