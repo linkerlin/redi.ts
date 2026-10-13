@@ -1,3 +1,11 @@
+## 1.8.5 — 2026-10-13
+
+RBatch decision closed (see `docs/GAP_ANALYSIS.md` §2): typed facades over
+deferred promises instead of doc-lock — `BatchBucket/Map/List/Set/Queue/
+AtomicLong/ScoredSortedSet` (writes queue, reads resolve on `execute()`,
+RFuture semantics incl. never-await-pre-execute, `discard()` rejects);
+Lua-backed ops covered live (mock pipelines lack `eval`).
+
 ## 1.8.4 — 2026-10-13
 
 P1 biggest gap closed (see `docs/GAP_ANALYSIS.md` §2):

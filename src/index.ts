@@ -8,6 +8,7 @@ export * from './caches';
 export * from './messaging';
 export * from './probabilistic';
 export * from './infra';
+export * from './batch';
 export * from './redisson';
 // Back-compat: historical flat imports
 export { RBucket as RBucketAlias } from './collections';

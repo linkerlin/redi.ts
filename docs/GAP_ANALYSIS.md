@@ -71,7 +71,7 @@
 
 **`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；无 `delete()` override 致容量 key 泄漏。
 
-**`RBatch`**：类型覆盖为 0（Java ~35 个 `getXxxAsync`），读回占位非即时值。
+**`RBatch`**：类型覆盖已补常用 7 类 ✅ (1.8.5：`BatchBucket/Map/List/Set/Queue/AtomicLong/ScoredSortedSet`，写排队、读在 `execute()` 后 resolve，对齐 RFuture；Lua 版 ops 走 live 测，mock pipeline 无 `eval`)；读回占位非即时值；pub/sub 不可进 batch（`duplicate()` 真实连接）。
 
 ## §3 P2（统一三刀，见报告正文）
 

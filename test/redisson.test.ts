@@ -210,4 +210,67 @@ describe('Redisson core (mock)', () => {
     expect(() => r.getSortedSet('x')).toThrow();
     expect(() => r.createTransaction()).toThrow();
   });
+  it('batch typed facades queue writes, reads resolve on execute', async () => {
+    const r = make();
+    const batch = r.createBatch();
+    const b = batch.getBucket<{ n: number }>('bb');
+    b.set({ n: 7 });
+    const bg = b.get();
+    const m = batch.getMap<string, number>('bm');
+    const fp = m.fastPut('k', 1);
+    const mg = m.get('k');
+    const fr = m.fastRemove('k');
+    const l = batch.getList<number>('bl');
+    const la = l.add(1, 2);
+    const lg = l.get(0);
+    const lz = l.size();
+    const s = batch.getSet<number>('bs');
+    const sa = s.add(5);
+    const sc = s.contains(5);
+    const q = batch.getQueue<number>('bq');
+    const qo = q.offer(9);
+    const qp = q.poll();
+    const a = batch.getAtomicLong('ba');
+    a.set(10);
+    const ai = a.incrementAndGet();
+    const ag = a.get();
+    const z = batch.getScoredSortedSet<number>('bz');
+    const za = z.add(2, 20);
+    const zg = z.getScore(20);
+    const zr = z.rank(20);
+    await batch.execute();
+    // reads resolve with decoded values (RFuture semantics: never await pre-execute)
+    expect(await bg).toEqual({ n: 7 });
+    expect(await fp).toBe(true);
+    expect(await mg).toBe(1);
+    expect(await fr).toBe(1);
+    expect(await la).toBe(2);
+    expect(await lg).toBe(1);
+    expect(await lz).toBe(2);
+    expect(await sa).toBe(1);
+    expect(await sc).toBe(true);
+    expect(await qo).toBe(true);
+    expect(await qp).toBe(9);
+    expect(await ai).toBe(11);
+    expect(await ag).toBe(11);
+    expect(await za).toBe(true);
+    expect(await zg).toBe(2);
+    expect(await zr).toBe(0);
+    // direct reads see the same state (wire-identical to non-batch writes)
+    expect(await r.getBucket<{ n: number }>('bb').get()).toEqual({ n: 7 });
+    expect(await r.getAtomicLong('ba').get()).toBe(11);
+    await r.shutdown();
+  });
+  it('batch discard rejects pending reads', async () => {
+    const r = make();
+    const batch = r.createBatch();
+    const g = batch.getBucket<number>('bd').get();
+    await batch.discard();
+    await expect(g).rejects.toThrow(/discarded/);
+    // pipe is usable again after discard
+    batch.getBucket<number>('bd2').set(1);
+    await batch.execute();
+    expect(await r.getBucket<number>('bd2').get()).toBe(1);
+    await r.shutdown();
+  });
 });

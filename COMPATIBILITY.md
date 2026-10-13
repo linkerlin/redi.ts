@@ -63,7 +63,7 @@
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128 | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
 | RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads) | WIRE_OK + live shared-window ✅ |
-| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） |
+| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 7 typed facades, reads resolve on execute) | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
 | RSortedSet / RTransaction / RRemoteService / RExecutorService / LiveObject / reactive | — | REFUSE_AS_FAKE |
 | PRO-only (ReliableQueue/LocalCachedMapCache/ReliablePubSubTopic/BitVectorStore) | — | PRO (throw) |
@@ -71,7 +71,7 @@
 
 ## Verification
 
-- `npm test`: 104 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 106 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -86,7 +86,9 @@
   rate-update/downgrade/watchdog/zset-drain, 8/8 PASS),
   `live-phase9` (multilock-redlock/lcm-strategies/cache-paths/misc + slot
   parity + mock contention, 7/7 PASS),
-  `live-phase10` (bdeque/batch/bucket-ttl/mc-combo/sc-idle/destroy, 6/6 PASS).
+  `live-phase10` (bdeque/batch/bucket-ttl/mc-combo/sc-idle/destroy, 6/6 PASS),
+  `live-phase11` (zset union/intersection/diff, 2/2 PASS),
+  `live-phase12` (batch Lua ops + cross-language reads, 2/2 PASS).
 
   探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
   （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。

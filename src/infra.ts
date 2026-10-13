@@ -7,6 +7,7 @@ import { RedisDataStructure } from './base';
 import type { Codec } from './codec';
 import { JsonCodec } from './codec';
 import { luaEval, multimapInternalId, suffixName, toNumber } from './util';
+import { BatchAtomicLong, BatchBucket, BatchList, BatchMap, BatchQueue, BatchScoredSortedSet, BatchSet } from './batch';
 
 // -- RKeys -----------------------------------------------------------------------
 
@@ -377,8 +378,16 @@ export class RMaps {
 
 // -- RBatch (pipeline; reads return queued placeholders) ---------------------------------
 
+interface Deferred {
+  count: number;
+  decode: (raws: any[]) => unknown;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+}
+
 export class RBatch {
   private pipe: any;
+  private pending: Deferred[] = [];
   constructor(private redis: Redis) {
     this.pipe = (redis as any).pipeline?.() ?? (redis as any).multi?.();
     if (!this.pipe) throw new Error('redis client does not support pipeline');
@@ -386,12 +395,76 @@ export class RBatch {
   get pipeline(): any {
     return this.pipe;
   }
+  /**
+   * Queue commands against the pipeline. `fn` issues one or more commands;
+   * the returned promise resolves with `decode` applied to their raw results
+   * once `execute()` runs (mirrors Redisson's RFuture-per-op semantics).
+   * Command count is tracked via pipeline length, so multi-command ops
+   * (HGET+HSET etc.) map back correctly.
+   */
+  enqueue<T>(fn: (pipe: any) => void, decode: (raws: any[]) => T): Promise<T> {
+    const before: number = this.pipe.length ?? 0;
+    fn(this.pipe);
+    const after: number = this.pipe.length ?? before;
+    const count = Math.max(0, after - before);
+    return new Promise<T>((resolve, reject) => {
+      this.pending.push({ count, decode: decode as (raws: any[]) => unknown, resolve: resolve as (v: unknown) => void, reject });
+    });
+  }
   async execute(): Promise<any[]> {
-    return this.pipe.exec();
+    const pending = this.pending;
+    this.pending = [];
+    let results: [unknown, unknown][] | null = null;
+    try {
+      results = await this.pipe.exec();
+    } catch (e) {
+      for (const d of pending) d.reject(e);
+      throw e;
+    }
+    const rows: [unknown, unknown][] = results ?? [];
+    let i = 0;
+    for (const d of pending) {
+      const slice = rows.slice(i, i + d.count);
+      i += d.count;
+      try {
+        const err = slice.find(([e]) => e !== null && e !== undefined);
+        if (err) d.reject(err[0]);
+        else d.resolve(d.decode(slice.map(([, r]) => r)));
+      } catch (e) {
+        d.reject(e);
+      }
+    }
+    return rows;
   }
   async discard(): Promise<void> {
+    const pending = this.pending;
+    this.pending = [];
+    for (const d of pending) d.reject(new Error('redi: batch discarded'));
     // ioredis pipeline has no discard; reset by dropping reference
     this.pipe = (this.redis as any).pipeline();
+  }
+
+  // Typed facades (see src/batch.ts). Writes queue, reads resolve on execute().
+  getBucket<V>(name: string, codec?: Codec): BatchBucket<V> {
+    return new BatchBucket<V>(this, name, codec ?? new JsonCodec());
+  }
+  getMap<K, V>(name: string, codec?: Codec): BatchMap<K, V> {
+    return new BatchMap<K, V>(this, name, codec ?? new JsonCodec());
+  }
+  getList<V>(name: string, codec?: Codec): BatchList<V> {
+    return new BatchList<V>(this, name, codec ?? new JsonCodec());
+  }
+  getSet<V>(name: string, codec?: Codec): BatchSet<V> {
+    return new BatchSet<V>(this, name, codec ?? new JsonCodec());
+  }
+  getQueue<V>(name: string, codec?: Codec): BatchQueue<V> {
+    return new BatchQueue<V>(this, name, codec ?? new JsonCodec());
+  }
+  getAtomicLong(name: string): BatchAtomicLong {
+    return new BatchAtomicLong(this, name);
+  }
+  getScoredSortedSet<V>(name: string, codec?: Codec): BatchScoredSortedSet<V> {
+    return new BatchScoredSortedSet<V>(this, name, codec ?? new JsonCodec());
   }
 }
 
