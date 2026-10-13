@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
 import { Redisson, StringCodec, JsonCodec } from '../src';
-import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT } from '../src/locks';
+import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
+import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName } from '../src/util';
 
 const make = () => Redisson.create({ client: new RedisMock() as any });
@@ -107,6 +108,29 @@ describe('Redisson core (mock)', () => {
     expect(LOCK_ACQUIRE_SCRIPT).toContain("hexists");
     expect(LOCK_UNLOCK_SCRIPT).toContain("publish");
     expect(prefixName('redisson_lock__channel', 'lk')).toBe('redisson_lock__channel:{lk}');
+  });
+  it('backoff policies mirror LockOptions defaults', () => {
+    expect(constantBackOff().create().next()).toBe(64);
+    expect(constantBackOff(10).create().next()).toBe(10);
+    expect(() => constantBackOff(0)).toThrow();
+    const p = exponentialBackOff().create();
+    expect(p.next()).toBe(1); // initial first, jitter applies from 2nd sleep
+    for (let i = 0; i < 30; i++) p.next();
+    expect(p.next()).toBe(128); // sticky cap
+    expect(() => exponentialBackOff(0)).toThrow();
+  });
+  it('rate limiter PER_CLIENT keys never degenerate', async () => {
+    const r = make();
+    // direct construction without a client id gets a per-process tag
+    // (never the degenerate trailing-colon suffix)
+    const rl = new RRateLimiter(r.redis as any, 'pcl1');
+    await rl.setRate('PER_CLIENT', 2, 60000);
+    expect(await rl.tryAcquire(1)).toBe(true);
+    // NOTE: no braces in the MATCH pattern (glob alternation trap, AGENTS.md:9)
+    const keys = await r.redis.keys('*pcl1*');
+    expect(keys.some((k) => k.endsWith(':value:'))).toBe(false);
+    expect(keys.some((k) => /\{pcl1\}:value:[0-9a-f]+$/.test(k))).toBe(true);
+    await r.shutdown();
   });
   it('semaphore / latch / idgen / keys / script', async () => {
     const r = make();

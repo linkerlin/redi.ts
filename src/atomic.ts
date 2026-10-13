@@ -284,9 +284,10 @@ export class RIdGenerator extends RedisDataStructure {
     return suffixName(this.name, 'allocation');
   }
   async tryInit(value: number, allocationSize = 5000): Promise<boolean> {
-    const s = `local a = redis.call('setnx', KEYS[1], ARGV[1])
-local b = redis.call('setnx', KEYS[2], ARGV[2])
-if a == 1 and b == 1 then return 1 else return 0 end`;
+    // Bug-compatible with Redisson: only the SECOND setnx is returned.
+    // (K1-exists + K2-missing still reports true; do not "fix" this.)
+    const s = `redis.call('setnx', KEYS[1], ARGV[1])
+return redis.call('setnx', KEYS[2], ARGV[2])`;
     const r = await luaEval(this.redis, s, 2, this.name, this.allocKey(), String(value), String(allocationSize));
     if (toNumber(r) === 1) {
       this.allocSize = allocationSize;

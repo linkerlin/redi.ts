@@ -266,10 +266,10 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
       await cleanKeys(r, name, `{${name}}:timeout`);
       const pes = r.getPermitExpirableSemaphore(name);
       expect(await pes.trySetPermits(1)).toBe(true);
-      const id = await pes.tryAcquire(30000);
-      expect(id).not.toBeNull();
+      const ids = await pes.tryAcquire(30000);
+      expect(ids).not.toBeNull();
       expect(await probe(`pes-available ${name}`)).toBe('PES_AVAILABLE:0');
-      expect(await pes.release(id as string)).toBe(true);
+      expect(await pes.release(ids![0])).toBe(true);
       expect(await probe(`pes-available ${name}`)).toBe('PES_AVAILABLE:1');
     } finally {
       await r.shutdown();

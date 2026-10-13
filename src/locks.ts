@@ -593,23 +593,75 @@ export class RLock extends RedisDataStructure {
 // RSpinLock — same wire, 10ms spin, no pub/sub
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// BackOff (mirrors org.redisson.api.LockOptions): retry sleep policies for
+// RSpinLock. Defaults match Java: exponential, initial 1ms, max 128ms, ×2
+// with jitter (nextSleep*multiplier + random(fails)).
+// ---------------------------------------------------------------------------
+
+export interface BackOffPolicy {
+  next(): number;
+}
+
+export interface BackOff {
+  create(): BackOffPolicy;
+}
+
+export function constantBackOff(delayMs = 64): BackOff {
+  if (delayMs <= 0) throw new Error('delay should be positive');
+  return { create: () => ({ next: () => delayMs }) };
+}
+
+export function exponentialBackOff(initialMs = 1, maxMs = 128, multiplier = 2): BackOff {
+  if (initialMs <= 0 || maxMs <= 0) throw new Error('delays should be positive');
+  if (multiplier <= 0) throw new Error('multiplier should be positive');
+  return {
+    // Mirrors ExponentialBackOffPolicy.getNextSleepPeriod exactly (sticky cap,
+    // jitter added AFTER returning the current period).
+    create: () => {
+      let nextSleep = initialMs;
+      let fails = 0;
+      return {
+        next: () => {
+          if (nextSleep >= maxMs) return maxMs;
+          const result = nextSleep;
+          fails += 1;
+          nextSleep = Math.min(maxMs, nextSleep * multiplier + Math.floor(Math.random() * fails));
+          return Math.max(1, Math.floor(result));
+        },
+      };
+    },
+  };
+}
+
+export function defaultBackOff(): BackOff {
+  return exponentialBackOff();
+}
+
 export class RSpinLock extends RLock {
+  private backOff: BackOff;
+  constructor(redis: Redis, name: string, clientId: string, watchdogMs = 30000, backOff?: BackOff) {
+    super(redis, name, clientId, watchdogMs);
+    this.backOff = backOff ?? defaultBackOff();
+  }
   override async lock(leaseTimeMs?: number, threadId: number | string = 1): Promise<void> {
     const useWatchdog = !leaseTimeMs || leaseTimeMs <= 0;
     const lease = useWatchdog ? this.watchdogMs : leaseTimeMs!;
+    const policy = this.backOff.create();
     for (;;) {
       const ttl = await this.tryAcquire(lease, threadId);
       if (ttl === null) {
         if (useWatchdog) this.startWatchdog(threadId);
         return;
       }
-      await sleep(10);
+      await sleep(policy.next());
     }
   }
   override async tryLock(waitTimeMs = 0, leaseTimeMs?: number, threadId: number | string = 1): Promise<boolean> {
     const useWatchdog = !leaseTimeMs || leaseTimeMs <= 0;
     const lease = useWatchdog ? this.watchdogMs : leaseTimeMs!;
     const deadline = Date.now() + waitTimeMs;
+    const policy = this.backOff.create();
     for (;;) {
       const ttl = await this.tryAcquire(lease, threadId);
       if (ttl === null) {
@@ -617,7 +669,7 @@ export class RSpinLock extends RLock {
         return true;
       }
       if (Date.now() >= deadline) return false;
-      await sleep(Math.min(10, Math.max(1, deadline - Date.now())));
+      await sleep(Math.min(policy.next(), Math.max(1, deadline - Date.now())));
     }
   }
 }
@@ -958,9 +1010,9 @@ export class RSemaphore extends RedisDataStructure {
   async trySetPermitsWithTTL(permits: number, ttlMs: number): Promise<boolean> {
     return toNumber(await luaEval(this.redis, SEM_TRYSET_TTL, 2, this.name, this.channel, String(permits), String(ttlMs))) === 1;
   }
-  async setPermits(permits: number): Promise<void> {
-    await this.redis.set(this.name, String(permits));
-  }
+  // NOTE: no setPermits here by design — Redisson has only trySetPermits /
+  // addPermits. A bare SET would overwrite the counter without publish,
+  // starving waiters and dirtying the total. Use trySetPermits/addPermits.
   async addPermits(delta: number): Promise<void> {
     await this.redis.incrby(this.name, delta);
   }
@@ -1071,19 +1123,21 @@ export class RPermitExpirableSemaphore extends RedisDataStructure {
     await this.purge();
     return this.redis.zcard(this.timeoutKey);
   }
-  async tryAcquire(leaseMs: number, permits = 1): Promise<string | null> {
+  async tryAcquire(leaseMs: number, permits = 1): Promise<string[] | null> {
     const now = await serverNowMs(this.redis);
+    // hex text ids (same domain as Java UUID strings): latin1 would corrupt
+    // on the UTF-8 wire and break cross-language release/lookup by id.
     const ids: string[] = [];
-    for (let i = 0; i < permits; i++) ids.push(randomBytes(16).toString('latin1'));
+    for (let i = 0; i < permits; i++) ids.push(randomBytes(16).toString('hex'));
     const r = await luaEval(this.redis, PES_ACQUIRE, 2, this.name, this.timeoutKey,
       String(permits), String(leaseMs), String(now), ...ids);
     if (toNumber(r) !== 1) return null;
-    return permits === 1 ? ids[0] : ids.join(',');
+    return ids;
   }
-  async acquire(leaseMs: number, permits = 1): Promise<string> {
+  async acquire(leaseMs: number, permits = 1): Promise<string[]> {
     for (;;) {
-      const id = await this.tryAcquire(leaseMs, permits);
-      if (id !== null) return id;
+      const ids = await this.tryAcquire(leaseMs, permits);
+      if (ids !== null) return ids;
       await waitForWake(this.redis, this.channel, 1000);
     }
   }

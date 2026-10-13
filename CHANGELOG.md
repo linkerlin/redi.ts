@@ -1,3 +1,29 @@
+## 1.8.2 — 2026-10-13
+
+P0 follow-ups (see `docs/GAP_ANALYSIS.md` §1):
+
+- `RSpinLock`: `BackOff`/`BackOffPolicy` + `constantBackOff`/`exponentialBackOff`
+  (defaults 1→128ms ×2 + jitter, mirrored exactly incl. sticky cap) +
+  `getSpinLock(name, backOff?)`; default retry now exponential, was fixed 10ms.
+  Verified: unlock-latch is per-request idempotency, never read on acquire —
+  no cross-language effect, not ported.
+- `RRateLimiter`: hex-text permit members; per-process fallback tag for
+  direct construction (factory already passes client id); live spin HASH
+  exclusion both directions (new test).
+
+## 1.8.1 — 2026-10-13
+
+P0 gap fixes (see `docs/GAP_ANALYSIS.md` §1):
+
+- `RPermitExpirableSemaphore`: permit ids switched from latin1 to hex text
+  (same domain as Java UUIDs; latin1 corrupts on the UTF-8 wire and breaks
+  cross-language id lookup); `tryAcquire`/`acquire` now always return
+  `string[]` (was `string | null` / comma-joined — Breaking).
+- `RSemaphore.setPermits` removed (was TS-invented bare `SET` without
+  publish: starved waiters + dirty totals; Redisson has no such method).
+- `RIdGenerator.tryInit` aligned to Java exactly (returns second `setnx`
+  only — bug-compatible by design).
+
 ## 1.8.0 — 2026-10-12
 
 Phase 10 live interop (93 → 99 tests green, 6/6 PASS first run):

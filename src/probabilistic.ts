@@ -21,6 +21,15 @@ import {
 } from './util';
 import { randomBytes } from 'node:crypto';
 
+// Per-process fallback tag for PER_CLIENT windows built without a client id
+// (mirrors Java's per-RedissonClient-instance sharing for the common
+// single-client-per-process case).
+let processTag = '';
+function processRateTag(): string {
+  if (!processTag) processTag = randomBytes(8).toString('hex');
+  return processTag;
+}
+
 function formatFloat(n: number): string {
   // Go strconv 'f' -1 equivalent: shortest round-trip decimal
   return String(n);
@@ -484,7 +493,10 @@ export class RRateLimiter extends RedisDataStructure {
   private clientTag: string;
   constructor(redis: Redis, name: string, clientTag = '') {
     super(redis, name, new JsonCodec());
-    this.clientTag = clientTag;
+    // Java PER_CLIENT shares one window per RedissonClient instance. The
+    // factory passes the client id; direct construction falls back to a
+    // per-process tag (never the degenerate '' suffix).
+    this.clientTag = clientTag || processRateTag();
   }
   private valueKey(): string {
     return this.rtype === 'PER_CLIENT' ? suffixName(this.name, 'value') + ':' + this.clientTag : suffixName(this.name, 'value');
@@ -544,7 +556,10 @@ export class RRateLimiter extends RedisDataStructure {
     await this.ensureConfig();
     if (this.rate <= 0) return true;
     const now = await serverNowMs(this.redis);
-    const id = randomBytes(16).toString('latin1');
+    // hex text member id (same domain as Java's random ids): latin1 would
+    // corrupt on the UTF-8 wire and collapse ZADD dedup. Length differs from
+    // Java's 16 raw bytes but struct.unpack reads the len prefix dynamically.
+    const id = randomBytes(16).toString('hex');
     void packRatePermit;
     try {
       const n = toNumber(await luaEval(this.redis, RATE_ACQUIRE, 2, this.valueKey(), this.permitsKey(),

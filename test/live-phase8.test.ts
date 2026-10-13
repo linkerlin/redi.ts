@@ -158,14 +158,14 @@ describe('live interop phase 8: lcm/deque-list-set/atomicdouble-bucket-cas/pes-m
       const ids = await pes.tryAcquire(30000, 2);
       expect(ids).not.toBeNull();
       expect(await probe(`pes-available ${name}`)).toBe('PES_AVAILABLE:1');
-      expect(await pes.releaseAll((ids as string).split(','))).toBe(2);
+      expect(await pes.releaseAll(ids!)).toBe(2);
       expect(await probe(`pes-available ${name}`)).toBe('PES_AVAILABLE:3');
 
-      const id = await pes.tryAcquire(5000);
-      expect(id).not.toBeNull();
-      expect(await pes.updateLeaseTime(id as string, 60000)).toBe(true);
-      expect(await pes.getLeaseTime(id as string)).toBeGreaterThan(30000);
-      expect(await pes.release(id as string)).toBe(true);
+      const single = await pes.tryAcquire(5000);
+      expect(single).not.toBeNull();
+      expect(await pes.updateLeaseTime(single![0], 60000)).toBe(true);
+      expect(await pes.getLeaseTime(single![0])).toBeGreaterThan(30000);
+      expect(await pes.release(single![0])).toBe(true);
     } finally {
       await r.shutdown();
     }

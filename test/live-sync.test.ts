@@ -116,4 +116,38 @@ describe('live interop phase 2: locks/semaphore/ratelimiter', () => {
       await r.shutdown();
     }
   }, 120000);
+
+  it('spinlock HASH-level exclusion both directions (no latch involved)', async () => {
+    // NOTE: Java SpinLock adds a per-request unlock-latch key that TS does
+    // not write/read; the HASH itself is fully shared, so mutual exclusion
+    // holds both ways. Only latch-based waiter wakeup is Java-only.
+    if (!hasRedis) return;
+    const r = Redisson.create({ address: REDIS_URL });
+    const name = `${NS}spin:shared`;
+    try {
+      await r.getKeys().delete(name);
+      const sp = r.getSpinLock(name);
+      await sp.lock(30000, 11);
+      expect(await probe(`lock-try ${name}`)).toBe('CONTENDED');
+      await sp.unlock(11);
+      expect(await probe(`lock-try ${name}`)).toBe('ACQUIRED');
+
+      const hold = execAsync(
+        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${name} 4000"`,
+        { timeout: 60000, cwd: ROOT },
+      );
+      let held = false;
+      for (let i = 0; i < 100 && !held; i++) {
+        await new Promise((x) => setTimeout(x, 100));
+        held = await r.getSpinLock(name).isLocked();
+      }
+      expect(held).toBe(true);
+      expect(await r.getSpinLock(name).tryLock(0, 5000, 12)).toBe(false);
+      await hold;
+      expect(await r.getSpinLock(name).tryLock(0, 5000, 12)).toBe(true);
+      await r.getSpinLock(name).unlock(12);
+    } finally {
+      await r.shutdown();
+    }
+  }, 120000);
 });

@@ -30,14 +30,14 @@
 
 | Structure | Redis layout | Status |
 |-----------|--------------|--------|
-| RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim | WIRE_OK + live mutual exclusion both directions ✅ |
+| RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim; Spin 默认指数退避 1→128ms×2+jitter（`BackOff` 可配，`getSpinLock(name, backOff?)`）；unlock-latch 为按请求幂等键，跨语言无影响 | WIRE_OK + live mutual exclusion both directions ✅ |
 | RFairLock / NonReentrantFair | + LIST `redisson_lock_queue:{name}` + ZSET `redisson_lock_timeout:{name}`, per-waiter `channel:field`, FIFO Lua verbatim | WIRE_OK |
 | RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}` (read→`1`, write→`0`), downgrade parity | WIRE_OK + live phase 3 (互斥双向+共享读） |
 | RFencedLock | RLock HASH + `redisson_lock_token:{name}` (`INCR` incl. re-entry, returns `{-1,token}`) | WIRE_OK + live phase 3 (token 跨语言单调） |
 | RMultiLock / RRedLock | client-side orchestration (quorum `n/2+1`, lease amplification) | WIRE_OK + live phase 9（全有或全无+回滚，多数派 2/3 ✅） |
 | RSemaphore | STRING + `redisson_sc:{name}` Lua | WIRE_OK + live shared-permit ✅ |
 | RCountDownLatch | STRING + `redisson_countdownlatch__channel__{name}` (`1` set / `0` zero) | WIRE_OK (count shared, live read ✅) |
-| RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge | WIRE_OK + live phase 3 (共享许可池） |
+| RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]` | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） |
 | RMap / RList / RSet / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON) | WIRE_OK + live bidirectional ✅ |
 | RScoredSortedSet | ZSET + JSON members | WIRE_OK + live bidirectional ✅ |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |

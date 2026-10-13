@@ -13,7 +13,7 @@ import { RMapCache, RMapCacheNative, RSetCache, RSetMultimap, RListMultimap, RSe
 import {
   RLock, RSpinLock, RNonReentrantLock, RFairLock, RNonReentrantFairLock,
   RReadWriteLock, RSemaphore, RCountDownLatch, RPermitExpirableSemaphore,
-  RFencedLock, RMultiLock, RRedLock,
+  RFencedLock, RMultiLock, RRedLock, BackOff,
 } from './locks';
 import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging';
 import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic';
@@ -194,8 +194,8 @@ export class Redisson {
   getRLock(name: string): RLock {
     return this.getLock(name);
   }
-  getSpinLock(name: string): RSpinLock {
-    return new RSpinLock(this.redis, name, this.id, this.watchdog);
+  getSpinLock(name: string, backOff?: BackOff): RSpinLock {
+    return new RSpinLock(this.redis, name, this.id, this.watchdog, backOff);
   }
   getNonReentrantLock(name: string): RNonReentrantLock {
     return new RNonReentrantLock(this.redis, name, this.id, this.watchdog);
