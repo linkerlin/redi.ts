@@ -39,7 +39,7 @@
 | RCountDownLatch | STRING + `redisson_countdownlatch__channel__{name}` (`1` set / `0` zero) | WIRE_OK (count shared, live read ✅) |
 | RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]` | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） |
 | RMap / RList / RSet / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON) | WIRE_OK + live bidirectional ✅ |
-| RScoredSortedSet | ZSET + JSON members | WIRE_OK + live bidirectional ✅ |
+| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
 | RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua) | WIRE_OK + live bidirectional ✅ |
 | RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)` | WIRE_OK + live bidirectional ✅ |
@@ -71,7 +71,7 @@
 
 ## Verification
 
-- `npm test`: 102 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 104 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore

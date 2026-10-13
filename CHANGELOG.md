@@ -1,4 +1,12 @@
-## 1.8.3 — 2026-10-13
+## 1.8.4 — 2026-10-13
+
+P1 biggest gap closed (see `docs/GAP_ANALYSIS.md` §2):
+
+- `RScoredSortedSet` 交并差全族：`union/unionWith/readUnion/readUnionEntries/`
+  `intersection/intersectionWith/readIntersection/readIntersectionEntries/`
+  `countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`
+  （store 版“只算 others 存入 self”、read 版含 self 的参数顺序与 Java 逐字对齐；
+  live phase 11 验证 WEIGHTS 位置与聚合分数，双向 2/2 PASS）。
 
 P1 quick win (see `docs/GAP_ANALYSIS.md` §2 `RMap`):
 

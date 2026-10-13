@@ -687,8 +687,14 @@ public final class TsProbe {
                     System.out.println("MM_GET:" + new java.util.ArrayList<>(
                             redisson.<String, String>getSetMultimapCache(name).get(key)));
                 }
-                case "zset-score" -> {
-                    // args: zset-score <name> <member> — prints ZSCORE:<d>|ZSCORE:null
+                case "zset-readunion" -> {
+                    // args: zset-readunion <a> <b> — Java readUnion (self a + b)
+                    String a = args.length >= 2 ? args[1] : "TsJavaT:zs11:a";
+                    String b = args.length >= 3 ? args[2] : "TsJavaT:zs11:b";
+                    System.out.println("READUNION:" + new java.util.ArrayList<>(
+                            redisson.<String>getScoredSortedSet(a).readUnion(b)));
+                }
+                case "zset-score" -> {                    // args: zset-score <name> <member> — prints ZSCORE:<d>|ZSCORE:null
                     String name = args.length >= 2 ? args[1] : "TsJavaT:zs7:x";
                     String member = args.length >= 3 ? args[2] : "m";
                     Double s = redisson.<String>getScoredSortedSet(name).getScore(member);

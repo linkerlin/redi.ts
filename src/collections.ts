@@ -567,6 +567,9 @@ export interface ScoredEntry<V> {
   score: number;
 }
 
+/** Aggregation for ZUNIONSTORE/ZINTERSTORE (mirrors Redisson Aggregate). */
+export type ZAggregate = 'SUM' | 'MIN' | 'MAX';
+
 export class RScoredSortedSet<V = any> extends RedisDataStructure {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -643,6 +646,79 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
   async last(): Promise<V | null> {
     const m = await this.redis.zrevrange(this.name, 0, 0);
     return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
+  }
+
+  // -- Set operations (mirror Redisson argument order exactly; see
+  // RedissonScoredSortedSet.java). Store variants compute over the OTHER
+  // named sets and write the result into SELF (self is NOT an input);
+  // read variants include SELF as the first input. Weights use plain
+  // decimal strings (Java BigDecimal.toPlainString equivalent for our range).
+  private async storeOp(cmd: 'zunionstore' | 'zinterstore' | 'zdiffstore', others: string[], weights?: number[], aggregate: ZAggregate = 'SUM'): Promise<number> {
+    const args: (string | number)[] = [this.name, others.length, ...others];
+    if ((cmd === 'zunionstore' || cmd === 'zinterstore') && weights && weights.length > 0) {
+      args.push('WEIGHTS', ...weights.map(String));
+    }
+    if (cmd !== 'zdiffstore') args.push('AGGREGATE', aggregate);
+    return toNumber(await (this.redis as any)[cmd](...args));
+  }
+  /** Union of the OTHER sets, stored into SELF. Returns result size. */
+  async union(...names: string[]): Promise<number> {
+    return this.storeOp('zunionstore', names);
+  }
+  async unionWith(opts: { names: string[]; weights?: number[]; aggregate?: ZAggregate }): Promise<number> {
+    return this.storeOp('zunionstore', opts.names, opts.weights, opts.aggregate);
+  }
+  private decodeScoredFlat(m: string[]): ScoredEntry<V>[] {
+    const out: ScoredEntry<V>[] = [];
+    for (let i = 0; i + 1 < m.length; i += 2) out.push({ value: this.decodeValue(m[i]) as V, score: Number(m[i + 1]) });
+    return out;
+  }
+  /** Union of SELF + others (read-only). */
+  async readUnion(...names: string[]): Promise<V[]> {
+    const m: string[] = await (this.redis as any).zunion(1 + names.length, this.name, ...names);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  async readUnionEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
+    const m: string[] = await (this.redis as any).zunion(1 + names.length, this.name, ...names, 'WITHSCORES');
+    return this.decodeScoredFlat(m);
+  }
+  /** Intersection of the OTHER sets, stored into SELF. Returns result size. */
+  async intersection(...names: string[]): Promise<number> {
+    return this.storeOp('zinterstore', names);
+  }
+  async intersectionWith(opts: { names: string[]; weights?: number[]; aggregate?: ZAggregate }): Promise<number> {
+    return this.storeOp('zinterstore', opts.names, opts.weights, opts.aggregate);
+  }
+  /** Intersection of SELF + others (read-only). */
+  async readIntersection(...names: string[]): Promise<V[]> {
+    const m: string[] = await (this.redis as any).zinter(1 + names.length, this.name, ...names);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  async readIntersectionEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
+    const m: string[] = await (this.redis as any).zinter(1 + names.length, this.name, ...names, 'WITHSCORES');
+    return this.decodeScoredFlat(m);
+  }
+  /** Cardinality of SELF ∩ others (0 limit = exact). */
+  async countIntersection(...names: string[]): Promise<number> {
+    return toNumber(await (this.redis as any).zintercard(1 + names.length, this.name, ...names));
+  }
+  async countIntersectionLimit(limit: number, ...names: string[]): Promise<number> {
+    const args: (string | number)[] = [1 + names.length, this.name, ...names];
+    if (limit > 0) args.push('LIMIT', limit);
+    return toNumber(await (this.redis as any).zintercard(...args));
+  }
+  /** SELF-excluded difference (others[0] − others[1:]) stored into SELF. */
+  async diff(...names: string[]): Promise<number> {
+    return this.storeOp('zdiffstore', names);
+  }
+  /** SELF minus others (read-only). */
+  async readDiff(...names: string[]): Promise<V[]> {
+    const m: string[] = await (this.redis as any).zdiff(1 + names.length, this.name, ...names);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  async readDiffEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
+    const m: string[] = await (this.redis as any).zdiff(1 + names.length, this.name, ...names, 'WITHSCORES');
+    return this.decodeScoredFlat(m);
   }
 }
 
