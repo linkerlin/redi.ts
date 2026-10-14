@@ -1,7 +1,11 @@
 {
   "name": "redi.ts",
-  "version": "1.8.9",
+  "version": "1.0.0",
   "description": "TypeScript 1:1 port of Redisson — wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linkerlin/redi.ts.git"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist", "README.md", "README_EN.md", "COMPATIBILITY.md", "CHANGELOG.md", "AGENTS.md"],

@@ -1,3 +1,25 @@
+## 1.0.0 — 2026-10-14
+
+First stable release. TypeScript 1:1 port of Redisson, wire-compatible with
+Java Redisson (`JsonJacksonCodec`, default typing), redi.py and redi.go:
+identical Redis key layouts, Lua algorithms and value encoding.
+
+- 60+ structures: locks (`RLock`/`Fair`/`ReadWrite`/`Spin`/`NonReentrant`/
+  `Fenced`/`Multi`/`Red`), maps + caches (+Native, LocalCachedMap),
+  sets/lists/queues/deques (+Blocking/Bounded), sorted sets (scored + lex),
+  multimaps (+Cache/Native), buckets, atomics/adders/generators,
+  semaphores/CountdownLatch/rate limiters, topics (plain/pattern/sharded/reliable),
+  streams (+consumer groups/pending/claim/trim), delayed queues, ring buffers,
+  geo/HLL/bitset/bloom (+native probabilistic), timeseries, keys/script/
+  functions/search/vectors/batch (+7 typed batch facades).
+- 115 tests green: wire vectors, mock functional, live python interop, and
+  live bidirectional suites vs Redisson 4.6.1 (see COMPATIBILITY.md).
+- Honest non-goals (documented, same as redi.go): `RSortedSet`-Comparator,
+  `RTransaction` snapshot rollback, `LiveObject`, reactive/Rx,
+  `RExecutorService`/`RRemoteService` wire protocol, PRO-only structures.
+- Prior 1.1.0–1.8.9 entries below were same-day development iterations;
+  1.0.0 is the first public release, superseding all of them.
+
 ## 1.8.9 — 2026-10-14
 
 Test hygiene + environment findings (no src changes except noted):

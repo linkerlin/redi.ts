@@ -72,7 +72,7 @@
 
 ## Verification
 
-- `npm test`: 110 tests — `wire` (codec/names/hash-vectors/struct),
+- `npm test`: 115 tests — `wire` (codec/names/hash-vectors/struct),
   mock functional, `interop` (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -92,7 +92,7 @@
   `live-phase12` (batch Lua ops + cross-language reads, 2/2 PASS),
   `live-phase13` (stream groups/pending/claim, 2/2 PASS),
   `live-phase14` (stream add/read opts, nack, ackdel, 2/2 PASS),
-  `live-phase15` (plain-set store ops, union ✅ + gated inter/diff).
+  `live-phase15` (plain-set store ops, union ✅ + gated inter/diff, 2/2 PASS).
 
   探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
   （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。
