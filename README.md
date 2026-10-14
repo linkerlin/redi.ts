@@ -6,7 +6,7 @@
 
 redi.ts 就是干这个的。它跟 **Java Redisson**（`JsonJacksonCodec`，默认把类型写进 JSON）、**redi.py**、**redi.go** 用的是同一套东西：同样的键布局，同样的 Lua，同样的值编码。一边写进去的数据，另外两边读得出来。
 
-标准是 Java 源码，在 `C:/GitHub/redisson`。Lua 照 `redi.go` 搬。那套脚本已经对着 Redisson 4.6.1 对过。
+标准是 Redisson Java 源码。Lua 照 `redi.go` 搬。那套脚本已经对着 Redisson 4.6.1 对过。
 
 ## 安装
 
