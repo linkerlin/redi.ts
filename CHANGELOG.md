@@ -1,3 +1,27 @@
+## 2.3.0 — 2026-10-19
+
+Phase 24: `RScoredSortedSet` remainder. Full suite: **212 tests / 28 files
+green in ~68 s**.
+
+- **`addAll` family**: `addAll(Map<V, Number>)`, `addAllIfAbsent` (NX CH),
+  `addAllIfExist` (XX CH), `addAllIfGreater` (GT CH), `addAllIfLess` (LT CH) —
+  return the changed/added count, scores cross-checked through Java.
+- **Reads**: `firstEntry()` / `lastEntry()` (WITHSCORES), `random()` /
+  `random(count)` (ZRANDMEMBER, negative count allows repeats), `randomEntries
+  (count)` (ZRANDMEMBER ... WITHSCORES → member→score).
+- **Non-blocking pops**: `pollFirstEntry()` / `pollLastEntry()` (ZPOPMIN/MAX).
+  **Blocking**: `pollFirstWithTimeout(ms)` / `pollLastWithTimeout(ms)`
+  (BZPOPMIN/BZPOPMAX) and `pollFirstFromAny` / `pollLastFromAny` (BZMPOP
+  MIN/MAX) returning the source key + member + score; `null` blocks forever,
+  `<= 0` is non-blocking, dedicated connection + float-second timeouts, polling
+  fallback for mock.
+- **Modern range commands**: `rangeByScore`, score-based `entryRange`,
+  `valueRangeReversed` and `entryRangeReversed` now send
+  `ZRANGE ... BYSCORE [REV]` instead of the deprecated
+  `ZRANGEBYSCORE`/`ZREVRANGEBYSCORE` (same results; mock implements BYSCORE).
+- Tests: 3 mock + `test/live-phase24.test.ts` 2/2 (GT/LT/NX/XX addAll + Java
+  score reads, ZRANDMEMBER membership, BZPOPMIN/BZPOPMAX/BZMPOP wake-ups).
+
 ## 2.2.0 — 2026-10-19
 
 Phase 23: operations & scalar remainder. Full suite: **207 tests / 27 files

@@ -589,7 +589,7 @@ export class RDeque<V = any> extends RQueue<V> {
 
 function isUnsupportedCommand(e: unknown): boolean {
   const msg = String((e as any)?.message ?? e);
-  return /unsupported command|unknown command/i.test(msg);
+  return /unsupported command|unknown command|is not a function/i.test(msg);
 }
 
 interface ChannelWaker {
@@ -799,6 +799,109 @@ async function blockingListPop(
 ): Promise<string | null> {
   const r = await blockingListPopFrom(redis, [name], side, timeoutMs);
   return r === null ? null : r.value;
+}
+
+/** ZPOPMIN/ZPOPMAX reply is a flat [member, score] pair. */
+function zPair(raw: any): { value: string; score: number } | null {
+  if (!raw) return null;
+  const arr = Array.isArray(raw) ? raw : [raw];
+  if (arr.length < 2) return null;
+  return { value: String(arr[0]), score: Number(arr[1]) };
+}
+
+/** Blocking sorted-set pop (BZPOPMIN/BZPOPMAX). `timeoutMs === null` blocks
+ *  forever; `<= 0` is a non-blocking ZPOPMIN/ZPOPMAX. Mocks without BZPOP*
+ *  fall back to short-interval polling. */
+async function blockingZPop(
+  redis: Redis,
+  name: string,
+  side: 'MIN' | 'MAX',
+  timeoutMs: number | null,
+): Promise<{ value: string; score: number } | null> {
+  const pop = async (): Promise<{ value: string; score: number } | null> => {
+    const raw: any = side === 'MIN'
+      ? await (redis as any).zpopmin(name, 1)
+      : await (redis as any).zpopmax(name, 1);
+    return zPair(raw);
+  };
+  if (timeoutMs !== null && timeoutMs <= 0) return pop();
+  const immediate = await pop();
+  if (immediate !== null) return immediate;
+
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<{ value: string; score: number } | null> => {
+      for (;;) {
+        const r = await pop();
+        if (r !== null) return r;
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const cmd = side === 'MIN' ? 'bzpopmin' : 'bzpopmax';
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r: any = await (conn as any)[cmd](name, seconds);
+      if (!r) return null;
+      // [key, member, score]
+      return Array.isArray(r) ? zPair([r[1], r[2]]) : zPair(r);
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
+}
+
+/** Blocking multi-key sorted-set pop (BZMPOP side MIN/MAX, COUNT 1).
+ *  Returns the source key plus member/score; null on timeout. */
+async function blockingZPopFromAny(
+  redis: Redis,
+  names: string[],
+  side: 'MIN' | 'MAX',
+  timeoutMs: number | null,
+): Promise<{ key: string; value: string; score: number } | null> {
+  const scan = async (): Promise<{ key: string; value: string; score: number } | null> => {
+    for (const name of names) {
+      const raw: any = side === 'MIN'
+        ? await (redis as any).zpopmin(name, 1)
+        : await (redis as any).zpopmax(name, 1);
+      const e = zPair(raw);
+      if (e !== null) return { key: name, ...e };
+    }
+    return null;
+  };
+  if (timeoutMs !== null && timeoutMs <= 0) return scan();
+  const immediate = await scan();
+  if (immediate !== null) return immediate;
+
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<{ key: string; value: string; score: number } | null> => {
+      for (;;) {
+        const r = await scan();
+        if (r !== null) return r;
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r: any = await (conn as any).bzmpop(seconds, names.length, ...names, side, 'COUNT', 1);
+      if (r === null || r === undefined) return null;
+      const key = String(r[0]);
+      const payload = Array.isArray(r[1]) ? r[1] : [];
+      const first = Array.isArray(payload[0]) ? payload[0] : payload;
+      const e = zPair(first);
+      return e === null ? null : { key, ...e };
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
 }
 
 const QUEUE_DRAIN = `local max = tonumber(ARGV[1])
@@ -1147,6 +1250,34 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
   async addIfGreater(score: number, value: V): Promise<boolean> {
     return ((await (this.redis as any).zadd(this.name, 'GT', 'CH', String(score), this.encodeValue(value))) as number) === 1;
   }
+  /** Java `addAll(Map<V, Number>)`: ZADD ... CH — changed/added count. */
+  async addAll(entries: Map<V, number>): Promise<number> {
+    return this.zaddMany(entries);
+  }
+  /** Java `addAllIfAbsent(Map)`: ZADD NX CH. */
+  async addAllIfAbsent(entries: Map<V, number>): Promise<number> {
+    return this.zaddMany(entries, 'NX');
+  }
+  /** Java `addAllIfExist(Map)`: ZADD XX CH. */
+  async addAllIfExist(entries: Map<V, number>): Promise<number> {
+    return this.zaddMany(entries, 'XX');
+  }
+  /** Java `addAllIfGreater(Map)`: ZADD GT CH. */
+  async addAllIfGreater(entries: Map<V, number>): Promise<number> {
+    return this.zaddMany(entries, 'GT');
+  }
+  /** Java `addAllIfLess(Map)`: ZADD LT CH. */
+  async addAllIfLess(entries: Map<V, number>): Promise<number> {
+    return this.zaddMany(entries, 'LT');
+  }
+  private async zaddMany(entries: Map<V, number>, flag?: 'NX' | 'XX' | 'GT' | 'LT'): Promise<number> {
+    if (entries.size === 0) return 0;
+    const args: (string | number)[] = [];
+    if (flag) args.push(flag);
+    args.push('CH');
+    for (const [v, s] of entries) args.push(String(s), this.encodeValue(v));
+    return toNumber(await (this.redis as any).zadd(this.name, ...args));
+  }
   async remove(value: V): Promise<boolean> {
     return ((await this.redis.zrem(this.name, this.encodeValue(value))) as number) > 0;
   }
@@ -1181,10 +1312,59 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
     return out;
   }
   async rangeByScore(min: number | string, max: number | string, offset = 0, count = -1): Promise<V[]> {
-    const args: (string | number)[] = [this.name, String(min), String(max)];
+    const args: (string | number)[] = [String(min), String(max), 'BYSCORE'];
     if (count >= 0) args.push('LIMIT', offset, count);
-    const m = await (this.redis as any).zrangebyscore(...args);
+    const m = await (this.redis as any).zrange(this.name, ...args);
     return (m as string[]).map((x) => this.decodeValue(x) as V);
+  }
+  /** Java `random()`: ZRANDMEMBER one member (`null` when empty). */
+  async random(): Promise<V | null>;
+  /** Java `random(int)`: ZRANDMEMBER count (negative = allow repeats). */
+  async random(count: number): Promise<V[]>;
+  async random(count?: number): Promise<V | null | V[]> {
+    try {
+      if (count === undefined) {
+        const m: any = await (this.redis as any).zrandmember(this.name);
+        return m === null || m === undefined ? null : (this.decodeValue(String(m)) as V);
+      }
+      const m: string[] = await (this.redis as any).zrandmember(this.name, count);
+      return (m ?? []).map((x) => this.decodeValue(x) as V);
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      // mock fallback (no ZRANDMEMBER): sample client-side from the full set
+      const all = await this.range(0, -1);
+      if (count === undefined) return all.length === 0 ? null : all[Math.floor(Math.random() * all.length)];
+      const pool = [...all];
+      const out: V[] = [];
+      const n = Math.abs(count);
+      for (let i = 0; i < n; i++) {
+        if (pool.length === 0) {
+          if (count < 0) pool.push(...all);
+          else break;
+        }
+        out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+      }
+      return out;
+    }
+  }
+  /** Java `randomEntries(int)`: ZRANDMEMBER count WITHSCORES → member→score. */
+  async randomEntries(count = 1): Promise<Map<V, number>> {
+    const out = new Map<V, number>();
+    if (count <= 0) return out;
+    try {
+      const m: string[] = await (this.redis as any).zrandmember(this.name, count, 'WITHSCORES');
+      for (let i = 0; i + 1 < m.length; i += 2) out.set(this.decodeValue(m[i]) as V, Number(m[i + 1]));
+      return out;
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      const all = await this.rangeWithScores(0, -1);
+      for (let i = all.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [all[i], all[j]] = [all[j], all[i]];
+      }
+      for (const entry of all.slice(0, Math.min(count, all.length))) out.set(entry.value, entry.score);
+      return out;
+    }
   }
   async addAndGetRank(score: number, value: V): Promise<number> {
     const s = `redis.call('zadd', KEYS[1], ARGV[1], ARGV[2])
@@ -1233,6 +1413,38 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
     for (let i = 0; i < arr.length; i += 2) vals.push(this.decodeValue(arr[i]) as V);
     return vals;
   }
+  /** Java `pollFirstEntry()`: non-blocking ZPOPMIN 1. */
+  async pollFirstEntry(): Promise<ScoredEntry<V> | null> {
+    const e = zPair(await (this.redis as any).zpopmin(this.name, 1));
+    return e === null ? null : { value: this.decodeValue(e.value) as V, score: e.score };
+  }
+  /** Java `pollLastEntry()`. */
+  async pollLastEntry(): Promise<ScoredEntry<V> | null> {
+    const e = zPair(await (this.redis as any).zpopmax(this.name, 1));
+    return e === null ? null : { value: this.decodeValue(e.value) as V, score: e.score };
+  }
+  /** Java blocking `pollFirst(long, TimeUnit)`: BZPOPMIN. `timeoutMs === null`
+   *  blocks forever; `<= 0` is non-blocking. */
+  async pollFirstWithTimeout(timeoutMs: number | null): Promise<ScoredEntry<V> | null> {
+    const e = await blockingZPop(this.redis, this.name, 'MIN', timeoutMs);
+    return e === null ? null : { value: this.decodeValue(e.value) as V, score: e.score };
+  }
+  /** Java blocking `pollLast(long, TimeUnit)`: BZPOPMAX. */
+  async pollLastWithTimeout(timeoutMs: number | null): Promise<ScoredEntry<V> | null> {
+    const e = await blockingZPop(this.redis, this.name, 'MAX', timeoutMs);
+    return e === null ? null : { value: this.decodeValue(e.value) as V, score: e.score };
+  }
+  /** Java `pollFirstFromAny(...)`: BZMPOP MIN over this set + names; returns
+   *  the source key plus member/score. `timeoutMs === null` blocks forever. */
+  async pollFirstFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null> {
+    const r = await blockingZPopFromAny(this.redis, [this.name, ...otherNames], 'MIN', timeoutMs);
+    return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V, score: r.score };
+  }
+  /** Java `pollLastFromAny(...)`: BZMPOP MAX. */
+  async pollLastFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null> {
+    const r = await blockingZPopFromAny(this.redis, [this.name, ...otherNames], 'MAX', timeoutMs);
+    return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V, score: r.score };
+  }
   async first(): Promise<V | null> {
     const m = await this.redis.zrange(this.name, 0, 0);
     return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
@@ -1240,6 +1452,16 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
   async last(): Promise<V | null> {
     const m = await this.redis.zrevrange(this.name, 0, 0);
     return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
+  }
+  /** Java `firstEntry()`: ZRANGE 0 0 WITHSCORES. */
+  async firstEntry(): Promise<ScoredEntry<V> | null> {
+    const m = await this.redis.zrange(this.name, 0, 0, 'WITHSCORES');
+    return m.length < 2 ? null : { value: this.decodeValue(m[0]) as V, score: Number(m[1]) };
+  }
+  /** Java `lastEntry()`: ZREVRANGE 0 0 WITHSCORES. */
+  async lastEntry(): Promise<ScoredEntry<V> | null> {
+    const m = await this.redis.zrevrange(this.name, 0, 0, 'WITHSCORES');
+    return m.length < 2 ? null : { value: this.decodeValue(m[0]) as V, score: Number(m[1]) };
   }
   /** Java `firstScore()`: ZRANGE 0 0 WITHSCORES — `null` when empty. */
   async firstScore(): Promise<number | null> {
@@ -1265,9 +1487,9 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
       const m = await this.redis.zrevrange(this.name, a, b);
       return m.map((x) => this.decodeValue(x) as V);
     }
-    const args: (string | number)[] = [this.name, this.scoreBound(c!, d ?? true), this.scoreBound(a, b)];
+    const args: (string | number)[] = [this.scoreBound(c!, d ?? true), this.scoreBound(a, b), 'BYSCORE', 'REV'];
     if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
-    const m: string[] = await (this.redis as any).zrevrangebyscore(...args);
+    const m: string[] = await (this.redis as any).zrange(this.name, ...args);
     return m.map((x) => this.decodeValue(x) as V);
   }
   /** Java `entryRangeReversed(int, int)`: ZREVRANGE ... WITHSCORES by index. */
@@ -1279,14 +1501,14 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
       const m = await this.redis.zrevrange(this.name, a, b, 'WITHSCORES');
       return this.decodeScoredFlat(m);
     }
-    const args: (string | number)[] = [this.name, this.scoreBound(c!, d ?? true), this.scoreBound(a, b), 'WITHSCORES'];
+    const args: (string | number)[] = [this.scoreBound(c!, d ?? true), this.scoreBound(a, b), 'BYSCORE', 'REV', 'WITHSCORES'];
     if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
-    const m: string[] = await (this.redis as any).zrevrangebyscore(...args);
+    const m: string[] = await (this.redis as any).zrange(this.name, ...args);
     return this.decodeScoredFlat(m);
   }
   /** Java `entryRange(int, int)`: ZRANGE ... WITHSCORES by index. */
   async entryRange(startIndex: number, endIndex: number): Promise<ScoredEntry<V>[]>;
-  /** Java `entryRange(double, boolean, double, boolean[, int, int])`: ZRANGEBYSCORE ... WITHSCORES. */
+  /** Java `entryRange(double, boolean, double, boolean[, int, int])`: ZRANGE ... BYSCORE WITHSCORES. */
   async entryRange(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]>;
   async entryRange(a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]> {
     if (typeof b === 'number') {
@@ -1294,10 +1516,10 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
       return this.decodeScoredFlat(m);
     }
     const args: (string | number)[] = [
-      this.name, this.scoreBound(a, b), this.scoreBound(c!, d ?? true), 'WITHSCORES',
+      this.scoreBound(a, b), this.scoreBound(c!, d ?? true), 'BYSCORE', 'WITHSCORES',
     ];
     if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
-    const m: string[] = await (this.redis as any).zrangebyscore(...args);
+    const m: string[] = await (this.redis as any).zrange(this.name, ...args);
     return this.decodeScoredFlat(m);
   }
   /** Java `count(double, boolean, double, boolean)`: ZCOUNT between the score bounds. */

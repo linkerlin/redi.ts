@@ -76,7 +76,10 @@ names), `RMap` (lazy HSCAN iterators, `HRANDFIELD`/`HSTRLEN`)/
 view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
-ranges incl. reversed forms, `addScore` family, deletion by score/rank),
+ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
+`addIf*`/`addAll*` conditionals, `random`/`randomEntries`, blocking
+`pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, deletion by
+score/rank),
 `RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
 multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
 `RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,

@@ -1262,3 +1262,77 @@ describe('phase 23: RKeys ops + atomic scalars (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 24: RScoredSortedSet remainder (mock)', () => {
+  it('addAll family + firstEntry/lastEntry', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('p24:z');
+    expect(await z.addAll(new Map([['a', 1], ['b', 2]]))).toBe(2);
+    expect(await z.addAll(new Map([['a', 5], ['c', 3]]))).toBe(2); // both changed/added
+    expect(await z.getScore('a')).toBe(5);
+    expect(await z.getScore('c')).toBe(3);
+
+    expect(await z.addAllIfAbsent(new Map([['a', 9], ['d', 4]]))).toBe(1); // only d
+    expect(await z.getScore('a')).toBe(5);
+    expect(await z.getScore('d')).toBe(4);
+
+    expect(await z.addAllIfExist(new Map([['a', 6], ['ghost', 1]]))).toBe(1); // only a
+    expect(await z.getScore('a')).toBe(6);
+    expect(await z.contains('ghost')).toBe(false);
+
+    expect(await z.firstEntry()).toEqual({ value: 'b', score: 2 });
+    expect(await z.lastEntry()).toEqual({ value: 'a', score: 6 });
+    await r.shutdown();
+  });
+
+  it('pollFirst/LastEntry and blocking poll with timeout (polling fallback)', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('p24:poll');
+    await z.addAll(new Map([['a', 1], ['b', 2]]));
+    expect(await z.pollFirstEntry()).toEqual({ value: 'a', score: 1 });
+    expect(await z.pollLastEntry()).toEqual({ value: 'b', score: 2 });
+    expect(await z.pollFirstEntry()).toBeNull();
+
+    // non-blocking with data
+    await z.add(3, 'c');
+    expect(await z.pollFirstWithTimeout(0)).toEqual({ value: 'c', score: 3 });
+    // deadline on an empty set → null after ~timeout (mock has no BZPOPMIN)
+    const t0 = Date.now();
+    expect(await z.pollFirstWithTimeout(100)).toBeNull();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(80);
+
+    // FromAny: own key wins when both are populated; otherwise source key reported
+    await z.add(1, 'own');
+    const other = r.getScoredSortedSet<string>('p24:other');
+    await other.add(2, 'other');
+    expect(await z.pollFirstFromAny(0, 'p24:other')).toEqual({ key: 'p24:poll', value: 'own', score: 1 });
+    expect(await z.pollFirstFromAny(0, 'p24:other')).toEqual({ key: 'p24:other', value: 'other', score: 2 });
+    expect((await z.pollLastFromAny(0, 'p24:other'))).toBeNull();
+    await r.shutdown();
+  });
+
+  it('random/randomEntries work through the mock fallback and BYSCORE ranges stay correct', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('p24:rnd');
+    await z.addAll(new Map([['a', 1], ['b', 2], ['c', 3]]));
+    const one = await z.random();
+    expect(['a', 'b', 'c']).toContain(one);
+    expect((await z.random(10)).sort()).toEqual(['a', 'b', 'c']);
+    const entries = await z.randomEntries(2);
+    expect(entries.size).toBe(2);
+    for (const [m, s] of entries) expect({ a: 1, b: 2, c: 3 }[m]).toBe(s);
+
+    expect(await z.rangeByScore(1, 2)).toEqual(['a', 'b']);
+    expect(await z.rangeByScore(1, 3, 1, 1)).toEqual(['b']);
+    expect(await z.valueRangeReversed(1, true, 3, true)).toEqual(['c', 'b', 'a']);
+    expect(await z.entryRange(1.5, false, 3, true)).toEqual([
+      { value: 'b', score: 2 },
+      { value: 'c', score: 3 },
+    ]);
+    expect(await z.entryRangeReversed(1.5, false, 3, true)).toEqual([
+      { value: 'c', score: 3 },
+      { value: 'b', score: 2 },
+    ]);
+    await r.shutdown();
+  });
+});

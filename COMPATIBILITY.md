@@ -47,7 +47,7 @@
 | RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON); Bounded uses `redisson_bqs:{name}` as available permits: atomic DECRBY+RPUSH / INCRBY+PUBLISH, `put`/timed `offer` block, `remainingCapacity()`; BLPOP/BRPOP use dedicated connections + float seconds (0 = non-blocking); `drainTo` extracts with one atomic Lua; blocking queue/deque also expose `pollFromAny`/`pollFromAnyWithName` (BLPOP), `pollFirstFromAny`/`pollLastFromAny` (BLMPOP + COUNT), `pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo` (BLMOVE), deque `move`/`moveWithTimeout` (LMOVE/BLMOVE); RMap 另有 `valueSize`（HSTRLEN）、`randomKeys`/`randomEntries`（HRANDFIELD [WITHVALUES]）、`keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)` 惰性 HSCAN 异步迭代器 | WIRE_OK + live bidirectional ✅ + live phase 4/7/16/17/18 + live phase 20 ✅ + live phase 22 (真实 BLPOP/BLMPOP/BLMOVE 唤醒 ✅) |
 | RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call`; key synchronizers shared with RMap (see below) | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) |
 | Key synchronizers (RMap/RSet/MapCache/SetCache/Multimap) | `getLock`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`: companion = `suffixName(name, hash128toBase64(encode(key)) + ":" + {lock\|fairlock\|rw_lock\|semaphore\|countdownlatch\|permitexpirablesemaphore})`; owners inherit the client id/watchdog | WIRE_OK + live phase 19（6/6 命名与 Java 4.6.1 逐字节一致、Key 锁双向互斥 ✅） |
-| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank`/`removeRangeByScore`；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) 直接对齐 4.6.1 命令形状；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ + live phase 23 (GT/LT/XX 分数 Java 读回 ✅) |
+| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`firstEntry`/`lastEntry`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank`/`removeRangeByScore`；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) 与 `addAll*` 条件批量；`random`/`randomEntries`（ZRANDMEMBER [WITHSCORES]）；非阻塞 `pollFirst/LastEntry`（ZPOPMIN/MAX）与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP，独立连接+浮点秒）；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ + live phase 23 (GT/LT/XX 分数 Java 读回 ✅) + live phase 24 (addAll/random/BZPOP/BZMPOP ✅) |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
 | RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua); RBuckets conditional multi-set uses Java's `MSETEX numkeys k v… NX\|XX [PX ms]` (Redis 8+; without MSETEX it fails loudly), values codec-encoded | WIRE_OK + live bidirectional ✅ + live phase 23 (MSETEX NX/XX + Java read ✅) |
 | RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value; `getAndIncrement`/`getAndDecrement`/`getAndDelete` and `setIfLess`/`setIfGreater` (single Lua from redi.go) on both; Double `compareAndDelete` | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) + live phase 23 (scalar remainder ✅) |
@@ -79,9 +79,9 @@
 
 ## Verification
 
-- `npm test`: 207 tests / 27 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 212 tests / 28 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
-  §3 leftovers and phase-23 keys/atomic remainder), `interop`
+  §3 leftovers, phase-23 keys/atomic remainder and phase-24 zset remainder), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -115,6 +115,8 @@
   geo+HPEXPIRE wire, 5/5 PASS),
   `live-phase23` (RKeys expire family + MOVE to db 9 + slots vs a live cluster
   node / MSETEX NX+XX read by Java / atomic exactness / ZADD GT/LT scores, 4/4 PASS),
+  `live-phase24` (zset addAll NX/XX/GT/LT + Java score reads / ZRANDMEMBER /
+  BZPOPMIN+BZPOPMAX+BZMPOP wake-ups, 2/2 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).
