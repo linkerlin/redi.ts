@@ -49,7 +49,7 @@
 
 **`RGeo`**：已补 ✅ (1.5.0)：`search(GeoSearchArgs)` 全族（from lon-lat/member、radius/box、order、count/countAny）、`searchWithDistance/Position`、`storeSearchTo/storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）；命令选择与 4.6.1 jar 逐条对齐（半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`、Box→`GEOSEARCH`、存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE`；4.6.1 无 polygon，新版才有）；未继承 `RScoredSortedSet`。
 
-**`RTimeSeries`**：`add(TimeSeriesAddArgs)`（label+TTL 全参）、`addAll/addIfAbsent/addOrReplace`、`first/last/entryRange/rangeReversed` 全族、label 过滤读、聚合、`info` 全缺。
+**`RTimeSeries`**：`addAll`、`getEntry/getValue/getAndRemove(Entry)`、`first/last`（值/Entry/Timestamp/count 变体）、`pollFirst/Last`（值/Entry/count）、`range/rangeReversed/entryRange/entryRangeReversed`（limit）、`remove/removeRange` ✅ (2.4.0，读侧按 TTL ZSET 惰性过滤；label 形状兼容 n=2/3/4)；仍缺 `stream()/iterator(int)` 视图与 `addListener`。
 
 **`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`getKeysStream*`、`time`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`。
 

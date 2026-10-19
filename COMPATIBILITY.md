@@ -67,7 +67,7 @@
 | RGeo | GEOADD, members JSON-encoded; `GeoSearchArgs` 全族（`from(lon,lat)`/`from(member)`、`radius`/`box`、`order`、`count`/`countAny`）、`search`/`searchWithDistance`/`searchWithPosition`、`storeSearchTo`/`storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）。命令选择对齐 4.6.1 jar：半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`，Box→`GEOSEARCH`，存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE` | WIRE_OK + live bidirectional ✅ + live phase 20 ✅ |
 | RHyperLogLog | PFADD/PFCOUNT/MERGE, members JSON-encoded | NATIVE_OK + live bidirectional ✅ |
 | RBitSet | native MSB-first numbering, no reversal; `BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化 get/set/increment（signed/unsigned + Byte/Short/Integer/Long 快捷）、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`or/and/xor/not` 回字节长、Redis 8 `diff`/`diffInverse`/`andOr`/`setExclusive`（`BITOP DIFF/DIFF1/ANDOR/ONE`）、`setRange`/`clear(from,to)` 为 `to` 排他 | WIRE_OK + live phase 20 ✅（BITFIELD/BITOP 双向 + Redis 8.6 语义实测） |
-| RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2` 无 label；unpack 与 n/t 无关故双向兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节）；`unlink()` clears ttl/seq | WIRE_OK + live phase 3 |
+| RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2/3` 无 label 前缀；读侧按 n==4 新形状标志位、n==2 无 label、其余整段兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节）；`addAll`（单 Lua、序列号+双 ZSET）、`getEntry`/`getValue`、`first/last` 与 `pollFirst/Last` 全族、`range/rangeReversed` 与 `entryRange/entryRangeReversed`（limit）、`getAndRemove(Entry)`、`remove/removeRange`，读侧按 TTL ZSET 惰性过滤；`unlink()` clears ttl/seq | WIRE_OK + live phase 3 + live phase 6（label 双向） + live phase 25（全族/Java 往返 ✅） |
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128; `unlink()` clears both | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
 | RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads); successful acquire renews `keepAliveTime` on config/value/permits inside the Lua (and companions inherit a config TTL when keepAlive is 0); `unlink()` clears value/permits | WIRE_OK + live shared-window ✅ + live phase 22 (TS/Java 双向续期 ✅) |
@@ -79,9 +79,10 @@
 
 ## Verification
 
-- `npm test`: 212 tests / 28 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 216 tests / 29 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
-  §3 leftovers, phase-23 keys/atomic remainder and phase-24 zset remainder), `interop`
+  §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder and
+  phase-25 time-series family), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -117,6 +118,8 @@
   node / MSETEX NX+XX read by Java / atomic exactness / ZADD GT/LT scores, 4/4 PASS),
   `live-phase24` (zset addAll NX/XX/GT/LT + Java score reads / ZRANDMEMBER /
   BZPOPMIN+BZPOPMAX+BZMPOP wake-ups, 2/2 PASS),
+  `live-phase25` (time-series addAll + Java ts-range/ts-add-label round-trip /
+  poll+getAndRemove / removeRange / TTL expiry filtering, 2/2 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

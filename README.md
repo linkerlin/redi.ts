@@ -75,7 +75,7 @@ const redisson = Redisson.create({ client: redis });
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
 - 去重计数：`RHyperLogLog`
 - 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
-- 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`）
+- 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`，TTL 惰性过滤）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
 - 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern）、`RScript`、`RFunction`、`RSearch`、`RVectorSet`
 - 优先级队列（`GO_ONLY`，ZSET 加分数）、`RTransferQueue`（`GO_ONLY`）、`RBatch`（13 类类型化门面），……

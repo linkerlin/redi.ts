@@ -1263,6 +1263,57 @@ describe('phase 23: RKeys ops + atomic scalars (mock)', () => {
   });
 });
 
+describe('phase 25: RTimeSeries read/delete family (mock)', () => {
+  it('addAll, entry reads, ranges and poll/remove', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p25:ts');
+    await ts.addAll([
+      { timestamp: 1000, value: 10 },
+      { timestamp: 2000, value: 20, label: 'l2' },
+      { timestamp: 3000, value: 30 },
+    ]);
+    expect(await ts.size()).toBe(3);
+    const e2 = await ts.getEntry(2000);
+    expect(e2?.value).toBe(20);
+    expect(e2?.label).toBe('l2');
+    expect(await ts.getValue(2000)).toBe(20);
+    expect(await ts.first()).toBe(10);
+    expect(await ts.last()).toBe(30);
+    expect(await ts.firstTimestamp()).toBe(1000);
+    expect(await ts.lastTimestamp()).toBe(3000);
+    expect((await ts.firstEntries(2)).map((e) => e.value)).toEqual([10, 20]);
+    expect((await ts.lastEntries(2)).map((e) => e.value)).toEqual([20, 30]);
+    expect((await ts.range(1000, 2000)).map((e) => e.value)).toEqual([10, 20]);
+    expect((await ts.rangeReversed(1000, 3000)).map((e) => e.value)).toEqual([30, 20, 10]);
+    expect((await ts.entryRange(1000, 3000, 2)).map((e) => e.value)).toEqual([10, 20]);
+    expect((await ts.entryRangeReversed(1000, 3000, 2)).map((e) => e.value)).toEqual([30, 20]);
+
+    expect(await ts.getAndRemove(2000)).toBe(20);
+    expect(await ts.getEntry(2000)).toBeNull();
+    expect(await ts.pollFirst()).toBe(10);
+    expect(await ts.pollLast()).toBe(30);
+    expect(await ts.size()).toBe(0);
+    expect(await ts.pollFirst()).toBeNull();
+    expect(await ts.pollLastEntries(2)).toEqual([]);
+    await r.shutdown();
+  });
+
+  it('remove/removeRange delete only live entries', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<string>('p25:ts2');
+    await ts.addAll([
+      { timestamp: 1000, value: 'a' },
+      { timestamp: 2000, value: 'b' },
+      { timestamp: 3000, value: 'c' },
+    ]);
+    expect(await ts.remove(2000)).toBe(true);
+    expect(await ts.remove(2000)).toBe(false);
+    expect(await ts.removeRange(1000, 3000)).toBe(2);
+    expect(await ts.size()).toBe(0);
+    await r.shutdown();
+  });
+});
+
 describe('phase 24: RScoredSortedSet remainder (mock)', () => {
   it('addAll family + firstEntry/lastEntry', async () => {
     const r = make();

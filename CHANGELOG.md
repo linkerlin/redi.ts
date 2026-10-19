@@ -1,3 +1,28 @@
+## 2.4.0 — 2026-10-19
+
+Phase 25: `RTimeSeries` read/delete family. Full suite: **216 tests / 29
+files green in ~68 s**.
+
+- **Writes**: `addAll(entries, ttlMs?)` — one atomic Lua pass (sequence ids +
+  data ZSET + TTL ZSET, same 4.6.1 member shape as `add`); mock falls back to
+  per-entry `add`.
+- **Reads**: `getEntry` / `getValue` (Java `get` shape), `first` / `last`
+  (+`Entry`/`Timestamp`/`Entries`/count overloads), `range` / `rangeReversed`
+  with an optional limit, `entryRange` / `entryRangeReversed` aliases.
+  All reads filter expired entries via `redisson__ts_ttl` without deleting
+  them (Java lazy semantics).
+- **Removals**: `getAndRemove` / `getAndRemoveEntry` (atomic Lua, label shape
+  branching for n=2/3/4), `remove(timestamp)` (both ZSETs), `removeRange`
+  (expiry-aware Lua, live entries only), `pollFirst` / `pollLast`
+  (+`Entry`/`Entries`/count overloads, atomic Lua).
+- **Label compatibility**: new Lua readers branch on the outer type byte —
+  n==4 reads the mark byte (newer Java), n==2 is unlabeled, n==3 is the
+  unprefixed codec-encoded label written by 4.6.1. Java label round-trips in
+  both directions are covered live.
+- Tests: 2 mock + `test/live-phase25.test.ts` 2/2 (addAll + Java `ts-range` /
+  `ts-add-label` round-trip, poll/getAndRemove, removeRange, TTL expiry
+  filtering).
+
 ## 2.3.0 — 2026-10-19
 
 Phase 24: `RScoredSortedSet` remainder. Full suite: **212 tests / 28 files

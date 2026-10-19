@@ -91,7 +91,9 @@ multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
-`RTimeSeries` (`BBc0Lc0Lc0`), `RBloomFilter` (HighwayHash-128, verified vectors),
+`RTimeSeries` (`BBc0Lc0Lc0`; `addAll`, `getEntry`/`getValue`, first/last and
+poll families, forward/reversed ranges with limits, `getAndRemove`,
+`remove`/`removeRange`, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed

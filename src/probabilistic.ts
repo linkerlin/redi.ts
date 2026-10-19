@@ -740,6 +740,121 @@ export interface TimeSeriesEntry<V = any> {
 
 const TS_NEXT_ID_WIDTH = 20;
 
+const TS_ADD_ALL = `local sequenceWidth = tonumber(ARGV[1])
+local previous
+local function nextId()
+    if previous == nil then
+        previous = redis.call('get', KEYS[3])
+        if previous == false then previous = '0' end
+        previous = string.rep('0', sequenceWidth - string.len(previous)) .. previous
+    end
+    previous = previous + 1
+    redis.call('set', KEYS[3], previous)
+    return previous
+end
+for i = 3, #ARGV, 3 do
+    local id = nextId()
+    local label = ARGV[i + 2]
+    local mark = 2
+    if label ~= '' then mark = 3 end
+    local val = struct.pack('BBc0Lc0Lc0', mark, string.len(id), id,
+                            string.len(ARGV[i + 1]), ARGV[i + 1],
+                            string.len(label), label)
+    redis.call('zadd', KEYS[1], ARGV[i], val)
+    redis.call('zadd', KEYS[2], ARGV[2], val)
+end`;
+
+const TS_HEAD_TAIL = `local count = tonumber(ARGV[3])
+if count == 0 then return {} end
+local cmd = 'zrange'
+if ARGV[2] == '1' then cmd = 'zrevrange' end
+local members = {}
+local scores = {}
+local total = redis.call('zcard', KEYS[1])
+local offset = 0
+local batch = 100
+if count > batch then batch = count end
+while offset < total and (count < 0 or #members < count) do
+    local values = redis.call(cmd, KEYS[1], offset, offset + batch - 1, 'withscores')
+    if #values == 0 then break end
+    for i = 1, #values, 2 do
+        local expirationDate = redis.call('zscore', KEYS[2], values[i])
+        if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then
+            table.insert(members, values[i])
+            table.insert(scores, values[i + 1])
+            if count > 0 and #members == count then break end
+        end
+    end
+    offset = offset + #values / 2
+end
+if ARGV[4] == '1' then
+    local out = {}
+    for i = 1, #members do
+        local n, t, val, label = struct.unpack('BBc0Lc0Lc0', members[i])
+        local lbl = ''
+        if n == 4 then
+            local mark = string.byte(label, 1)
+            if mark == 3 then lbl = string.sub(label, 2) end
+        elseif n ~= 2 then
+            lbl = label
+        end
+        table.insert(out, scores[i])
+        table.insert(out, val)
+        table.insert(out, lbl)
+    end
+    for i = 1, #members do
+        redis.call('zrem', KEYS[1], members[i])
+        redis.call('zrem', KEYS[2], members[i])
+    end
+    return out
+end
+local out = {}
+for i = 1, #members do
+    local n, t, val, label = struct.unpack('BBc0Lc0Lc0', members[i])
+    local lbl = ''
+    if n == 4 then
+        local mark = string.byte(label, 1)
+        if mark == 3 then lbl = string.sub(label, 2) end
+    elseif n ~= 2 then
+        lbl = label
+    end
+    table.insert(out, scores[i])
+    table.insert(out, val)
+    table.insert(out, lbl)
+end
+return out`;
+
+const TS_GET_AND_REMOVE = `local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[2])
+for i = 1, #values do
+    local expirationDate = redis.call('zscore', KEYS[2], values[i])
+    if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then
+        local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i])
+        local lbl = ''
+        if n == 4 then
+            local mark = string.byte(label, 1)
+            if mark == 3 then lbl = string.sub(label, 2) end
+        elseif n ~= 2 then
+            lbl = label
+        end
+        redis.call('zrem', KEYS[2], values[i])
+        redis.call('zrem', KEYS[1], values[i])
+        return {ARGV[2], val, lbl}
+    end
+end
+return nil`;
+
+const TS_REMOVE_RANGE = `local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3])
+local removed = 0
+for i = 1, #values do
+    local expirationDate = redis.call('zscore', KEYS[2], values[i])
+    if expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1]) then
+        redis.call('zrem', KEYS[2], values[i])
+        redis.call('zrem', KEYS[1], values[i])
+        removed = removed + 1
+    end
+end
+return removed`;
+
 export class RTimeSeries<V = any> extends RedisDataStructure {
   private ttlKey: string;
   private seqKey: string;
@@ -785,30 +900,69 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
       await this.redis.zadd(this.ttlKey, String(exp), member);
     }
   }
-  private async alive(members: Buffer[], now: number): Promise<Buffer[]> {
-    const out: Buffer[] = [];
-    for (const m of members) {
-      const score = await this.redis.zscore(this.ttlKey, m);
-      if (score === null || Number(score) > now) out.push(m);
+  /** Java `addAll(Collection<TimeSeriesEntry>[, Duration])`: one atomic Lua
+   *  pass (sequence ids + both ZSETs); mock falls back to per-entry add(). */
+  async addAll(entries: TimeSeriesEntry<V>[], ttlMs = 0): Promise<void> {
+    if (entries.length === 0) return;
+    const now = await serverNowMs(this.redis);
+    const exp = ttlMs > 0 ? now + ttlMs : now + 365 * 100 * 24 * 3600 * 1000;
+    const args: string[] = [String(TS_NEXT_ID_WIDTH), String(exp)];
+    for (const e of entries) {
+      args.push(String(e.timestamp), this.encodeValue(e.value), e.label ? this.encodeValue(e.label) : '');
+    }
+    try {
+      await luaEval(this.redis, TS_ADD_ALL, 3, this.name, this.ttlKey, this.seqKey, ...args);
+    } catch {
+      for (const e of entries) await this.add(e.timestamp, e.value, ttlMs, e.label ?? '');
+    }
+  }
+  private decodeTriples(res: any[]): TimeSeriesEntry<V>[] {
+    const out: TimeSeriesEntry<V>[] = [];
+    for (let i = 0; i + 2 < res.length; i += 3) {
+      let value: V;
+      try {
+        value = this.decodeValue(String(res[i + 1])) as V;
+      } catch {
+        value = res[i + 1] as V;
+      }
+      let label = '';
+      if (res[i + 2]) {
+        try {
+          const d = this.decodeValue(String(res[i + 2]));
+          label = typeof d === 'string' ? d : String(res[i + 2]);
+        } catch {
+          label = String(res[i + 2]);
+        }
+      }
+      out.push({ timestamp: Number(res[i]), value, label });
     }
     return out;
   }
-  async range(from: number, to: number): Promise<TimeSeriesEntry<V>[]> {
+  /** Raw entries in score order with TTL filtering; `limit <= 0` = unlimited. */
+  private async rawEntries(from: number | string, to: number | string, reverse: boolean, limit: number): Promise<TimeSeriesEntry<V>[]> {
     const now = await serverNowMs(this.redis);
-    // NOTE: members carry arbitrary id bytes — must travel as Buffers.
-    // ioredis string replies are UTF-8 and would corrupt them on real Redis.
-    let members: Buffer[] = [];
+    // BYSCORE REV takes (max, min); callers always pass ascending bounds.
+    const args: (string | number)[] = [this.name, reverse ? String(to) : String(from), reverse ? String(from) : String(to), 'BYSCORE'];
+    if (reverse) args.push('REV');
+    args.push('WITHSCORES');
+    let raw: any[];
     try {
-      const raw = await this.redis.zrangebyscoreBuffer(this.name, String(from), String(to));
-      members = (raw as unknown[]).map((m) => (Buffer.isBuffer(m) ? m : Buffer.from(String(m), 'latin1')));
+      raw = await (this.redis as any).zrangeBuffer(...args);
     } catch {
-      return [];
+      raw = await (this.redis as any).zrange(...args);
     }
-    const live = await this.alive(members, now);
-    const scores = await Promise.all(live.map((m) => this.redis.zscore(this.name, m)));
-    return live.map((m, i) => {
-      const u = unpackTimeSeriesMember(m);
-      let value: V = m as unknown as V;
+    const out: TimeSeriesEntry<V>[] = [];
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const member = Buffer.isBuffer(raw[i]) ? raw[i] : Buffer.from(String(raw[i]), 'latin1');
+      let exp: any = null;
+      try {
+        exp = await this.redis.zscore(this.ttlKey, member as any);
+      } catch {
+        exp = await this.redis.zscore(this.ttlKey, member.toString('latin1'));
+      }
+      if (exp !== null && exp !== undefined && Number(exp) <= now) continue;
+      const u = unpackTimeSeriesMember(member);
+      let value: V = member as unknown as V;
       let label = '';
       if (u) {
         try {
@@ -816,7 +970,6 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
         } catch {
           value = u.val as unknown as V;
         }
-        // label blob is mark byte + codec-encoded label (strip mark, decode)
         if (u.label !== '') {
           try {
             const d = this.decodeValue(u.label);
@@ -827,15 +980,193 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
         }
       } else {
         try {
-          value = this.decodeValue(m.toString('utf8')) as V;
+          value = this.decodeValue(member.toString('utf8')) as V;
         } catch { /* raw */ }
       }
-      return { timestamp: Number(scores[i]), value, label };
-    });
+      const score = Buffer.isBuffer(raw[i + 1]) ? raw[i + 1].toString() : String(raw[i + 1]);
+      out.push({ timestamp: Number(score), value, label });
+      if (limit > 0 && out.length >= limit) break;
+    }
+    return out;
   }
-  async get(timestamp: number): Promise<TimeSeriesEntry<V> | null> {
+  private async alive(members: Buffer[], now: number): Promise<Buffer[]> {
+    const out: Buffer[] = [];
+    for (const m of members) {
+      const score = await this.redis.zscore(this.ttlKey, m);
+      if (score === null || Number(score) > now) out.push(m);
+    }
+    return out;
+  }
+  /** Unexpired entries in [from, to] ascending (Java `entryRange`; also the
+   *  historical TS `range` — entries, not values). */
+  async range(from: number, to: number, limit = 0): Promise<TimeSeriesEntry<V>[]> {
+    return this.rawEntries(from, to, false, limit);
+  }
+  /** Unexpired entries descending. */
+  async rangeReversed(from: number, to: number, limit = 0): Promise<TimeSeriesEntry<V>[]> {
+    return this.rawEntries(from, to, true, limit);
+  }
+  /** Java `entryRange(from, to[, limit])` alias (entries). */
+  async entryRange(from: number, to: number, limit = 0): Promise<TimeSeriesEntry<V>[]> {
+    return this.range(from, to, limit);
+  }
+  /** Java `entryRangeReversed(from, to[, limit])` alias (entries). */
+  async entryRangeReversed(from: number, to: number, limit = 0): Promise<TimeSeriesEntry<V>[]> {
+    return this.rangeReversed(from, to, limit);
+  }
+  /** Entry at exactly `timestamp` (Java `getEntry`). */
+  async getEntry(timestamp: number): Promise<TimeSeriesEntry<V> | null> {
     const r = await this.range(timestamp, timestamp);
     return r.length === 0 ? null : r[0];
+  }
+  /** Back-compat TS `get`: returns the entry (Java `get` returns the value —
+   *  use `getValue` for that shape). */
+  async get(timestamp: number): Promise<TimeSeriesEntry<V> | null> {
+    return this.getEntry(timestamp);
+  }
+  /** Java `get(long)`: the value only. */
+  async getValue(timestamp: number): Promise<V | null> {
+    const e = await this.getEntry(timestamp);
+    return e === null ? null : e.value;
+  }
+  async getAndRemoveEntry(timestamp: number): Promise<TimeSeriesEntry<V> | null> {
+    const now = await serverNowMs(this.redis);
+    try {
+      const res: any = await luaEval(this.redis, TS_GET_AND_REMOVE, 2, this.name, this.ttlKey, String(now), String(timestamp));
+      if (!Array.isArray(res) || res.length < 3) return null;
+      return this.decodeTriples(res)[0] ?? null;
+    } catch {
+      const e = await this.getEntry(timestamp);
+      if (e !== null) await this.remove(timestamp);
+      return e;
+    }
+  }
+  async getAndRemove(timestamp: number): Promise<V | null> {
+    const e = await this.getAndRemoveEntry(timestamp);
+    return e === null ? null : e.value;
+  }
+  /** Remove every entry at exactly `timestamp` (both ZSETs). */
+  async remove(timestamp: number): Promise<boolean> {
+    let members: any[];
+    try {
+      members = await (this.redis as any).zrangeBuffer(this.name, String(timestamp), String(timestamp), 'BYSCORE');
+    } catch {
+      members = await (this.redis as any).zrange(this.name, String(timestamp), String(timestamp), 'BYSCORE');
+    }
+    if (!members || members.length === 0) return false;
+    const plain = members.map((m: any) => (Buffer.isBuffer(m) ? m.toString('latin1') : String(m)));
+    try {
+      await this.redis.zrem(this.name, ...members);
+    } catch {
+      await this.redis.zrem(this.name, ...plain);
+    }
+    try {
+      await this.redis.zrem(this.ttlKey, ...members);
+    } catch {
+      await this.redis.zrem(this.ttlKey, ...plain);
+    }
+    return true;
+  }
+  /** Remove live entries in [from, to]; returns the removed count. */
+  async removeRange(from: number, to: number): Promise<number> {
+    const now = await serverNowMs(this.redis);
+    try {
+      return toNumber(await luaEval(this.redis, TS_REMOVE_RANGE, 2, this.name, this.ttlKey, String(now), String(from), String(to)));
+    } catch {
+      const entries = await this.rawEntries(from, to, false, 0);
+      let n = 0;
+      for (const e of entries) if (await this.remove(e.timestamp)) n += 1;
+      return n;
+    }
+  }
+  private async headTail(reverse: boolean, count: number, poll: boolean): Promise<TimeSeriesEntry<V>[]> {
+    if (count === 0) return [];
+    const now = await serverNowMs(this.redis);
+    try {
+      const res: any = await luaEval(this.redis, TS_HEAD_TAIL, 2, this.name, this.ttlKey,
+        String(now), reverse ? '1' : '0', String(count), poll ? '1' : '0');
+      return this.decodeTriples(Array.isArray(res) ? res : []);
+    } catch {
+      const entries = await this.rawEntries(0, '+inf', reverse, count < 0 ? 0 : count);
+      if (poll) for (const e of entries) await this.remove(e.timestamp);
+      return entries;
+    }
+  }
+  async firstEntry(): Promise<TimeSeriesEntry<V> | null> {
+    const e = await this.headTail(false, 1, false);
+    return e.length === 0 ? null : e[0];
+  }
+  async lastEntry(): Promise<TimeSeriesEntry<V> | null> {
+    const e = await this.headTail(true, 1, false);
+    return e.length === 0 ? null : e[0];
+  }
+  async firstTimestamp(): Promise<number | null> {
+    const e = await this.firstEntry();
+    return e === null ? null : e.timestamp;
+  }
+  async lastTimestamp(): Promise<number | null> {
+    const e = await this.lastEntry();
+    return e === null ? null : e.timestamp;
+  }
+  async firstEntries(count: number): Promise<TimeSeriesEntry<V>[]> {
+    return this.headTail(false, count, false);
+  }
+  async lastEntries(count: number): Promise<TimeSeriesEntry<V>[]> {
+    const e = await this.headTail(true, count, false);
+    return e.reverse();
+  }
+  async pollFirstEntries(count: number): Promise<TimeSeriesEntry<V>[]> {
+    if (count <= 0) return [];
+    return this.headTail(false, count, true);
+  }
+  async pollLastEntries(count: number): Promise<TimeSeriesEntry<V>[]> {
+    if (count <= 0) return [];
+    const e = await this.headTail(true, count, true);
+    return e.reverse();
+  }
+  async first(): Promise<V | null>;
+  async first(count: number): Promise<V[]>;
+  async first(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const e = await this.firstEntry();
+      return e === null ? null : e.value;
+    }
+    return (await this.firstEntries(count)).map((e) => e.value);
+  }
+  async last(): Promise<V | null>;
+  async last(count: number): Promise<V[]>;
+  async last(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const e = await this.lastEntry();
+      return e === null ? null : e.value;
+    }
+    return (await this.lastEntries(count)).map((e) => e.value);
+  }
+  async pollFirstEntry(): Promise<TimeSeriesEntry<V> | null> {
+    const e = await this.pollFirstEntries(1);
+    return e.length === 0 ? null : e[0];
+  }
+  async pollLastEntry(): Promise<TimeSeriesEntry<V> | null> {
+    const e = await this.pollLastEntries(1);
+    return e.length === 0 ? null : e[0];
+  }
+  async pollFirst(): Promise<V | null>;
+  async pollFirst(count: number): Promise<V[]>;
+  async pollFirst(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const e = await this.pollFirstEntry();
+      return e === null ? null : e.value;
+    }
+    return (await this.pollFirstEntries(count)).map((e) => e.value);
+  }
+  async pollLast(): Promise<V | null>;
+  async pollLast(count: number): Promise<V[]>;
+  async pollLast(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const e = await this.pollLastEntry();
+      return e === null ? null : e.value;
+    }
+    return (await this.pollLastEntries(count)).map((e) => e.value);
   }
   async size(): Promise<number> {
     const total = await this.redis.zcard(this.name);
