@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { JsonCodec, StringCodec, javaTypeWrap, unwrap } from '../src/codec';
-import { prefixName, suffixName, highwayHash128, multimapInternalId, bloomBitIndex, packMapCacheValue, unpackMapCacheValue, packTimeSeriesMember, unpackTimeSeriesMember, unpackDelayedMember } from '../src/util';
+import { prefixName, suffixName, highwayHash128, multimapInternalId, bloomBitIndex, packMapCacheValue, unpackMapCacheValue, packTimeSeriesMember, unpackTimeSeriesMember, unpackDelayedMember, encodeMapCacheEvent, decodeMapCacheEvent, keySynchronizerName, hash128toBase64 } from '../src/util';
 
 describe('codec (JsonJacksonCodec default typing)', () => {
   const c = new JsonCodec();
@@ -42,6 +42,40 @@ describe('codec (JsonJacksonCodec default typing)', () => {
     // redi.py: {"n":1} bare, [1] bare — we decode both fine (superset compat)
     expect(c.decode('{"n": 1}')).toEqual({ n: 1 });
     expect(c.decode('[1]')).toEqual([1]);
+  });
+});
+
+describe('JsonCodec BigInt (64-bit lossless)', () => {
+  const c = new JsonCodec({ bigIntForUnsafeLong: true });
+
+  it('encodes BigInt without Number() rounding', () => {
+    expect(c.encode(9223372036854775807n)).toBe('["java.lang.Long",9223372036854775807]');
+    expect(c.encode(-9223372036854775808n)).toBe('["java.lang.Long",-9223372036854775808]');
+    expect(c.encode([1n, 9223372036854775807n])).toBe(
+      '["java.util.ArrayList",[["java.lang.Long",1],["java.lang.Long",9223372036854775807]]]',
+    );
+    expect(c.encode({ id: 9223372036854775807n })).toContain('["java.lang.Long",9223372036854775807]');
+  });
+
+  it('decodes unsafe integer literals as BigInt', () => {
+    expect(c.decode('9223372036854775807')).toBe(9223372036854775807n);
+    expect(c.decode('["java.lang.Long",9223372036854775807]')).toBe(9223372036854775807n);
+    expect(c.decode('{"id":9223372036854775807}')).toEqual({ id: 9223372036854775807n });
+    expect(c.decode('9223372036854775807.5')).toBe(9223372036854775807.5);
+    expect(c.decode('1e20')).toBe(1e20);
+  });
+
+  it('keeps safe integers, strings and exponents on the number contract', () => {
+    expect(c.decode('5000000000')).toBe(5000000000);
+    expect(c.decode('["java.lang.Long",5000000000]')).toBe(5000000000);
+    expect(c.decode('"9223372036854775807"')).toBe('9223372036854775807');
+    expect(new JsonCodec().decode('9223372036854775807')).toBe(9223372036854776000);
+    expect(new JsonCodec().decode('9223372036854775807')).not.toBe(9223372036854775807n);
+  });
+
+  it('round-trips BigInt through nested structures', () => {
+    const v = { id: 18446744073709551615n, list: [9223372036854775807n, 7] };
+    expect(c.decode(c.encode(v))).toEqual(v);
   });
 });
 
@@ -110,5 +144,38 @@ describe('struct packs (little-endian wire)', () => {
   it('delayed member rejects garbage', () => {
     expect(unpackDelayedMember('')).toBe(null);
     expect(unpackDelayedMember('\x08abc')).toBe(null);
+  });
+});
+
+describe('map cache events (u64LE length-prefixed segments)', () => {
+  it('round-trips created/updated/removed payloads', () => {
+    const msg = encodeMapCacheEvent(['"k"', '"v1"']);
+    const b = Buffer.from(msg, 'latin1');
+    expect(b.readBigUInt64LE(0)).toBe(3n);
+    expect(decodeMapCacheEvent(b)).toEqual(['"k"', '"v1"']);
+    expect(decodeMapCacheEvent(encodeMapCacheEvent(['"k"', '"v2"', '"v1"']))).toEqual(['"k"', '"v2"', '"v1"']);
+    // JSON escapes stay inside the segment bytes
+    expect(decodeMapCacheEvent(encodeMapCacheEvent(['"k"', '"a\\"b"']))).toEqual(['"k"', '"a\\"b"']);
+  });
+  it('drops a truncated tail instead of throwing', () => {
+    const full = encodeMapCacheEvent(['"k"', '"v"']);
+    const cut = Buffer.from(full, 'latin1').subarray(0, full.length - 2);
+    expect(decodeMapCacheEvent(cut)).toEqual(['"k"']);
+    expect(decodeMapCacheEvent('')).toEqual([]);
+  });
+});
+
+describe('key synchronizer names (Java RMap/RSet getLock family)', () => {
+  it('matches the Java 4.6.1 probe vector for k1', () => {
+    // TsProbe: map-lock-name TsJavaT:p19:probe k1 (JsonJacksonCodec) →
+    // {TsJavaT:p19:probe}:vBdUTRe0AVL6cuMJeT8lIw:{lock|fairlock|rw_lock|...}
+    const h = hash128toBase64('"k1"');
+    expect(h).toBe('vBdUTRe0AVL6cuMJeT8lIw');
+    expect(keySynchronizerName('TsJavaT:p19:probe', '"k1"', 'lock'))
+      .toBe(`{TsJavaT:p19:probe}:${h}:lock`);
+    expect(keySynchronizerName('TsJavaT:p19:probe', '"k1"', 'rw_lock'))
+      .toBe(`{TsJavaT:p19:probe}:${h}:rw_lock`);
+    expect(keySynchronizerName('TsJavaT:p19:probe', '"k1"', 'permitexpirablesemaphore'))
+      .toBe(`{TsJavaT:p19:probe}:${h}:permitexpirablesemaphore`);
   });
 });

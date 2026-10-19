@@ -3,28 +3,36 @@
  * (JsonJacksonCodec) + redi.py + redi.go. Single-node topology over ioredis
  * (cluster/sentinel via user-supplied client).
  */
-import Redis, { RedisOptions } from 'ioredis';
+import Redis, { RedisOptions, Cluster } from 'ioredis';
 import { randomBytes } from 'node:crypto';
-import { Codec, JsonCodec } from './codec';
-import { RBucket, RBuckets } from './collections';
-import { RAtomicLong, RAtomicDouble, RLongAdder, RDoubleAdder, RIdGenerator } from './atomic';
-import { RMap, RSet, RList, RQueue, RDeque, RBlockingQueue, RBlockingDeque, RBoundedBlockingQueue, RScoredSortedSet, RLexSortedSet } from './collections';
-import { RMapCache, RMapCacheNative, RSetCache, RSetMultimap, RListMultimap, RSetMultimapCache, RListMultimapCache, RLocalCachedMap, LocalCachedMapOptions } from './caches';
+import { Codec, JsonCodec } from './codec.js';
+import { RBucket, RBuckets } from './collections.js';
+import { RAtomicLong, RAtomicDouble, RLongAdder, RDoubleAdder, RIdGenerator } from './atomic.js';
+import { RMap, RSet, RList, RQueue, RDeque, RBlockingQueue, RBlockingDeque, RBoundedBlockingQueue, RScoredSortedSet, RLexSortedSet } from './collections.js';
+import { RMapCache, RMapCacheNative, RSetCache, RSetMultimap, RListMultimap, RSetMultimapCache, RListMultimapCache, RLocalCachedMap, LocalCachedMapOptions } from './caches.js';
 import {
   RLock, RSpinLock, RNonReentrantLock, RFairLock, RNonReentrantFairLock,
   RReadWriteLock, RSemaphore, RCountDownLatch, RPermitExpirableSemaphore,
-  RFencedLock, RMultiLock, RRedLock, BackOff,
-} from './locks';
-import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging';
-import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic';
-import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RMaps, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra';
+  RFencedLock, RMultiLock, RRedLock, BackOff, LockLike,
+} from './locks.js';
+import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging.js';
+import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic.js';
+import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RMaps, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
+
+/**
+ * Accepted client shapes: a single ioredis connection or an ioredis Cluster.
+ * Cluster clients must keep all keys of one structure in the same hash slot —
+ * every Redisson structure key is hash-tagged (`{name}` companions), so the
+ * built-in types are cluster-safe as-is.
+ */
+export type RedisClient = Redis | Cluster;
 
 export interface Config {
   /** redis:// URL or host:port */
   address?: string;
   options?: RedisOptions;
-  /** an existing ioredis client (takes precedence) */
-  client?: Redis;
+  /** an existing ioredis client — Redis or Cluster (takes precedence) */
+  client?: RedisClient;
   codec?: Codec;
   lockWatchdogTimeout?: number;
 }
@@ -36,7 +44,10 @@ export class Redisson {
   private watchdog: number;
 
   private constructor(config: Config) {
-    this.redis = config.client ?? (config.address ? new Redis(config.address, config.options ?? {}) : new Redis(config.options ?? {}));
+    // Internals keep the `Redis` type: a Cluster exposes the same command
+    // surface (verified in the live cluster suite); the field stays `Redis`
+    // so every call site type-checks identically for both clients.
+    this.redis = (config.client as Redis | undefined) ?? (config.address ? new Redis(config.address, config.options ?? {}) : new Redis(config.options ?? {}));
     this.codec = config.codec ?? new JsonCodec();
     this.watchdog = config.lockWatchdogTimeout ?? 30000;
   }
@@ -92,7 +103,7 @@ export class Redisson {
 
   // -- maps / sets / lists / queues ------------------------------------------
   getMap<K, V>(name: string, codec?: Codec): RMap<K, V> {
-    return new RMap<K, V>(this.redis, name, codec ?? this.codec);
+    return new RMap<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getRMap<K, V>(name: string, codec?: Codec): RMap<K, V> {
     return this.getMap<K, V>(name, codec);
@@ -101,10 +112,10 @@ export class Redisson {
     return new RMaps(this.redis, this.codec);
   }
   getMapCache<K, V>(name: string, codec?: Codec): RMapCache<K, V> {
-    return new RMapCache<K, V>(this.redis, name, codec ?? this.codec);
+    return new RMapCache<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getMapCacheNative<K, V>(name: string, codec?: Codec): RMapCacheNative<K, V> {
-    return new RMapCacheNative<K, V>(this.redis, name, codec ?? this.codec);
+    return new RMapCacheNative<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getLocalCachedMap<K, V>(name: string, opts: LocalCachedMapOptions = {}): RLocalCachedMap<K, V> {
     return new RLocalCachedMap<K, V>(this.redis, name, this.codec, opts, this.id);
@@ -113,13 +124,13 @@ export class Redisson {
     return this.getLocalCachedMap<K, V>(name, opts);
   }
   getSet<V>(name: string, codec?: Codec): RSet<V> {
-    return new RSet<V>(this.redis, name, codec ?? this.codec);
+    return new RSet<V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getRSet<V>(name: string, codec?: Codec): RSet<V> {
     return this.getSet<V>(name, codec);
   }
   getSetCache<V>(name: string, codec?: Codec): RSetCache<V> {
-    return new RSetCache<V>(this.redis, name, codec ?? this.codec);
+    return new RSetCache<V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getList<V>(name: string, codec?: Codec): RList<V> {
     return new RList<V>(this.redis, name, codec ?? this.codec);
@@ -145,6 +156,14 @@ export class Redisson {
   getBoundedBlockingQueue<V>(name: string, codec?: Codec): RBoundedBlockingQueue<V> {
     return new RBoundedBlockingQueue<V>(this.redis, name, codec ?? this.codec);
   }
+  /**
+   * Delayed queue. Java wires the background migrator (QueueTransferTask)
+   * automatically at object creation; here it is opt-in — call `start()` once
+   * to have expired members delivered without an explicit poll() (stop()/
+   * destroy() release it, destroy() deletes nothing). Without `start()`,
+   * behaviour matches 1.5.0: only poll()/peek() run a synchronous catch-up
+   * migration.
+   */
   getDelayedQueue<V>(name: string, codec?: Codec): RDelayedQueue<V> {
     return new RDelayedQueue<V>(this.redis, name, codec ?? this.codec);
   }
@@ -164,16 +183,16 @@ export class Redisson {
     return new RLexSortedSet(this.redis, name, this.codec);
   }
   getSetMultimap<K, V>(name: string, codec?: Codec): RSetMultimap<K, V> {
-    return new RSetMultimap<K, V>(this.redis, name, codec ?? this.codec);
+    return new RSetMultimap<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getListMultimap<K, V>(name: string, codec?: Codec): RListMultimap<K, V> {
-    return new RListMultimap<K, V>(this.redis, name, codec ?? this.codec);
+    return new RListMultimap<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getSetMultimapCache<K, V>(name: string, codec?: Codec): RSetMultimapCache<K, V> {
-    return new RSetMultimapCache<K, V>(this.redis, name, codec ?? this.codec);
+    return new RSetMultimapCache<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getListMultimapCache<K, V>(name: string, codec?: Codec): RListMultimapCache<K, V> {
-    return new RListMultimapCache<K, V>(this.redis, name, codec ?? this.codec);
+    return new RListMultimapCache<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
   }
   getSetMultimapCacheNative<K, V>(name: string, codec?: Codec): RSetMultimapCacheNative {
     void codec;
@@ -224,16 +243,16 @@ export class Redisson {
   getRateLimiter(name: string): RRateLimiter {
     return new RRateLimiter(this.redis, name, this.id);
   }
-  newMultiLock(...locks: RLock[]): RMultiLock {
+  newMultiLock(...locks: LockLike[]): RMultiLock {
     return new RMultiLock(locks);
   }
-  getMultiLock(...locks: RLock[]): RMultiLock {
+  getMultiLock(...locks: LockLike[]): RMultiLock {
     return this.newMultiLock(...locks);
   }
-  newRedLock(...locks: RLock[]): RRedLock {
+  newRedLock(...locks: LockLike[]): RRedLock {
     return new RRedLock(locks);
   }
-  getRedLock(...locks: RLock[]): RRedLock {
+  getRedLock(...locks: LockLike[]): RRedLock {
     return this.newRedLock(...locks);
   }
   /** Transactions are snapshot-rollback in Redisson, not MULTI/EXEC — refuse. */

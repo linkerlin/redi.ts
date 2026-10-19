@@ -3,9 +3,10 @@
  * and redi.go rObject: shared client/name/codec + RObject/RExpirable surfaces.
  */
 import type { Redis } from 'ioredis';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import { luaEval } from './util';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import { luaEval } from './util.js';
+import { randomBytes } from 'node:crypto';
 
 export class RedisDataStructure {
   constructor(
@@ -16,6 +17,31 @@ export class RedisDataStructure {
 
   getName(): string {
     return this.name;
+  }
+
+  // -- key-synchronizer identity ------------------------------------------
+
+  private ownerIdCache?: string;
+  private ownerWatchdogMs = 30000;
+
+  /** Client identity used by per-key synchronizers (RMap/RSet/RMultimap
+   * `getLock(key)` family). Lazily allocated for structures built outside
+   * `Redisson.create`; the factory calls `attachOwner` so locks share the
+   * client id (and thus interoperate with `getLock(name)`). */
+  protected ownerId(): string {
+    if (this.ownerIdCache === undefined) this.ownerIdCache = randomBytes(16).toString('hex');
+    return this.ownerIdCache;
+  }
+
+  protected ownerWatchdog(): number {
+    return this.ownerWatchdogMs;
+  }
+
+  /** @internal Redisson factory hook (client id + watchdog for key locks). */
+  attachOwner(id: string, watchdogMs: number): this {
+    this.ownerIdCache = id;
+    this.ownerWatchdogMs = watchdogMs;
+    return this;
   }
 
   encodeKey(key: unknown): string {
@@ -44,13 +70,26 @@ export class RedisDataStructure {
   }
 
   // -- RObject -----------------------------------------------------------
+
+  /** Delete the structure's owned keys (main key + hash-tagged companions). */
+  protected async deleteKeys(keys: string[]): Promise<boolean> {
+    return ((await this.redis.del(...keys)) as number) > 0;
+  }
+
+  /** UNLINK equivalent; falls back to DEL when the server/client lacks it. */
+  protected async unlinkKeys(keys: string[]): Promise<boolean> {
+    try {
+      const fn = (this.redis as any).unlink;
+      if (typeof fn === 'function') return ((await fn.call(this.redis, ...keys)) as number) > 0;
+    } catch { /* fall through to DEL */ }
+    return this.deleteKeys(keys);
+  }
+
   async delete(): Promise<boolean> {
-    return ((await this.redis.del(this.name)) as number) > 0;
+    return this.deleteKeys([this.name]);
   }
   async unlink(): Promise<boolean> {
-    const fn = (this.redis as any).unlink;
-    if (typeof fn === 'function') return ((await fn.call(this.redis, this.name)) as number) > 0;
-    return this.delete();
+    return this.unlinkKeys([this.name]);
   }
   async rename(newName: string): Promise<void> {
     await this.redis.rename(this.name, newName);
@@ -66,14 +105,14 @@ export class RedisDataStructure {
   }
   async touch(): Promise<boolean> {
     try {
-      return ((await (this.redis as any).touch(this.name)) as number) > 0;
+      return ((await this.redis.touch(this.name)) as number) > 0;
     } catch {
       return this.isExists();
     }
   }
   async sizeInMemory(): Promise<number> {
     try {
-      const n = await (this.redis as any).memory('USAGE', this.name);
+      const n = await this.redis.memory('USAGE', this.name);
       return n === null ? 0 : Number(n);
     } catch {
       return 0;
@@ -95,7 +134,7 @@ export class RedisDataStructure {
   }
   async getExpireTime(): Promise<number> {
     try {
-      return await (this.redis as any).pexpiretime(this.name);
+      return await this.redis.pexpiretime(this.name);
     } catch {
       return this.remainTimeToLive();
     }

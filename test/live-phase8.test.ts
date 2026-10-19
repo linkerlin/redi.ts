@@ -6,19 +6,12 @@
  * Needs real Redis + probe.
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe } from './helpers/java-probe';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p8:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -31,12 +24,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(args: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
   if (keys.length > 0) await r.getKeys().delete(...keys);
@@ -213,13 +200,15 @@ describe('live interop phase 8: lcm/deque-list-set/atomicdouble-bucket-cas/pes-m
 
   it('lock watchdog renews past the lease', async () => {
     if (!hasRedis) return;
-    const r = Redisson.create({ address: REDIS_URL });
+    // Short watchdog keeps the proof fast: lease 4s, renew every 4/3s — a
+    // renewal must happen or the lock expires before the 6s check.
+    const r = Redisson.create({ address: REDIS_URL, lockWatchdogTimeout: 4000 });
     const name = `${NS}lock:watchdog`;
     try {
       await cleanExact(r, name);
       const l = r.getLock(name);
-      await l.lock(undefined, 9); // watchdog mode (30s lease, renew every 10s)
-      await new Promise((x) => setTimeout(x, 35000)); // past one full lease
+      await l.lock(undefined, 9); // watchdog mode
+      await new Promise((x) => setTimeout(x, 6000)); // past one full lease
       expect(await l.isLocked()).toBe(true);
       expect(await probe(`lock-try ${name}`)).toBe('CONTENDED');
       await l.unlock(9);

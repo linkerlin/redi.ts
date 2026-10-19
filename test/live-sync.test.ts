@@ -3,19 +3,12 @@
  * shared rate-limiter window. Needs real Redis + probe (see live-interop.test.ts).
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:sync:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -28,14 +21,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(probeArgs: string): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${probeArgs}"`;
-  const { stdout } = await execAsync(cmd, { timeout: 300000, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  // last non-warning line is the verdict
-  const verdict = [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J'));
-  return verdict ?? '';
-}
 
 const hasRedis = await redisUp();
 
@@ -63,10 +48,7 @@ describe('live interop phase 2: locks/semaphore/ratelimiter', () => {
     try {
       await r.getKeys().delete(name);
       // hold in background: probe prints HELD, sleeps 4s, prints RELEASED
-      const hold = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${name} 4000"`,
-        { timeout: 60000, cwd: ROOT },
-      );
+      const hold = probeBg(`lock-hold ${name} 4000`);
       // wait until HELD is observable
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
@@ -132,10 +114,7 @@ describe('live interop phase 2: locks/semaphore/ratelimiter', () => {
       await sp.unlock(11);
       expect(await probe(`lock-try ${name}`)).toBe('ACQUIRED');
 
-      const hold = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${name} 4000"`,
-        { timeout: 60000, cwd: ROOT },
-      );
+      const hold = probeBg(`lock-hold ${name} 4000`);
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));

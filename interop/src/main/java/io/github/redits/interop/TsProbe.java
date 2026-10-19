@@ -7,7 +7,7 @@ import org.redisson.api.RedissonClient;
 import org.redisson.codec.JsonJacksonCodec;
 import org.redisson.config.Config;
 
-/** CLI: TsProbe [clean|write-java|read-ts|roundtrip|lock-try|lock-hold|rate-try|sem-try] [args...]. */
+/** CLI: TsProbe [clean|write-java|read-ts|roundtrip|lock-try|lock-hold|rate-try|sem-try|repl] [args...]. */
 public final class TsProbe {
 
     public static void main(String[] args) throws Exception {
@@ -24,7 +24,20 @@ public final class TsProbe {
         RedissonClient redisson = Redisson.create(config);
         TsFixtures fx = new TsFixtures(redisson);
         try {
-            switch (mode) {
+            if ("repl".equals(mode)) {
+                // Resident probe: one client, many commands (see TsRepl).
+                TsRepl.serve(redisson, fx, ns);
+                return;
+            }
+            run(mode, args, ns, redisson, fx);
+        } finally {
+            redisson.shutdown();
+        }
+    }
+
+    /** Executes one probe command against an existing client. */
+    static void run(String mode, String[] args, String ns, RedissonClient redisson, TsFixtures fx) throws Exception {
+        switch (mode) {
                 case "clean" -> {
                     fx.clean(ns);
                     System.out.println("cleaned " + ns + "*");
@@ -38,7 +51,7 @@ public final class TsProbe {
                     List<String> lines = fx.readTsSide(ns);
                     lines.forEach(System.out::println);
                     long fails = lines.stream().filter(l -> !l.startsWith("[PASS]")).count();
-                    if (fails > 0) System.exit(1);
+                    if (fails > 0) throw new IllegalStateException("read-ts fixtures failed: " + fails);
                 }
                 case "roundtrip" -> {
                     fx.clean(ns);
@@ -54,9 +67,7 @@ public final class TsProbe {
                         ok = redisson.getLock(lockName).tryLock(0, 30, java.util.concurrent.TimeUnit.SECONDS);
                         if (ok) redisson.getLock(lockName).unlock();
                     } catch (Exception e) {
-                        System.out.println("ERROR " + e);
-                        System.exit(1);
-                        return;
+                        throw new IllegalStateException("lock-try failed: " + e, e);
                     }
                     System.out.println(ok ? "ACQUIRED" : "CONTENDED");
                 }
@@ -166,6 +177,13 @@ public final class TsProbe {
                     redisson.<String>getDelayedQueue(destQ);
                     String v = destQ.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
                     System.out.println(v == null ? "EMPTY" : ("GOT:" + v));
+                }
+                case "dq-size" -> {
+                    // args: dq-size <destQueue> — prints DQ_SIZE:<n>
+                    // Java size() = staging LIST length, not destination LLEN.
+                    String dest = args.length >= 2 ? args[1] : "TsJavaT:dq:x";
+                    var destQ = redisson.<String>getBlockingQueue(dest);
+                    System.out.println("DQ_SIZE:" + redisson.<String>getDelayedQueue(destQ).size());
                 }
                 case "rt-publish" -> {
                     // args: rt-publish <topic> <msg>
@@ -357,6 +375,27 @@ public final class TsProbe {
                     String name = args.length >= 2 ? args[1] : "TsJavaT:bq:x";
                     int n = args.length >= 3 ? Integer.parseInt(args[2]) : 2;
                     System.out.println("BQ_CAP:" + redisson.<String>getBoundedBlockingQueue(name).trySetCapacity(n));
+                }
+                case "bq-remaining" -> {
+                    // args: bq-remaining <name> — available permits (Java semantics)
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bq:x";
+                    System.out.println("BQ_REMAIN:" + redisson.<String>getBoundedBlockingQueue(name).remainingCapacity());
+                }
+                case "bbq-put" -> {
+                    // args: bbq-put <queue> <value> <resultKey> — blocking put;
+                    // writes BQ_PUT_STARTED before blocking and BQ_PUT_OK after.
+                    String q = args.length >= 2 ? args[1] : "TsJavaT:bbq17:x";
+                    String value = args.length >= 3 ? args[2] : "v";
+                    String resultKey = args.length >= 4 ? args[3] : (q + ":put-result");
+                    try {
+                        redisson.getBucket(resultKey).set("BQ_PUT_STARTED");
+                        redisson.<String>getBoundedBlockingQueue(q).put(value);
+                        redisson.getBucket(resultKey).set("BQ_PUT_OK");
+                    } catch (Exception e) {
+                        redisson.getBucket(resultKey).set("BQ_PUT_ERROR:" + e);
+                        throw e;
+                    }
+                    System.out.println("BQ_PUT_OK");
                 }
                 case "idgen-init" -> {
                     // args: idgen-init <name> <value> <alloc> — prints IDGEN_INIT:<bool>
@@ -564,6 +603,62 @@ public final class TsProbe {
                     String v = redisson.<String, String>getMapCacheNative(name).get(key);
                     System.out.println(v == null ? "MCN_NULL" : ("MCN_GET:" + v));
                 }
+                case "mcnative-expire" -> {
+                    // args: mcnative-expire <name> <key> <ttlMs> — prints MCN_EXPIRE:true|false
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    long ttlMs = args.length >= 4 ? Long.parseLong(args[3]) : 60000;
+                    boolean ok = redisson.<String, String>getMapCacheNative(name)
+                            .expireEntry(key, java.time.Duration.ofMillis(ttlMs));
+                    System.out.println("MCN_EXPIRE:" + ok);
+                }
+                case "mcnative-expire-notset" -> {
+                    // args: mcnative-expire-notset <name> <key> <ttlMs>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    long ttlMs = args.length >= 4 ? Long.parseLong(args[3]) : 60000;
+                    System.out.println("MCN_EXPIRE:" + redisson.<String, String>getMapCacheNative(name)
+                            .expireEntryIfNotSet(key, java.time.Duration.ofMillis(ttlMs)));
+                }
+                case "mcnative-expire-gt" -> {
+                    // args: mcnative-expire-gt <name> <key> <ttlMs>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    long ttlMs = args.length >= 4 ? Long.parseLong(args[3]) : 60000;
+                    System.out.println("MCN_EXPIRE:" + redisson.<String, String>getMapCacheNative(name)
+                            .expireEntryIfGreater(key, java.time.Duration.ofMillis(ttlMs)));
+                }
+                case "mcnative-expire-lt" -> {
+                    // args: mcnative-expire-lt <name> <key> <ttlMs>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    long ttlMs = args.length >= 4 ? Long.parseLong(args[3]) : 60000;
+                    System.out.println("MCN_EXPIRE:" + redisson.<String, String>getMapCacheNative(name)
+                            .expireEntryIfLess(key, java.time.Duration.ofMillis(ttlMs)));
+                }
+                case "mcnative-clearexpire" -> {
+                    // args: mcnative-clearexpire <name> <key> — prints MCN_CLEAR:true|false
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    System.out.println("MCN_CLEAR:" + redisson.<String, String>getMapCacheNative(name).clearExpire(key));
+                }
+                case "mcnative-ttl" -> {
+                    // args: mcnative-ttl <name> <key> — prints MCN_TTL:<ms>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    System.out.println("MCN_TTL:" + redisson.<String, String>getMapCacheNative(name).remainTimeToLive(key));
+                }
+                case "mcnative-putifabsent" -> {
+                    // args: mcnative-putifabsent <name> <key> <value> <ttlMs>
+                    // prints MCN_PIA:<oldValue>|MCN_PIA:null
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mcn:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    String value = args.length >= 4 ? args[3] : "v";
+                    long ttlMs = args.length >= 5 ? Long.parseLong(args[4]) : 60000;
+                    String old = redisson.<String, String>getMapCacheNative(name)
+                            .putIfAbsent(key, value, java.time.Duration.ofMillis(ttlMs));
+                    System.out.println(old == null ? "MCN_PIA:null" : ("MCN_PIA:" + old));
+                }
                 case "script-eval" -> {
                     // args: script-eval <luaBodyReturningInt>
                     String body = args.length >= 2 ? args[1] : "return 40+2";
@@ -729,6 +824,33 @@ public final class TsProbe {
                     String name = args.length >= 2 ? args[1] : "TsJavaT:at7:x";
                     System.out.println("ATOMIC:" + redisson.getAtomicLong(name).get());
                 }
+                case "atomic-set-long" -> {
+                    // args: atomic-set-long <name> <value>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:at18:x";
+                    long value = args.length >= 3 ? Long.parseLong(args[2]) : 0L;
+                    redisson.getAtomicLong(name).set(value);
+                    System.out.println("ATOMIC_SET_OK");
+                }
+                case "atomic-cas-long" -> {
+                    // args: atomic-cas-long <name> <expect> <update>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:at18:x";
+                    long expect = args.length >= 3 ? Long.parseLong(args[2]) : 0L;
+                    long update = args.length >= 4 ? Long.parseLong(args[3]) : 0L;
+                    System.out.println("ATOMIC_CAS:" + redisson.getAtomicLong(name).compareAndSet(expect, update));
+                }
+                case "bucket-set-long" -> {
+                    // args: bucket-set-long <name> <value>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:long18:x";
+                    long value = args.length >= 3 ? Long.parseLong(args[2]) : 0L;
+                    redisson.<Long>getBucket(name).set(value);
+                    System.out.println("BUCKET_LONG_SET");
+                }
+                case "bucket-get-long" -> {
+                    // args: bucket-get-long <name>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:long18:x";
+                    Object v = redisson.getBucket(name).get();
+                    System.out.println(v == null ? "BUCKET_LONG_NULL" : ("BUCKET_LONG:" + v));
+                }
                 case "stream-add" -> {
                     // args: stream-add <stream> <field> <value> — prints STREAM_ADDED:<id>
                     String stream = args.length >= 2 ? args[1] : "TsJavaT:st7:x";
@@ -889,17 +1011,515 @@ public final class TsProbe {
                     System.out.println("LMM_GET:" + new java.util.ArrayList<>(
                             redisson.<String, String>getListMultimap(name).get(key)));
                 }
-                default -> {
-                    System.err.println("unknown mode: " + mode);
-                    System.err.println("usage: TsProbe [clean|write-java|read-ts|roundtrip|lock-try|lock-hold|rate-try|rate-set|sem-try] [...]");
-                    System.exit(2);
+                // ---- phase 19 ----
+                case "map-lock-name" -> {
+                    // args: map-lock-name <name> <key> — six Java-derived companion names
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:s19:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    var map = redisson.<String, String>getMap(name);
+                    System.out.println("SYNC:" + map.getLock(key).getName()
+                            + "|" + map.getFairLock(key).getName()
+                            + "|" + map.getReadWriteLock(key).readLock().getName()
+                            + "|" + map.getSemaphore(key).getName()
+                            + "|" + map.getCountDownLatch(key).getName()
+                            + "|" + map.getPermitExpirableSemaphore(key).getName());
                 }
-            }
-        } finally {
-            redisson.shutdown();
+                case "map-lock-try" -> {
+                    // args: map-lock-try <name> <key> — prints ACQUIRED|CONTENDED
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:ml19:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    var l = redisson.<String, String>getMap(name).getLock(key);
+                    if (l.tryLock()) {
+                        System.out.println("ACQUIRED");
+                        l.unlock();
+                    } else {
+                        System.out.println("CONTENDED");
+                    }
+                }
+                case "map-lock-hold" -> {
+                    // args: map-lock-hold <name> <key> <holdMs> — HELD ... RELEASED
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:ml19:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    long holdMs = args.length >= 4 ? Long.parseLong(args[3]) : 4000;
+                    var l = redisson.<String, String>getMap(name).getLock(key);
+                    l.lock(30, java.util.concurrent.TimeUnit.SECONDS);
+                    System.out.println("HELD");
+                    System.out.flush();
+                    Thread.sleep(holdMs);
+                    l.unlock();
+                    System.out.println("RELEASED");
+                }
+                case "mapcache-put" -> {
+                    // args: mapcache-put <name> <key> <value> — prints MC_PUT
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mc19:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    String value = args.length >= 4 ? args[3] : "v";
+                    redisson.<String, String>getMapCache(name).put(key, value);
+                    System.out.println("MC_PUT");
+                }
+                case "mapcache-remove" -> {
+                    // args: mapcache-remove <name> <key> — prints MC_REMOVED
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mc19:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    redisson.<String, String>getMapCache(name).remove(key);
+                    System.out.println("MC_REMOVED");
+                }
+                case "mapcache-listen" -> {
+                    // args: mapcache-listen <name> <listenMs> — prints MCE:<type>:<key>:<value>:<old>
+                    // for every event seen, then MC_LISTEN_DONE
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:mc19:x";
+                    long listenMs = args.length >= 3 ? Long.parseLong(args[2]) : 3000;
+                    var cache = redisson.<String, String>getMapCache(name);
+                    var events = java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+                    cache.addListener(new org.redisson.api.map.event.EntryCreatedListener<String, String>() {
+                        @Override
+                        public void onCreated(org.redisson.api.map.event.EntryEvent<String, String> e) {
+                            events.add("CREATED:" + e.getKey() + ":" + e.getValue() + ":null");
+                        }
+                    });
+                    cache.addListener(new org.redisson.api.map.event.EntryUpdatedListener<String, String>() {
+                        @Override
+                        public void onUpdated(org.redisson.api.map.event.EntryEvent<String, String> e) {
+                            events.add("UPDATED:" + e.getKey() + ":" + e.getValue() + ":" + e.getOldValue());
+                        }
+                    });
+                    cache.addListener(new org.redisson.api.map.event.EntryRemovedListener<String, String>() {
+                        @Override
+                        public void onRemoved(org.redisson.api.map.event.EntryEvent<String, String> e) {
+                            events.add("REMOVED:" + e.getKey() + ":null:" + e.getOldValue());
+                        }
+                    });
+                    Thread.sleep(listenMs);
+                    for (String ev : events) {
+                        System.out.println("MCE:" + ev);
+                    }
+                    System.out.println("MC_LISTEN_DONE");
+                }
+                // ---- phase 20: RMap HSCAN/HSTRLEN, RScoredSortedSet score ops, RBitSet BITFIELD/BITOP, RGeo search ----
+                case "map-put" -> {
+                    // args: map-put <name> <key> <value> — prints MAP_PUT
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    String value = args.length >= 4 ? args[3] : "v";
+                    redisson.<String, String>getMap(name).put(key, value);
+                    System.out.println("MAP_PUT");
+                }
+                case "map-value-size" -> {
+                    // args: map-value-size <name> <key> — prints MAP_VSIZE:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    String key = args.length >= 3 ? args[2] : "k";
+                    System.out.println("MAP_VSIZE:" + redisson.<String, String>getMap(name).valueSize(key));
+                }
+                case "map-random-keys" -> {
+                    // args: map-random-keys <name> <count> — prints MAP_RKEYS:sorted
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    int count = args.length >= 3 ? Integer.parseInt(args[2]) : 1;
+                    var keys = new java.util.TreeSet<>(redisson.<String, String>getMap(name).randomKeys(count));
+                    System.out.println("MAP_RKEYS:" + keys);
+                }
+                case "map-random-entries" -> {
+                    // args: map-random-entries <name> <count> — prints MAP_RENTRIES:k=v;k=v
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    int count = args.length >= 3 ? Integer.parseInt(args[2]) : 1;
+                    var entries = new java.util.TreeMap<>(redisson.<String, String>getMap(name).randomEntries(count));
+                    StringBuilder sb = new StringBuilder();
+                    entries.forEach((k, v) -> sb.append(sb.length() == 0 ? "" : ";").append(k).append("=").append(v));
+                    System.out.println("MAP_RENTRIES:" + sb);
+                }
+                case "map-scan-keys" -> {
+                    // args: map-scan-keys <name> <pattern> <count> — reads the Java keySet HSCAN view
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    String pattern = args.length >= 3 ? args[2] : "*";
+                    int count = args.length >= 4 ? Integer.parseInt(args[3]) : 10;
+                    var keys = new java.util.TreeSet<String>();
+                    for (String k : redisson.<String, String>getMap(name).keySet(pattern, count)) keys.add(k);
+                    System.out.println("MAP_SCAN_KEYS:" + keys);
+                }
+                case "map-scan-entries" -> {
+                    // args: map-scan-entries <name> <pattern> <count> — reads the Java entrySet HSCAN view
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:map20:x";
+                    String pattern = args.length >= 3 ? args[2] : "*";
+                    int count = args.length >= 4 ? Integer.parseInt(args[3]) : 10;
+                    var entries = new java.util.TreeMap<String, String>();
+                    for (var e : redisson.<String, String>getMap(name).entrySet(pattern, count)) {
+                        entries.put(e.getKey(), e.getValue());
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    entries.forEach((k, v) -> sb.append(sb.length() == 0 ? "" : ";").append(k).append("=").append(v));
+                    System.out.println("MAP_SCAN_ENTRIES:" + sb);
+                }
+                case "zset-addscore" -> {
+                    // args: zset-addscore <name> <member> <delta> — prints ZSET_ADDSCORE:<score>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    String member = args.length >= 3 ? args[2] : "m";
+                    double delta = args.length >= 4 ? Double.parseDouble(args[3]) : 1;
+                    System.out.println("ZSET_ADDSCORE:" + redisson.<String>getScoredSortedSet(name).addScore(member, delta));
+                }
+                case "zset-first-last" -> {
+                    // args: zset-first-last <name> — prints ZSET_FIRST_LAST:<first>|<last>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    var z = redisson.<String>getScoredSortedSet(name);
+                    System.out.println("ZSET_FIRST_LAST:" + z.firstScore() + "|" + z.lastScore());
+                }
+                case "zset-rank" -> {
+                    // args: zset-rank <name> <member> — prints ZSET_RANKS:<rank>|<revRank>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    String member = args.length >= 3 ? args[2] : "m";
+                    var z = redisson.<String>getScoredSortedSet(name);
+                    System.out.println("ZSET_RANKS:" + z.rank(member) + "|" + z.revRank(member));
+                }
+                case "zset-count" -> {
+                    // args: zset-count <name> <start> <startIncl> <end> <endIncl> — prints ZSET_COUNT:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    double start = args.length >= 3 ? Double.parseDouble(args[2]) : 0;
+                    boolean startIncl = args.length < 4 || Boolean.parseBoolean(args[3]);
+                    double end = args.length >= 5 ? Double.parseDouble(args[4]) : 0;
+                    boolean endIncl = args.length < 6 || Boolean.parseBoolean(args[5]);
+                    System.out.println("ZSET_COUNT:" + redisson.<String>getScoredSortedSet(name)
+                            .count(start, startIncl, end, endIncl));
+                }
+                case "zset-rev" -> {
+                    // args: zset-rev <name> <startIndex> <endIndex> — prints ZSET_REV:[...]
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    int start = args.length >= 3 ? Integer.parseInt(args[2]) : 0;
+                    int end = args.length >= 4 ? Integer.parseInt(args[3]) : -1;
+                    System.out.println("ZSET_REV:" + new java.util.ArrayList<>(
+                            redisson.<String>getScoredSortedSet(name).valueRangeReversed(start, end)));
+                }
+                case "zset-rev-score" -> {
+                    // args: zset-rev-score <name> <start> <startIncl> <end> <endIncl> — prints ZSET_REV_SCORE:[...]
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    double start = args.length >= 3 ? Double.parseDouble(args[2]) : 0;
+                    boolean startIncl = args.length < 4 || Boolean.parseBoolean(args[3]);
+                    double end = args.length >= 5 ? Double.parseDouble(args[4]) : 0;
+                    boolean endIncl = args.length < 6 || Boolean.parseBoolean(args[5]);
+                    System.out.println("ZSET_REV_SCORE:" + new java.util.ArrayList<>(
+                            redisson.<String>getScoredSortedSet(name).valueRangeReversed(start, startIncl, end, endIncl)));
+                }
+                case "zset-entry-rev" -> {
+                    // args: zset-entry-rev <name> <startIndex> <endIndex> — prints ZSET_ENTRY_REV:v=score;...
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    int start = args.length >= 3 ? Integer.parseInt(args[2]) : 0;
+                    int end = args.length >= 4 ? Integer.parseInt(args[3]) : -1;
+                    StringBuilder sb = new StringBuilder();
+                    for (var e : redisson.<String>getScoredSortedSet(name).entryRangeReversed(start, end)) {
+                        sb.append(sb.length() == 0 ? "" : ";").append(e.getValue()).append("=").append(e.getScore());
+                    }
+                    System.out.println("ZSET_ENTRY_REV:" + sb);
+                }
+                case "zset-entry-range" -> {
+                    // args: zset-entry-range <name> <start> <startIncl> <end> <endIncl> — prints ZSET_ENTRY_RANGE:v=score;...
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    double start = args.length >= 3 ? Double.parseDouble(args[2]) : 0;
+                    boolean startIncl = args.length < 4 || Boolean.parseBoolean(args[3]);
+                    double end = args.length >= 5 ? Double.parseDouble(args[4]) : 0;
+                    boolean endIncl = args.length < 6 || Boolean.parseBoolean(args[5]);
+                    StringBuilder sb = new StringBuilder();
+                    for (var e : redisson.<String>getScoredSortedSet(name).entryRange(start, startIncl, end, endIncl)) {
+                        sb.append(sb.length() == 0 ? "" : ";").append(e.getValue()).append("=").append(e.getScore());
+                    }
+                    System.out.println("ZSET_ENTRY_RANGE:" + sb);
+                }
+                case "zset-remove-score" -> {
+                    // args: zset-remove-score <name> <start> <startIncl> <end> <endIncl> — prints ZSET_RM_SCORE:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    double start = args.length >= 3 ? Double.parseDouble(args[2]) : 0;
+                    boolean startIncl = args.length < 4 || Boolean.parseBoolean(args[3]);
+                    double end = args.length >= 5 ? Double.parseDouble(args[4]) : 0;
+                    boolean endIncl = args.length < 6 || Boolean.parseBoolean(args[5]);
+                    System.out.println("ZSET_RM_SCORE:" + redisson.<String>getScoredSortedSet(name)
+                            .removeRangeByScore(start, startIncl, end, endIncl));
+                }
+                case "zset-remove-rank" -> {
+                    // args: zset-remove-rank <name> <startIndex> <endIndex> — prints ZSET_RM_RANK:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:zs20:x";
+                    int start = args.length >= 3 ? Integer.parseInt(args[2]) : 0;
+                    int end = args.length >= 4 ? Integer.parseInt(args[3]) : 0;
+                    System.out.println("ZSET_RM_RANK:" + redisson.<String>getScoredSortedSet(name).removeRangeByRank(start, end));
+                }
+                case "bitset-size" -> {
+                    // args: bitset-size <name> — prints BITS_SIZE:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    System.out.println("BITS_SIZE:" + redisson.getBitSet(name).size());
+                }
+                case "bitset-length" -> {
+                    // args: bitset-length <name> — prints BITS_LEN:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    System.out.println("BITS_LEN:" + redisson.getBitSet(name).length());
+                }
+                case "bitset-cardinality" -> {
+                    // args: bitset-cardinality <name> — prints BITS_CARD:<n>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    System.out.println("BITS_CARD:" + redisson.getBitSet(name).cardinality());
+                }
+                case "bitset-setrange" -> {
+                    // args: bitset-setrange <name> <from> <to> <0|1> — Java set(from, to, value): `to` EXCLUSIVE
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    long from = args.length >= 3 ? Long.parseLong(args[2]) : 0;
+                    long to = args.length >= 4 ? Long.parseLong(args[3]) : 8;
+                    boolean value = args.length < 5 || Boolean.parseBoolean(args[4]) || "1".equals(args[4]);
+                    redisson.getBitSet(name).set(from, to, value);
+                    System.out.println("BITS_SETRANGE");
+                }
+                case "bitset-clearrange" -> {
+                    // args: bitset-clearrange <name> <from> <to> — Java clear(from, to): `to` EXCLUSIVE
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    long from = args.length >= 3 ? Long.parseLong(args[2]) : 0;
+                    long to = args.length >= 4 ? Long.parseLong(args[3]) : 8;
+                    redisson.getBitSet(name).clear(from, to);
+                    System.out.println("BITS_CLEARRANGE");
+                }
+                case "bitset-typed-set" -> {
+                    // args: bitset-typed-set <name> <u|i> <size> <offset> <value> — prints BITS_TSET:<old>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    boolean unsigned = args.length >= 3 && args[2].startsWith("u");
+                    int size = args.length >= 4 ? Integer.parseInt(args[3]) : 8;
+                    long offset = args.length >= 5 ? Long.parseLong(args[4]) : 0;
+                    long value = args.length >= 6 ? Long.parseLong(args[5]) : 0;
+                    var bs = redisson.getBitSet(name);
+                    long old = unsigned ? bs.setUnsigned(size, offset, value) : bs.setSigned(size, offset, value);
+                    System.out.println("BITS_TSET:" + old);
+                }
+                case "bitset-typed-get" -> {
+                    // args: bitset-typed-get <name> <u|i> <size> <offset> — prints BITS_TGET:<v>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    boolean unsigned = args.length >= 3 && args[2].startsWith("u");
+                    int size = args.length >= 4 ? Integer.parseInt(args[3]) : 8;
+                    long offset = args.length >= 5 ? Long.parseLong(args[4]) : 0;
+                    var bs = redisson.getBitSet(name);
+                    long v = unsigned ? bs.getUnsigned(size, offset) : bs.getSigned(size, offset);
+                    System.out.println("BITS_TGET:" + v);
+                }
+                case "bitset-typed-incr" -> {
+                    // args: bitset-typed-incr <name> <u|i> <size> <offset> <increment> — prints BITS_TINCR:<v>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    boolean unsigned = args.length >= 3 && args[2].startsWith("u");
+                    int size = args.length >= 4 ? Integer.parseInt(args[3]) : 8;
+                    long offset = args.length >= 5 ? Long.parseLong(args[4]) : 0;
+                    long incr = args.length >= 6 ? Long.parseLong(args[5]) : 1;
+                    var bs = redisson.getBitSet(name);
+                    long v = unsigned ? bs.incrementAndGetUnsigned(size, offset, incr) : bs.incrementAndGetSigned(size, offset, incr);
+                    System.out.println("BITS_TINCR:" + v);
+                }
+                case "bitset-long-set" -> {
+                    // args: bitset-long-set <name> <offset> <value> — prints BITS_LSET:<old>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    long offset = args.length >= 3 ? Long.parseLong(args[2]) : 0;
+                    long value = args.length >= 4 ? Long.parseLong(args[3]) : 0;
+                    System.out.println("BITS_LSET:" + redisson.getBitSet(name).setLong(offset, value));
+                }
+                case "bitset-long-get" -> {
+                    // args: bitset-long-get <name> <offset> — prints BITS_LGET:<v>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    long offset = args.length >= 3 ? Long.parseLong(args[2]) : 0;
+                    System.out.println("BITS_LGET:" + redisson.getBitSet(name).getLong(offset));
+                }
+                case "bitset-bitfield" -> {
+                    // args: bitset-bitfield <name> <spec> — spec = op[:overflow]|GET:<u|i><size>:<offset>|SET:...:<value>|INCRBY:...
+                    // comma-separated operations, e.g. "SET:u8:0:5,GET:u8:0" — prints BITS_BITFIELD:[v1, v2]
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:bits20:x";
+                    String spec = args.length >= 3 ? args[2] : "GET:u8:0";
+                    var bf = org.redisson.api.bitset.BitFieldArgs.create();
+                    for (String opSpec : spec.split(",")) {
+                        String[] p = opSpec.split(":");
+                        String op = p[0].toUpperCase();
+                        switch (op) {
+                            case "OVERFLOW" -> bf = bf.overflow(org.redisson.api.bitset.BitFieldOverflow.valueOf(p[1].toUpperCase()));
+                            case "GET" -> {
+                                boolean unsigned = p[1].startsWith("u");
+                                int size = Integer.parseInt(p[1].substring(1));
+                                long offset = Long.parseLong(p[2]);
+                                bf = unsigned ? bf.getUnsigned(size, org.redisson.api.bitset.BitOffset.bit(offset))
+                                        : bf.getSigned(size, org.redisson.api.bitset.BitOffset.bit(offset));
+                            }
+                            case "SET" -> {
+                                boolean unsigned = p[1].startsWith("u");
+                                int size = Integer.parseInt(p[1].substring(1));
+                                bf = unsigned
+                                        ? bf.setUnsigned(size, org.redisson.api.bitset.BitOffset.bit(Long.parseLong(p[2])), Long.parseLong(p[3]))
+                                        : bf.setSigned(size, org.redisson.api.bitset.BitOffset.bit(Long.parseLong(p[2])), Long.parseLong(p[3]));
+                            }
+                            case "INCRBY" -> {
+                                boolean unsigned = p[1].startsWith("u");
+                                int size = Integer.parseInt(p[1].substring(1));
+                                bf = unsigned
+                                        ? bf.incrementUnsignedBy(size, org.redisson.api.bitset.BitOffset.bit(Long.parseLong(p[2])), Long.parseLong(p[3]))
+                                        : bf.incrementSignedBy(size, org.redisson.api.bitset.BitOffset.bit(Long.parseLong(p[2])), Long.parseLong(p[3]));
+                            }
+                            default -> throw new IllegalArgumentException("bad bitfield op: " + op);
+                        }
+                    }
+                    System.out.println("BITS_BITFIELD:" + redisson.getBitSet(name)
+                            .bitField((org.redisson.api.bitset.BitFieldArgs) bf));
+                }
+                case "bitset-op" -> {
+                    // args: bitset-op <op> <name> [other1 other2 ...] — op: or|and|xor|not|diff|diff1|andor|one
+                    String op = args.length >= 2 ? args[1] : "or";
+                    String name = args.length >= 3 ? args[2] : "TsJavaT:bits20:x";
+                    String[] others = args.length > 3 ? java.util.Arrays.copyOfRange(args, 3, args.length) : new String[0];
+                    var bs = redisson.getBitSet(name);
+                    long n = switch (op.toLowerCase()) {
+                        case "or" -> bs.or(others);
+                        case "and" -> bs.and(others);
+                        case "xor" -> bs.xor(others);
+                        case "not" -> bs.not();
+                        case "diff" -> bs.diff(others);
+                        case "diff1", "diffinverse" -> bs.diffInverse(others);
+                        case "andor" -> bs.andOr(others);
+                        case "one", "setexclusive" -> bs.setExclusive(others);
+                        default -> throw new IllegalArgumentException("unknown bitset op: " + op);
+                    };
+                    System.out.println("BITS_OP:" + n);
+                }
+                case "geo-search-radius" -> {
+                    // args: geo-search-radius <name> <lon> <lat> <radius> <unit> [count] [order] — prints GEO_SEARCH:sorted
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    double radius = args.length >= 5 ? Double.parseDouble(args[4]) : 200;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 6 ? args[5] : "km");
+                    var search = org.redisson.api.geo.GeoSearchArgs.from(lon, lat).radius(radius, unit);
+                    int count = args.length >= 7 ? Integer.parseInt(args[6]) : -1;
+                    if (count > 0) search = search.count(count);
+                    if (args.length >= 8) search = search.order(org.redisson.api.geo.GeoOrder.valueOf(args[7].toUpperCase()));
+                    var members = new java.util.TreeSet<>(redisson.<String>getGeo(name).search(search));
+                    System.out.println("GEO_SEARCH:" + members);
+                }
+                case "geo-search-member" -> {
+                    // args: geo-search-member <name> <member> <radius> <unit> [count] — prints GEO_SEARCH_MEMBER:sorted
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    String member = args.length >= 3 ? args[2] : "m";
+                    double radius = args.length >= 4 ? Double.parseDouble(args[3]) : 200;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 5 ? args[4] : "km");
+                    var search = org.redisson.api.geo.GeoSearchArgs.from(member).radius(radius, unit);
+                    int count = args.length >= 6 ? Integer.parseInt(args[5]) : -1;
+                    if (count > 0) search = search.count(count);
+                    var members = new java.util.TreeSet<>(redisson.<String>getGeo(name).search(search));
+                    System.out.println("GEO_SEARCH_MEMBER:" + members);
+                }
+                case "geo-search-box" -> {
+                    // args: geo-search-box <name> <lon> <lat> <width> <height> <unit> [count] [order] — prints GEO_SEARCH:sorted
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    double width = args.length >= 5 ? Double.parseDouble(args[4]) : 400;
+                    double height = args.length >= 6 ? Double.parseDouble(args[5]) : 400;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 7 ? args[6] : "km");
+                    var search = org.redisson.api.geo.GeoSearchArgs.from(lon, lat).box(width, height, unit);
+                    int count = args.length >= 8 ? Integer.parseInt(args[7]) : -1;
+                    if (count > 0) search = search.count(count);
+                    if (args.length >= 9) search = search.order(org.redisson.api.geo.GeoOrder.valueOf(args[8].toUpperCase()));
+                    var members = new java.util.TreeSet<>(redisson.<String>getGeo(name).search(search));
+                    System.out.println("GEO_SEARCH_BOX:" + members);
+                }
+                case "geo-search-dist" -> {
+                    // args: geo-search-dist <name> <lon> <lat> <radius> <unit> — prints GEO_SEARCH_DIST:m=d;...
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    double radius = args.length >= 5 ? Double.parseDouble(args[4]) : 200;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 6 ? args[5] : "km");
+                    var found = redisson.<String>getGeo(name)
+                            .searchWithDistance(org.redisson.api.geo.GeoSearchArgs.from(lon, lat).radius(radius, unit));
+                    var sorted = new java.util.TreeMap<String, Double>(found);
+                    StringBuilder sb = new StringBuilder();
+                    sorted.forEach((m, d) -> sb.append(sb.length() == 0 ? "" : ";").append(m).append("=").append(d));
+                    System.out.println("GEO_SEARCH_DIST:" + sb);
+                }
+                case "geo-search-dist-box" -> {
+                    // args: geo-search-dist-box <name> <lon> <lat> <width> <height> <unit> — GEOSEARCH WITHDIST path
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    double width = args.length >= 5 ? Double.parseDouble(args[4]) : 400;
+                    double height = args.length >= 6 ? Double.parseDouble(args[5]) : 400;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 7 ? args[6] : "km");
+                    var found = redisson.<String>getGeo(name)
+                            .searchWithDistance(org.redisson.api.geo.GeoSearchArgs.from(lon, lat).box(width, height, unit));
+                    var sorted = new java.util.TreeMap<String, Double>(found);
+                    StringBuilder sb = new StringBuilder();
+                    sorted.forEach((m, d) -> sb.append(sb.length() == 0 ? "" : ";").append(m).append("=").append(d));
+                    System.out.println("GEO_SEARCH_DIST_BOX:" + sb);
+                }
+                case "geo-search-pos" -> {
+                    // args: geo-search-pos <name> <lon> <lat> <radius> <unit> — prints GEO_SEARCH_POS:m=[lon, lat];...
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    double radius = args.length >= 5 ? Double.parseDouble(args[4]) : 200;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 6 ? args[5] : "km");
+                    var found = redisson.<String>getGeo(name)
+                            .searchWithPosition(org.redisson.api.geo.GeoSearchArgs.from(lon, lat).radius(radius, unit));
+                    var sorted = new java.util.TreeMap<String, org.redisson.api.geo.GeoPosition>(found);
+                    StringBuilder sb = new StringBuilder();
+                    sorted.forEach((m, p) -> sb.append(sb.length() == 0 ? "" : ";")
+                            .append(m).append("=").append(p == null ? "null" : ("[" + p.getLongitude() + "," + p.getLatitude() + "]")));
+                    System.out.println("GEO_SEARCH_POS:" + sb);
+                }
+                case "geo-store-search" -> {
+                    // args: geo-store-search <name> <dest> <lon> <lat> <width> <height> <unit> — GEOSEARCHSTORE
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    String dest = args.length >= 3 ? args[2] : "TsJavaT:geo20:dest";
+                    double lon = args.length >= 4 ? Double.parseDouble(args[3]) : 13.361389;
+                    double lat = args.length >= 5 ? Double.parseDouble(args[4]) : 38.115556;
+                    double width = args.length >= 6 ? Double.parseDouble(args[5]) : 400;
+                    double height = args.length >= 7 ? Double.parseDouble(args[6]) : 400;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 8 ? args[7] : "km");
+                    System.out.println("GEO_STORE:" + redisson.<String>getGeo(name)
+                            .storeSearchTo(dest, org.redisson.api.geo.GeoSearchArgs.from(lon, lat).box(width, height, unit)));
+                }
+                case "geo-store-sorted" -> {
+                    // args: geo-store-sorted <name> <dest> <lon> <lat> <radius> <unit> — legacy GEORADIUS ... STOREDIST
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    String dest = args.length >= 3 ? args[2] : "TsJavaT:geo20:dest";
+                    double lon = args.length >= 4 ? Double.parseDouble(args[3]) : 13.361389;
+                    double lat = args.length >= 5 ? Double.parseDouble(args[4]) : 38.115556;
+                    double radius = args.length >= 6 ? Double.parseDouble(args[5]) : 200;
+                    org.redisson.api.geo.GeoUnit unit = geoUnit(args.length >= 7 ? args[6] : "km");
+                    System.out.println("GEO_STORE_SORTED:" + redisson.<String>getGeo(name)
+                            .storeSortedSearchTo(dest, org.redisson.api.geo.GeoSearchArgs.from(lon, lat).radius(radius, unit)));
+                }
+                case "geo-add-if-exists" -> {
+                    // args: geo-add-if-exists <name> <lon> <lat> <member> — prints GEO_AIE:true|false
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    String member = args.length >= 5 ? args[4] : "Palermo";
+                    System.out.println("GEO_AIE:" + redisson.<String>getGeo(name).addIfExists(lon, lat, member));
+                }
+                case "geo-add-if-exists-xx" -> {
+                    // args: geo-add-if-exists-xx <name> <lon> <lat> <member> — addIfExists(GeoEntry...) → GEOADD XX
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    double lon = args.length >= 3 ? Double.parseDouble(args[2]) : 13.361389;
+                    double lat = args.length >= 4 ? Double.parseDouble(args[3]) : 38.115556;
+                    String member = args.length >= 5 ? args[4] : "Palermo";
+                    System.out.println("GEO_AIE_XX:" + redisson.<String>getGeo(name).addIfExists(
+                            new org.redisson.api.geo.GeoEntry(lon, lat, member)));
+                }
+                case "geo-pos" -> {
+                    // args: geo-pos <name> <member> — prints GEO_POS:[lon, lat]|GEO_POS:absent
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:geo20:x";
+                    String member = args.length >= 3 ? args[2] : "m";
+                    var positions = redisson.<String>getGeo(name).pos(member);
+                    var p = positions.get(member);
+                    System.out.println("GEO_POS:" + (p == null ? "absent" : ("[" + p.getLongitude() + "," + p.getLatitude() + "]")));
+                }
+                default -> throw new IllegalArgumentException("unknown mode: " + mode
+                        + "; usage: TsProbe [clean|write-java|read-ts|roundtrip|lock-try|lock-hold|rate-try|rate-set|sem-try|repl] [...]");
         }
     }
 
     private TsProbe() {
+    }
+
+    /** Maps m/km/mi/ft (or enum-ish names) to the 4.6.1 GeoUnit. */
+    private static org.redisson.api.geo.GeoUnit geoUnit(String s) {
+        return switch (s.toLowerCase()) {
+            case "m", "meters" -> org.redisson.api.geo.GeoUnit.METERS;
+            case "km", "kilometers" -> org.redisson.api.geo.GeoUnit.KILOMETERS;
+            case "mi", "miles" -> org.redisson.api.geo.GeoUnit.MILES;
+            case "ft", "feet" -> org.redisson.api.geo.GeoUnit.FEET;
+            default -> throw new IllegalArgumentException("unknown geo unit: " + s);
+        };
     }
 }

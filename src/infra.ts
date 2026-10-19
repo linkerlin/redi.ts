@@ -3,11 +3,11 @@
  * VectorSet, RBatch, RPriority*, RTransferQueue, RArray, RCircularBuffer, RMaps.
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import { luaEval, multimapInternalId, suffixName, toNumber } from './util';
-import { BatchAtomicLong, BatchBucket, BatchList, BatchMap, BatchQueue, BatchScoredSortedSet, BatchSet } from './batch';
+import { RedisDataStructure } from './base.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import { luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
+import { BatchAtomicLong, BatchBucket, BatchList, BatchMap, BatchQueue, BatchScoredSortedSet, BatchSet } from './batch.js';
 
 // -- RKeys -----------------------------------------------------------------------
 
@@ -42,7 +42,7 @@ export class RKeys {
   async unlink(...keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
     try {
-      return await (this.redis as any).unlink(...keys);
+      return await this.redis.unlink(...keys);
     } catch {
       return this.delete(...keys);
     }
@@ -65,7 +65,7 @@ export class RKeys {
   async touch(...keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
     try {
-      return await (this.redis as any).touch(...keys);
+      return await this.redis.touch(...keys);
     } catch {
       return 0;
     }
@@ -99,7 +99,7 @@ export class RScript {
     return this.cast(raw, returnType);
   }
   async evalSha(sha: string, returnType: ScriptReturnType, keys: string[] = [], values: unknown[] = []): Promise<any> {
-    const raw = await (this.redis as any).evalsha(sha, keys.length, ...keys, ...values.map(String));
+    const raw = await this.redis.evalsha(sha, keys.length, ...keys, ...values.map(String));
     return this.cast(raw, returnType);
   }
   async scriptLoad(script: string): Promise<string> {
@@ -200,10 +200,10 @@ export class RSearch {
 export class RJsonBucket<V = any> {
   constructor(private redis: Redis, readonly name: string) {}
   async set(value: V, path = '$'): Promise<void> {
-    await (this.redis as any).call('JSON.SET', this.name, path, JSON.stringify(value));
+    await this.redis.call('JSON.SET', this.name, path, JSON.stringify(value));
   }
   async get(path = '$'): Promise<V | null> {
-    const raw: any = await (this.redis as any).call('JSON.GET', this.name, path);
+    const raw: any = await this.redis.call('JSON.GET', this.name, path);
     if (raw === null || raw === undefined) return null;
     try {
       return JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw)) as V;
@@ -212,7 +212,7 @@ export class RJsonBucket<V = any> {
     }
   }
   async delete(path = '$'): Promise<number> {
-    return toNumber(await (this.redis as any).call('JSON.DEL', this.name, path));
+    return toNumber(await this.redis.call('JSON.DEL', this.name, path));
   }
 }
 
@@ -227,17 +227,17 @@ export class RJsonBuckets {
 
 export class RVectorSet extends RedisDataStructure {
   async add(element: string, vector: number[]): Promise<boolean> {
-    const r: any = await (this.redis as any).call('VADD', this.name, 'VALUES', vector.length, ...vector.map(String), element);
+    const r: any = await this.redis.call('VADD', this.name, 'VALUES', vector.length, ...vector.map(String), element);
     return toNumber(r) === 1 || r === true;
   }
   async sim(element: string, count = 10): Promise<string[]> {
-    return (await (this.redis as any).call('VSIM', this.name, 'ELE', element, 'COUNT', count)) as string[];
+    return (await this.redis.call('VSIM', this.name, 'ELE', element, 'COUNT', count)) as string[];
   }
   async card(): Promise<number> {
-    return toNumber(await (this.redis as any).call('VCARD', this.name));
+    return toNumber(await this.redis.call('VCARD', this.name));
   }
   async remove(element: string): Promise<boolean> {
-    return toNumber(await (this.redis as any).call('VREM', this.name, element)) === 1;
+    return toNumber(await this.redis.call('VREM', this.name, element)) === 1;
   }
 }
 
@@ -266,15 +266,27 @@ export class RPriorityQueue<V = any> extends RedisDataStructure {
 
 export class RPriorityBlockingQueue<V = any> extends RPriorityQueue<V> {
   async take(): Promise<V> {
-    for (;;) {
-      const m: any = await (this.redis as any).bzpopmin?.(this.name, 0);
-      if (m) {
-        const member = Array.isArray(m) ? m[1] : m;
-        return this.decodeValue(member) as V;
+    return withDedicatedRedis(this.redis, async (conn, dedicated) => {
+      for (;;) {
+        const immediate = await this.poll();
+        if (immediate !== null) return immediate;
+        if (!dedicated) {
+          await sleep(20);
+          continue;
+        }
+        try {
+          const m: any = await conn.bzpopmin(this.name, 0);
+          if (m) {
+            const member = Array.isArray(m) ? m[1] : m;
+            return this.decodeValue(member) as V;
+          }
+        } catch (e) {
+          const msg = String((e as any)?.message ?? e);
+          if (!/unsupported command|unknown command/i.test(msg)) throw e;
+          await sleep(20);
+        }
       }
-      const p = await this.poll();
-      if (p !== null) return p;
-    }
+    });
   }
 }
 
@@ -470,6 +482,33 @@ export class RBatch {
 
 // -- Native multimap-cache (Redis >= 7.4 HPEXPIRE; NATIVE_OK) --------------------------
 
+/** Native multimaps keep the same HASH field→id + child-collection layout as
+ * the base multimaps; delete/unlink must read the HASH before removing it. */
+async function removeNativeMultimap(
+  redis: Redis,
+  name: string,
+  collKey: (id: string) => string,
+  unlink: boolean,
+): Promise<boolean> {
+  const existed = ((await redis.exists(name)) as number) > 0;
+  const ids = await redis.hvals(name);
+  const childKeys = ids.map(collKey);
+  for (let i = 0; i < childKeys.length; i += 500) {
+    const batch = childKeys.slice(i, i + 500);
+    if (unlink) {
+      try { await redis.unlink(...batch); } catch { await redis.del(...batch); }
+    } else {
+      await redis.del(...batch);
+    }
+  }
+  if (unlink) {
+    try { await redis.unlink(name); } catch { await redis.del(name); }
+  } else {
+    await redis.del(name);
+  }
+  return existed;
+}
+
 export class RSetMultimapCacheNative extends RedisDataStructure {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -494,7 +533,7 @@ export class RSetMultimapCacheNative extends RedisDataStructure {
     const id = await this.redis.hget(this.name, field);
     if (id === null) return false;
     try {
-      const r: any = await (this.redis as any).hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
+      const r: any = await this.redis.hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
       if (Array.isArray(r) ? r[0] === 1 : toNumber(r) === 1) {
         await this.redis.pexpire(this.collKey(id), ttlMs);
         return true;
@@ -503,6 +542,15 @@ export class RSetMultimapCacheNative extends RedisDataStructure {
     } catch {
       return false;
     }
+  }
+  async clear(): Promise<void> {
+    await this.delete();
+  }
+  override async delete(): Promise<boolean> {
+    return removeNativeMultimap(this.redis, this.name, (id) => this.collKey(id), false);
+  }
+  override async unlink(): Promise<boolean> {
+    return removeNativeMultimap(this.redis, this.name, (id) => this.collKey(id), true);
   }
 }
 
@@ -531,7 +579,7 @@ export class RListMultimapCacheNative extends RedisDataStructure {
     const id = await this.redis.hget(this.name, field);
     if (id === null) return false;
     try {
-      const r: any = await (this.redis as any).hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
+      const r: any = await this.redis.hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
       if (Array.isArray(r) ? r[0] === 1 : toNumber(r) === 1) {
         await this.redis.pexpire(this.collKey(id), ttlMs);
         return true;
@@ -540,6 +588,15 @@ export class RListMultimapCacheNative extends RedisDataStructure {
     } catch {
       return false;
     }
+  }
+  async clear(): Promise<void> {
+    await this.delete();
+  }
+  override async delete(): Promise<boolean> {
+    return removeNativeMultimap(this.redis, this.name, (id) => this.collKey(id), false);
+  }
+  override async unlink(): Promise<boolean> {
+    return removeNativeMultimap(this.redis, this.name, (id) => this.collKey(id), true);
   }
 }
 
@@ -551,7 +608,7 @@ export class RRedisNodes {
     return this.redis.ping();
   }
   async info(section = 'server'): Promise<string> {
-    return (this.redis as any).info(section);
+    return this.redis.info(section);
   }
 }
 

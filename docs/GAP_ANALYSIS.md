@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.0.0（2026-10-19）更新 RSet store 形状、`RDelayedQueue` 后台迁移器与阶段 21 条目。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -27,25 +27,27 @@
 
 按面积排序。命名精确到 Java 签名。
 
-**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；仍缺 `entryRange/valueRange` 反向/分页全族、`addIfExists/Less/Greater`、`addScore` 系列、`first/lastScore`、`random`、`pollFirst/Last` 阻塞版及 `FromAny`（`BZMPOP`）、`ZRANGESTORE`、迭代器；`rank` 回 `-1` 而 Java 回 `null`（移植判空必改）；`rangeByScore` 调已废弃 `ZRANGEBYSCORE`。
+**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；仍缺 `addIfExists/Less/Greater`、`random`、`pollFirst/Last` 阻塞版及 `FromAny`（`BZMPOP`）、`ZRANGESTORE`、专用迭代器；`rangeByScore` 调已废弃 `ZRANGEBYSCORE`。
+
+**`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`addIfAbsent`、`iterator/distributedIterator/stream` 视图。
 
 **`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐）；仍缺 `fastClaim/fastAutoClaim` 变体、多流读、`addListener`。
 
-**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；缺 `keySet/values/entrySet` 惰性批视图（只有全量快照，大 key OOM）、`getLockByKey` 六件套、`putAllWithTTL`（在 `RMapCache.putAll`）、`randomKeys/randomEntries`、`valueSize`、`replace(K,old,new)`（TS 叫 `replaceWithCheck`，须改名）、`remove` 联合返回须收窄。
+**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；缺 Java 形态的 `keySet/values/entrySet(pattern, count)` Set/Collection 视图（迭代器已覆盖大 key 扫描需求）、`putAllWithTTL`（在 `RMapCache.putAll`）、`replace(K, old, new)`（TS 叫 `replaceWithCheck`，须改名/重载）、`remove` 联合返回须收窄。
 
-**`RMapCache`**：缺 `expireEntry/expireEntries` 族、`getWithTTLOnly`（TS `get` 必刷新，无等价）、`remainTimeToLive`、`compute*`、`RLeasedMap` 全族、`putAll`（TTL 批量）、`getMaxSize`、事件订阅（只发不收）。
+**`RMapCache`**：`expireEntry`（单条目，拒已过期）、`remainTimeToLive`（`-2/-1/ms`）、`putAll`（TTL 批量）、事件订阅双向 ✅ (1.4.0)；仍缺 `expireEntries` 批量、`getWithTTLOnly`（TS `get` 必刷新，无等价）、`compute*`、`RLeasedMap` 全族、`getMaxSize`。
 
-**`RMapCacheNative`**（现有 4 个 vs ~38）：缺条件写全族、`Instant` 绝对过期、`expireEntry*` 八件套、`PutArgs` 批量、`compute*`；`remainTTL` 把“不支持”与“无过期”都回 `-1`。
+**`RMapCacheNative`**（现有 4 个 vs ~38）：`putIfAbsent(key, value, ttl)`、`expireEntry(IfNotSet/IfGreater/IfLess)` + `clearExpire` + `remainTimeToLive`（`-2` 缺失）✅ (1.4.0)；仍缺条件写全族其余变体、`Instant` 绝对过期、`PutArgs` 批量、`compute*`。注：Java 4.6.1 对 HPERSIST `-2` 回 `null`，TS 统一 `false`（boolean 契约）。
 
 **`RBlockingQueue/Deque`**：`pollFromAny` 全族（`BLMPOP`）、`pollLastAndOfferFirstTo`（`BLMOVE`）全缺；亚秒超时被 `ceil(ms/1000)` 放大到整秒，且 `timeoutMs<=0` 反转为无限阻塞；`take` 占整条连接（须 `duplicate()`）；`drainTo` 非原子（并发尾部追加可丢）。
 
-**`RLock` 面**：`lockInterruptibly` 全族、`tryLock` 四重载分解（TS 三参合一）、`*Async` 命名、`newCondition`、`RObservable.addListener`；`RWLock`/`FairLock` view 缺 `forceUnlock/isLocked/getHoldCount` 等 + `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 缺 `tryLockAndGetToken` 四重载（且 TS `lockAndGetToken` 是 try-only，Java 默认阻塞——默认语义反转）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 缺批锁变体、返回类型非 `RLock`（不可嵌套，`RFairLock` 非 `RLock` 子类故不能混装）；`RedLock` 缺 drift 扣减。
+**`RLock` 面**：`lockInterruptibly` 全族、`tryLock` 四重载分解（TS 三参合一）、`*Async` 命名、`newCondition`、`RObservable.addListener`；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 缺 `tryLockAndGetToken` 四重载（且 TS `lockAndGetToken` 是 try-only，Java 默认阻塞——默认语义反转）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock` 缺 drift 扣减。
 
 **`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`StatusListener`、`countListeners`（vs `PUBSUB NUMSUB` 语义不同）、按实例删除、`Class<M>` 类型门控；`RShardedTopic.addListener` 无 subs 管理恒返 1；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
 
-**`RBitSet`**：`BITFIELD` 全族 + 类型化读写全缺；`or/and/xor/not` 应回字节长；缺 Redis 8 `BITOP DIFF/DIFF1/ANDOR/ONE`；`size` vs `cardinality` 未区分。
+**`RBitSet`**：已补 ✅ (1.5.0)：`BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化读写（signed/unsigned 的 get/set/increment + `getByte/Short/Integer/Long` 快捷）、`or/and/xor/not` 回字节长、Redis 8 `BITOP DIFF/DIFF1/ANDOR/ONE`、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`setRange`/`clear(from,to)` 为 `to` 排他；仍缺 `get(long...)`/`set(long[], boolean)` 批读批写、`set(BitSet)`/`toBitSet()`。
 
-**`RGeo`**：`search(GeoSearchArgs)`（from/member/radius/box/polygon/order/count）、`searchWithDistance/Position`、`storeSearchTo/storeSortedSearchTo`、`addIfExists` 全缺；未继承 `RScoredSortedSet`。
+**`RGeo`**：已补 ✅ (1.5.0)：`search(GeoSearchArgs)` 全族（from lon-lat/member、radius/box、order、count/countAny）、`searchWithDistance/Position`、`storeSearchTo/storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）；命令选择与 4.6.1 jar 逐条对齐（半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`、Box→`GEOSEARCH`、存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE`；4.6.1 无 polygon，新版才有）；未继承 `RScoredSortedSet`。
 
 **`RTimeSeries`**：`add(TimeSeriesAddArgs)`（label+TTL 全参）、`addAll/addIfAbsent/addOrReplace`、`first/last/entryRange/rangeReversed` 全族、label 过滤读、聚合、`info` 全缺。
 
@@ -63,13 +65,13 @@
 
 **概率三件套**：`RTDigest`（缺 merge/min/max/rank/info 等 10+）、`RCuckooFilter`（缺 init 参数/`addIfAbsent`/批量）、`RTopK`（`add` 丢 dropped 项）。
 
-**`RAtomic*`**：Double 缺 `increment/decrement/getAndDelete/compareAndDelete`；两者缺 `setIfLess/setIfGreater/IncrementArgs/addListener`；`getAndAdd` 浮点回算有 `0.1+0.2` 类误差；超 `2^53` 的 `compareAndSet` 失真。
+**`RAtomic*`**：Double 缺 `increment/decrement/getAndDelete/compareAndDelete`；两者缺 `setIfLess/setIfGreater/IncrementArgs/addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
-**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 声明了但实际硬编码 60s（未使用）；缺 `preloadCache(count)`、本地缓存视图、重连策略、Caffeine、`loader/writer`、过期事件策略。
+**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；缺 `preloadCache(count)`、本地缓存视图、LRU/LFU 策略、重连策略、Caffeine、`loader/writer`、过期事件策略。
 
-**`RDelayedQueue`**：缺 `destroy/readAll/poll(limit)/move/addListener`；`size()` 与 Java 含义相反（TS=已到期未消费，Java=staging 未到期，混部断言必岔）；`delete()` 多删目标队列；负延迟不校验。
+**`RDelayedQueue`**：`size()` 已对齐 Java（staging LLEN）✅、`delete()` 不再误删目标队列 ✅ (1.1.0)；**后台迁移调度器 ✅ (2.0.0)**：`start()/stop()/destroy()`（Java `QueueTransferTask`/`QueueTransferService` 移植——channel 订阅走 `duplicate()` 连接、deadline 定时器 >10ms 定时否则立即、5s 错误重试、迁移 Lua 返回下一表头 deadline 重臂；`destroy()` = 摘除任务不删数据），单机 + 集群实测；仍缺 `readAll/poll(limit)/move/addListener`、负延迟校验。
 
-**`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；无 `delete()` override 致容量 key 泄漏。
+**`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；`delete()` override 已补 ✅ (1.1.0，容量 key 与 LIST 一并清理；`clear()` 保持 Java 只删 LIST)。
 
 **`RBatch`**：类型覆盖已补常用 7 类 ✅ (1.8.5：`BatchBucket/Map/List/Set/Queue/AtomicLong/ScoredSortedSet`，写排队、读在 `execute()` 后 resolve，对齐 RFuture；Lua 版 ops 走 live 测，mock pipeline 无 `eval`)；读回占位非即时值；pub/sub 不可进 batch（`duplicate()` 真实连接）。
 
@@ -83,6 +85,13 @@
 
 ## §5 路线图
 
-- P0 剩余：RateLimiter 配置重读（`getConfig` 已是 fresh-read；acquire 路径沿用实例缓存，与 Java 实例字段行为大体一致，待决策是否加 refresh）。
-- P1 按文件：stream claim/pending/info ✅ (1.8.6) + add/read opts/nack/ackdel ✅ (1.8.7)；`RMap.put` 原子 Lua ✅ (1.8.3)；zset 交并差 ✅ (1.8.4)；`RBatch` 决策 ✅ (1.8.5)。
+- P0 剩余：RateLimiter 配置重读（`getConfig` 已是 fresh-read；acquire 路径沿用实例缓存，与 Java 实例字段行为大体一致，决策保持，见 `COMPATIBILITY.md`）。
+- P1 第一批（已完成）：stream claim/pending/info ✅ (1.8.6) + add/read opts/nack/ackdel ✅ (1.8.7)；`RMap.put` 原子 Lua ✅ (1.8.3)；zset 交并差 ✅ (1.8.4)；`RBatch` 决策 ✅ (1.8.5)；`RSet` store 交并差 ✅ (1.8.8，v2.0.0 修正为 Java 裸键形状)。
+- **阶段 16（已完成 ✅，v1.1.0）**：伴生键 `delete()/unlink()` 全量闭环、`RDelayedQueue` size/delete 对齐、`RLocalCachedMap` TTL/idle 兑现；验证见 `test/redisson.test.ts` + `test/live-phase16.test.ts`。
+- **阶段 17（已完成 ✅，v1.2.0）**：`RBoundedBlockingQueue` 信号量协议（DECRBY+RPUSH / INCRBY+PUBLISH、阻塞 put/timed offer）、阻塞命令独立连接与浮点秒超时、Topic 订阅生命周期；验证见 `test/live-phase17.test.ts`。
+- **阶段 18（已完成 ✅，v1.3.0）**：`JsonCodec` BigInt 无损、`RAtomicLong` 字符串精确 CAS、`RAtomicDouble.getAndAdd` 单 Lua、`RBlockingQueue.drainTo` 原子提取；验证见 `test/wire.test.ts` + `test/live-phase18.test.ts`。
+- **阶段 19（已完成 ✅，v1.4.0）**：Key 级同步器家族（6 种，命名与 Java 4.6.1 逐字节一致）、RW 视图补齐与 `LockPubSub` 唤醒常量对齐、`RMultiLock/RRedLock` 接受 `LockLike`、`RMapCache` `putAll/expireEntry/remainTimeToLive` 与双向事件监听、`RMapCacheNative` 条件过期/HPERSIST；验证见 `test/wire.test.ts` + `test/redisson.test.ts` + `test/live-phase19.test.ts`。
+- **阶段 20（已完成 ✅，v1.5.0）**：`TsProbe` REPL 常驻化（全量 live 测试 673s → 56.9s）、`RMap` HSCAN 异步迭代器 + `HRANDFIELD`/`HSTRLEN`、`RScoredSortedSet` 分数族与反向区间/分数删除、`RBitSet` `BITFIELD` 与 Redis 8 `BITOP` 族、`RGeo` `GeoSearchArgs` 族与 `GEOSEARCHSTORE`；验证见 `test/redisson.test.ts` + `test/live-phase20.test.ts`。
+- **阶段 21（已完成 ✅，v2.0.0）**：ESM+CJS 双格式构建与 `pack-smoke` 验收、`Config.client` 接受 `Redis | Cluster`（导出 `RedisClient`）及约 87 处内部 cast 清理、`RDelayedQueue` 后台迁移器（Java `QueueTransferTask` 移植，单机+集群实测）、`RSet` store wire 修复（4.6.1 裸键形状）、缺失命令能力门控（`COMMAND INFO` + SKIP 日志，`XNACK`/`SUNIONCARD` 在 Redis 8.10.2 实测通过）、3 主节点集群实测（`test/live-cluster.test.ts`）；验证见 `test/redisson.test.ts` + `test/live-phase21.test.ts` + `test/live-cluster.test.ts`。
+- **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

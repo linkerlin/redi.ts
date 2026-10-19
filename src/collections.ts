@@ -3,10 +3,11 @@
  * Wire: bare name + JSON codec values (map keys/geo members/stream fields JSON-encoded).
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import { luaEval, prefixName, toNumber } from './util';
+import { RedisDataStructure } from './base.js';
+import { RedisKeyedStructure } from './synchronizers.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import { luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
 
 export class RBucket<V = any> extends RedisDataStructure {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
@@ -24,7 +25,7 @@ export class RBucket<V = any> extends RedisDataStructure {
   async setAndKeepTTL(value: V): Promise<void> {
     const enc = this.encodeValue(value);
     try {
-      await (this.redis as any).set(this.name, enc, 'KEEPTTL');
+      await this.redis.set(this.name, enc, 'KEEPTTL');
     } catch {
       await this.redis.set(this.name, enc);
     }
@@ -32,7 +33,7 @@ export class RBucket<V = any> extends RedisDataStructure {
   async trySet(value: V, ttlMs?: number): Promise<boolean> {
     const enc = this.encodeValue(value);
     if (ttlMs && ttlMs > 0) {
-      const r = await (this.redis as any).set(this.name, enc, 'PX', ttlMs, 'NX');
+      const r = await this.redis.set(this.name, enc, 'PX', ttlMs, 'NX');
       return r === 'OK';
     }
     return ((await this.redis.set(this.name, enc, 'NX')) as unknown) === 'OK';
@@ -40,10 +41,10 @@ export class RBucket<V = any> extends RedisDataStructure {
   async setIfExists(value: V, ttlMs?: number): Promise<boolean> {
     const enc = this.encodeValue(value);
     if (ttlMs && ttlMs > 0) {
-      const r = await (this.redis as any).set(this.name, enc, 'PX', ttlMs, 'XX');
+      const r = await this.redis.set(this.name, enc, 'PX', ttlMs, 'XX');
       return r === 'OK';
     }
-    return ((await (this.redis as any).set(this.name, enc, 'XX')) as unknown) === 'OK';
+    return ((await this.redis.set(this.name, enc, 'XX')) as unknown) === 'OK';
   }
   async getAndSet(value: V, ttlMs?: number): Promise<V | null> {
     const enc = this.encodeValue(value);
@@ -79,7 +80,7 @@ return 0`;
   }
   async getAndExpire(ttlMs: number): Promise<V | null> {
     try {
-      const raw = await (this.redis as any).getex(this.name, 'PX', ttlMs);
+      const raw = await this.redis.getex(this.name, 'PX', ttlMs);
       return raw === null ? null : (this.decodeValue(raw) as V);
     } catch {
       const v = await this.get();
@@ -137,7 +138,7 @@ export class RBuckets {
   }
 }
 
-export class RMap<K = any, V = any> extends RedisDataStructure {
+export class RMap<K = any, V = any> extends RedisKeyedStructure<K> {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
@@ -252,6 +253,61 @@ if cur == ARGV[2] then return redis.call('hdel', KEYS[1], ARGV[1]) else return 0
   async readAllValues(): Promise<V[]> {
     return [...(await this.readAllMap()).values()];
   }
+  /** Java `RMap.valueSize(K)`: byte length of the encoded value (HSTRLEN). */
+  async valueSize(key: K): Promise<number> {
+    return toNumber(await this.redis.hstrlen(this.name, this.encodeKey(key)));
+  }
+  /** Java `RMap.randomKeys(int)`: HRANDFIELD; count > 0 returns distinct keys. */
+  async randomKeys(count = 1): Promise<K[]> {
+    const raw = (await this.redis.hrandfield(this.name, count)) as string[] | string | null;
+    const arr = raw === null || raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+    return arr.map((k) => this.decodeKey(k) as K);
+  }
+  /** Java `RMap.randomEntries(int)`: HRANDFIELD ... WITHVALUES. */
+  async randomEntries(count = 1): Promise<Map<K, V>> {
+    const raw = (await this.redis.hrandfield(this.name, count, 'WITHVALUES')) as string[] | null;
+    const out = new Map<K, V>();
+    if (!raw) return out;
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      out.set(this.decodeKey(raw[i]) as K, this.decodeValue(raw[i + 1]) as V);
+    }
+    return out;
+  }
+  /** Lazy HSCAN iterator over keys (Java `RMap.keySet(pattern, count)` view). */
+  async *keysIterator(pattern = '*', count = 100): AsyncGenerator<K> {
+    let cursor = '0';
+    do {
+      const [next, fields] = (await this.redis.hscan(
+        this.name, cursor, 'MATCH', pattern, 'COUNT', String(count),
+      )) as [string, string[]];
+      for (let i = 0; i < fields.length; i += 2) yield this.decodeKey(fields[i]) as K;
+      cursor = next;
+    } while (cursor !== '0');
+  }
+  /** Lazy HSCAN iterator over values (Java `RMap.values(pattern, count)` view). */
+  async *valuesIterator(pattern = '*', count = 100): AsyncGenerator<V> {
+    let cursor = '0';
+    do {
+      const [next, fields] = (await this.redis.hscan(
+        this.name, cursor, 'MATCH', pattern, 'COUNT', String(count),
+      )) as [string, string[]];
+      for (let i = 1; i < fields.length; i += 2) yield this.decodeValue(fields[i]) as V;
+      cursor = next;
+    } while (cursor !== '0');
+  }
+  /** Lazy HSCAN iterator over entries (Java `RMap.entrySet(pattern, count)` view). */
+  async *entriesIterator(pattern = '*', count = 100): AsyncGenerator<[K, V]> {
+    let cursor = '0';
+    do {
+      const [next, fields] = (await this.redis.hscan(
+        this.name, cursor, 'MATCH', pattern, 'COUNT', String(count),
+      )) as [string, string[]];
+      for (let i = 0; i + 1 < fields.length; i += 2) {
+        yield [this.decodeKey(fields[i]) as K, this.decodeValue(fields[i + 1]) as V];
+      }
+      cursor = next;
+    } while (cursor !== '0');
+  }
   async putAll(mapping: Record<string, V> | Map<K, V>): Promise<void> {
     const entries = mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping);
     if (entries.length === 0) return;
@@ -279,7 +335,7 @@ return tostring(n)`;
   }
 }
 
-export class RSet<V = any> extends RedisDataStructure {
+export class RSet<V = any> extends RedisKeyedStructure<V> {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
@@ -326,21 +382,22 @@ export class RSet<V = any> extends RedisDataStructure {
     return ((m as string[]) ?? []).map((x) => this.decodeValue(x) as V);
   }
   /**
-   * Store variants mirror Redisson exactly: the result is written into SELF
-   * (self IS an input, unlike the scored-sorted-set variants) and the
-   * returned number is the new cardinality. Command shape is
-   * `SOPSTORE self (1+N) self others...` — the explicit numkeys is required;
-   * without it correct servers reject the command. The previous read-only
-   * methods of the same names are now readUnion/readDiff/readIntersection.
+   * Store variants mirror Redisson 4.6.1 exactly: SELF is only the
+   * DESTINATION (overwritten by the result) and is NOT one of the inputs.
+   * Command shape is `SOPSTORE self others...` — bare keys, no numkeys
+   * (a stray numkeys of the zset/SINTERCARD kind would be parsed as a key
+   * name and silently corrupt the result). Semantics pinned by the live
+   * probe against the 4.6.1 jar; the read-only counterparts below DO include
+   * SELF as first input, like Java's read* variants.
    */
   async union(...names: string[]): Promise<number> {
-    return toNumber(await (this.redis as any).sunionstore(this.name, 1 + names.length, this.name, ...names));
+    return toNumber(await this.redis.sunionstore(this.name, ...names));
   }
   async diff(...names: string[]): Promise<number> {
-    return toNumber(await (this.redis as any).sdiffstore(this.name, 1 + names.length, this.name, ...names));
+    return toNumber(await this.redis.sdiffstore(this.name, ...names));
   }
   async intersection(...names: string[]): Promise<number> {
-    return toNumber(await (this.redis as any).sinterstore(this.name, 1 + names.length, this.name, ...names));
+    return toNumber(await this.redis.sinterstore(this.name, ...names));
   }
   async readUnion(...otherKeys: string[]): Promise<V[]> {
     const m = await this.redis.sunion(this.name, ...otherKeys);
@@ -354,10 +411,11 @@ export class RSet<V = any> extends RedisDataStructure {
     const m = await this.redis.sinter(this.name, ...otherKeys);
     return m.map((x) => this.decodeValue(x) as V);
   }
-  /** Cardinality of the union without storing (SUNIONCARD, Redis 7+; via
-   * `.call` — absent from ioredis typed methods like XACKDEL). */
+  /** Cardinality of the union without storing (SUNIONCARD — Redis 8.10+,
+   * matching Java 4.6.1 RedisCommands.SUNIONCARD_INT; `numkeys` IS required
+   * here, unlike the store variants above). */
   async countUnion(...names: string[]): Promise<number> {
-    return toNumber(await (this.redis as any).call('SUNIONCARD', 1 + names.length, this.name, ...names));
+    return toNumber(await this.redis.call('SUNIONCARD', 1 + names.length, this.name, ...names));
   }
   async move(dest: string, value: V): Promise<boolean> {
     return ((await this.redis.smove(this.name, dest, this.encodeValue(value))) as number) === 1;
@@ -503,31 +561,134 @@ export class RDeque<V = any> extends RQueue<V> {
   }
 }
 
+function isUnsupportedCommand(e: unknown): boolean {
+  const msg = String((e as any)?.message ?? e);
+  return /unsupported command|unknown command/i.test(msg);
+}
+
+interface ChannelWaker {
+  wait(ms: number): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Lazily SUBSCRIBE a dedicated connection and resolve one waiter per message
+ * (or timeout). The capacity key itself is authoritative, so losing a wake is
+ * safe: the caller re-runs the atomic try-offer before each wait. */
+function createChannelWaker(conn: Redis, channel: string): ChannelWaker {
+  let notify: (() => void) | null = null;
+  let subscribed = false;
+  let failed = false;
+  const onMessage = () => { notify?.(); };
+  (conn as any).on?.('message', onMessage);
+  return {
+    async wait(ms: number) {
+      if (!subscribed && !failed) {
+        try {
+          await conn.subscribe(channel);
+          subscribed = true;
+        } catch {
+          failed = true;
+        }
+      }
+      if (!subscribed) {
+        await sleep(Math.min(Math.max(1, ms), 50));
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        let done = false;
+        let timer: any;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          notify = null;
+          clearTimeout(timer);
+          resolve();
+        };
+        notify = finish;
+        timer = setTimeout(finish, Math.max(1, ms));
+      });
+    },
+    async close() {
+      try {
+        (conn as any).off?.('message', onMessage);
+        if (subscribed) await (conn as any).unsubscribe?.(channel);
+      } catch { /* noop */ }
+    },
+  };
+}
+
+/** BLPOP/BRPOP on a dedicated connection. `timeoutMs === null` blocks forever;
+ * `<= 0` is non-blocking (LPOP/RPOP); positive values use Redis 6+ float
+ * seconds. Mock clients without BLPOP fall back to short-interval polling. */
+async function blockingListPop(
+  redis: Redis,
+  name: string,
+  side: 'left' | 'right',
+  timeoutMs: number | null,
+): Promise<string | null> {
+  const pop = (conn: Redis) => (side === 'left' ? conn.lpop(name) : conn.rpop(name));
+  if (timeoutMs !== null && timeoutMs <= 0) return pop(redis);
+  const immediate = await pop(redis);
+  if (immediate !== null) return immediate;
+
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<string | null> => {
+      for (;;) {
+        const v = await pop(redis);
+        if (v !== null) return v;
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const cmd = side === 'left' ? 'blpop' : 'brpop';
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r = await (conn as any)[cmd](name, seconds);
+      return r ? (Array.isArray(r) ? r[1] : r) : null;
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
+}
+
+const QUEUE_DRAIN = `local max = tonumber(ARGV[1])
+local len = redis.call('llen', KEYS[1])
+local count = len
+if max >= 0 and max < count then count = max end
+if count <= 0 then return {} end
+local vals = redis.call('lrange', KEYS[1], 0, count - 1)
+if count >= len then
+    redis.call('del', KEYS[1])
+else
+    redis.call('ltrim', KEYS[1], count, -1)
+end
+return vals`;
+
 export class RBlockingQueue<V = any> extends RQueue<V> {
   async take(): Promise<V> {
     for (;;) {
-      const r = await (this.redis as any).blpop(this.name, 0);
-      if (r) {
-        const raw = Array.isArray(r) ? r[1] : r;
-        return this.decodeValue(raw) as V;
-      }
+      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async pollWithTimeout(timeoutMs: number): Promise<V | null> {
-    const secs = Math.max(1, Math.ceil(timeoutMs / 1000));
-    const r = await (this.redis as any).blpop(this.name, timeoutMs <= 0 ? 0 : secs);
-    if (!r) return null;
-    const raw = Array.isArray(r) ? r[1] : r;
-    return this.decodeValue(raw) as V;
+    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
   }
   async put(value: V): Promise<void> {
     await this.offer(value);
   }
   async drainTo(target: RQueue<V>, maxElements = -1): Promise<number> {
-    const all = await this.redis.lrange(this.name, 0, maxElements < 0 ? -1 : maxElements - 1);
-    if (all.length === 0) return 0;
-    await this.redis.ltrim(this.name, all.length, -1);
-    for (const raw of all) await target.offer(this.decodeValue(raw) as V);
+    if (maxElements === 0) return 0;
+    const raw: any = await luaEval(this.redis, QUEUE_DRAIN, 1, this.name, String(maxElements));
+    const all: string[] = Array.isArray(raw)
+      ? raw
+      : (raw === null || raw === undefined || raw === false ? [] : [String(raw)]);
+    for (const v of all) await target.offer(this.decodeValue(v) as V);
     return all.length;
   }
 }
@@ -535,52 +696,204 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
 export class RBlockingDeque<V = any> extends RDeque<V> {
   async takeFirst(): Promise<V> {
     for (;;) {
-      const r = await (this.redis as any).blpop(this.name, 0);
-      if (r) return this.decodeValue(Array.isArray(r) ? r[1] : r) as V;
+      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async takeLast(): Promise<V> {
     for (;;) {
-      const r = await (this.redis as any).brpop(this.name, 0);
-      if (r) return this.decodeValue(Array.isArray(r) ? r[1] : r) as V;
+      const raw = await blockingListPop(this.redis, this.name, 'right', null);
+      if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async pollFirstWithTimeout(timeoutMs: number): Promise<V | null> {
-    const r = await (this.redis as any).blpop(this.name, Math.max(1, Math.ceil(timeoutMs / 1000)));
-    if (!r) return null;
-    return this.decodeValue(Array.isArray(r) ? r[1] : r) as V;
+    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
   }
   async pollLastWithTimeout(timeoutMs: number): Promise<V | null> {
-    const r = await (this.redis as any).brpop(this.name, Math.max(1, Math.ceil(timeoutMs / 1000)));
-    if (!r) return null;
-    return this.decodeValue(Array.isArray(r) ? r[1] : r) as V;
+    const raw = await blockingListPop(this.redis, this.name, 'right', timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
   }
 }
 
+// Bounded queue semaphore protocol (Redisson 4.6.1 / redi.go):
+//   redisson_bqs:{name} = AVAILABLE permits, not the configured maximum.
+//   trySetCapacity SETNX-equivalent + PUBLISH; offer DECRBY + RPUSH atomically;
+//   every removal INCRBY + PUBLISH redisson_sc:redisson_bqs:{name}.
+const BQ_TRY_OFFER = `local value = redis.call('get', KEYS[1])
+if value == false then return -1 end
+if tonumber(value) >= tonumber(ARGV[2]) then
+    redis.call('decrby', KEYS[1], ARGV[2])
+    redis.call('rpush', KEYS[2], ARGV[1])
+    return 1
+end
+return 0`;
+
+const BQ_RELEASE = `local value = redis.call('incrby', KEYS[1], ARGV[1])
+redis.call('publish', KEYS[2], value)
+return value`;
+
+const BQ_POLL = `local res = redis.call('lpop', KEYS[1])
+if res ~= false then
+    local value = redis.call('incrby', KEYS[2], ARGV[1])
+    redis.call('publish', KEYS[3], value)
+end
+return res`;
+
+const BQ_REMOVE = `local count = redis.call('lrem', KEYS[1], 0, ARGV[1])
+if count > 0 then
+    local value = redis.call('incrby', KEYS[2], count)
+    redis.call('publish', KEYS[3], value)
+    return 1
+end
+return 0`;
+
+const BQ_CLEAR = `local len = redis.call('llen', KEYS[1])
+if len > 0 then
+    redis.call('del', KEYS[1])
+    local value = redis.call('incrby', KEYS[2], len)
+    redis.call('publish', KEYS[3], value)
+end
+return len`;
+
+const BQ_DRAIN = `local max = tonumber(ARGV[1])
+local len = redis.call('llen', KEYS[1])
+local count = len
+if max >= 0 and max < count then count = max end
+if count <= 0 then return {} end
+local vals = redis.call('lrange', KEYS[1], 0, count - 1)
+if count >= len then
+    redis.call('del', KEYS[1])
+else
+    redis.call('ltrim', KEYS[1], count, -1)
+end
+local value = redis.call('incrby', KEYS[2], count)
+redis.call('publish', KEYS[3], value)
+return vals`;
+
+const BQ_CAPACITY = `local value = redis.call('get', KEYS[1])
+if value == false then
+    redis.call('set', KEYS[1], ARGV[1])
+    redis.call('publish', KEYS[2], ARGV[1])
+    return 1
+end
+return 0`;
+
 export class RBoundedBlockingQueue<V = any> extends RBlockingQueue<V> {
   private capacityKey: string;
+  private channel: string;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.capacityKey = prefixName('redisson_bqs', name);
+    this.channel = prefixName('redisson_sc', this.capacityKey);
   }
+
   async trySetCapacity(capacity: number): Promise<boolean> {
-    return ((await this.redis.setnx(this.capacityKey, String(capacity))) as number) === 1;
+    return toNumber(await luaEval(this.redis, BQ_CAPACITY, 2, this.capacityKey, this.channel, String(capacity))) === 1;
   }
-  async getCapacity(): Promise<number> {
+
+  /** Remaining permits (Java `remainingCapacity()`); NOT the configured max. */
+  async remainingCapacity(): Promise<number> {
     const v = await this.redis.get(this.capacityKey);
     return v === null ? 0 : Number(v);
   }
-  override async offer(value: V): Promise<boolean> {
-    const cap = await this.getCapacity();
-    const s = `local cap = tonumber(redis.call('get', KEYS[2]))
-if cap ~= nil then
-    local size = redis.call('llen', KEYS[1])
-    if size >= cap then return 0 end
-end
-redis.call('rpush', KEYS[1], ARGV[1])
-return 1`;
-    void cap;
-    return toNumber(await luaEval(this.redis, s, 2, this.name, this.capacityKey, this.encodeValue(value))) === 1;
+
+  /** Back-compat alias for {@link remainingCapacity}. */
+  async getCapacity(): Promise<number> {
+    return this.remainingCapacity();
+  }
+
+  private async tryOffer(encoded: string): Promise<boolean> {
+    const n = toNumber(await luaEval(this.redis, BQ_TRY_OFFER, 2, this.capacityKey, this.name, encoded, '1'));
+    if (n === -1) throw new Error(`Capacity of queue ${this.capacityKey} has not been set`);
+    return n === 1;
+  }
+
+  private async releaseCapacity(permits = 1): Promise<number> {
+    return toNumber(await luaEval(this.redis, BQ_RELEASE, 2, this.capacityKey, this.channel, String(permits)));
+  }
+
+  private async waitCapacity(encoded: string, timeoutMs: number | null): Promise<boolean> {
+    return withDedicatedRedis(this.redis, async (conn, dedicated) => {
+      // Java blocks on the capacity channel. The key is authoritative; if the
+      // subscription is unavailable we still poll the atomic try-offer.
+      const waker = dedicated ? createChannelWaker(conn, this.channel) : null;
+      try {
+        const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+        for (;;) {
+          if (await this.tryOffer(encoded)) return true;
+          const remain = deadline === Infinity ? 1000 : deadline - Date.now();
+          if (remain <= 0) return false;
+          if (waker) await waker.wait(Math.min(remain, 1000));
+          else await sleep(Math.min(remain, 50));
+        }
+      } finally {
+        await waker?.close();
+      }
+    });
+  }
+
+  override async offer(value: V, timeoutMs = 0): Promise<boolean> {
+    const encoded = this.encodeValue(value);
+    if (await this.tryOffer(encoded)) return true;
+    if (timeoutMs <= 0) return false;
+    return this.waitCapacity(encoded, timeoutMs);
+  }
+
+  override async put(value: V): Promise<void> {
+    await this.waitCapacity(this.encodeValue(value), null);
+  }
+
+  override async poll(): Promise<V | null> {
+    const raw = await luaEval(this.redis, BQ_POLL, 3, this.name, this.capacityKey, this.channel, '1');
+    return raw === null || raw === undefined || raw === false ? null : (this.decodeValue(raw) as V);
+  }
+
+  override async take(): Promise<V> {
+    for (;;) {
+      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      if (raw !== null) {
+        await this.releaseCapacity(1);
+        return this.decodeValue(raw) as V;
+      }
+    }
+  }
+
+  override async pollWithTimeout(timeoutMs: number): Promise<V | null> {
+    if (timeoutMs <= 0) return this.poll();
+    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    if (raw === null) return null;
+    await this.releaseCapacity(1);
+    return this.decodeValue(raw) as V;
+  }
+
+  override async remove(value: V): Promise<boolean> {
+    const n = toNumber(await luaEval(this.redis, BQ_REMOVE, 3, this.name, this.capacityKey, this.channel, this.encodeValue(value)));
+    return n === 1;
+  }
+
+  override async clear(): Promise<void> {
+    await luaEval(this.redis, BQ_CLEAR, 3, this.name, this.capacityKey, this.channel);
+  }
+
+  override async drainTo(target: RQueue<V>, maxElements = -1): Promise<number> {
+    if (maxElements === 0) return 0;
+    const raw: any = await luaEval(this.redis, BQ_DRAIN, 3, this.name, this.capacityKey, this.channel, String(maxElements));
+    const vals: string[] = Array.isArray(raw)
+      ? raw
+      : (raw === null || raw === undefined || raw === false ? [] : [String(raw)]);
+    for (const v of vals) await target.offer(this.decodeValue(v) as V);
+    return vals.length;
+  }
+
+  // Java deletes the queue LIST together with the semaphore capacity key.
+  // Without this, trySetCapacity() can never succeed again after delete().
+  override async delete(): Promise<boolean> {
+    return this.deleteKeys([this.name, this.capacityKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    return this.unlinkKeys([this.name, this.capacityKey]);
   }
 }
 
@@ -600,7 +913,7 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
     return ((await this.redis.zadd(this.name, String(score), this.encodeValue(value))) as number) > 0;
   }
   async addIfAbsent(score: number, value: V): Promise<boolean> {
-    return ((await (this.redis as any).zadd(this.name, 'NX', String(score), this.encodeValue(value))) as number) > 0;
+    return ((await this.redis.zadd(this.name, 'NX', String(score), this.encodeValue(value))) as number) > 0;
   }
   async remove(value: V): Promise<boolean> {
     return ((await this.redis.zrem(this.name, this.encodeValue(value))) as number) > 0;
@@ -612,13 +925,15 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
   async contains(value: V): Promise<boolean> {
     return (await this.getScore(value)) !== null;
   }
-  async rank(value: V): Promise<number> {
+  /** Java `rank(V)`: 0-based ascending rank, `null` when absent. */
+  async rank(value: V): Promise<number | null> {
     const r = await this.redis.zrank(this.name, this.encodeValue(value));
-    return r === null ? -1 : r;
+    return r === null ? null : r;
   }
-  async revRank(value: V): Promise<number> {
+  /** Java `revRank(V)`: 0-based descending rank, `null` when absent. */
+  async revRank(value: V): Promise<number | null> {
     const r = await this.redis.zrevrank(this.name, this.encodeValue(value));
-    return r === null ? -1 : r;
+    return r === null ? null : r;
   }
   async size(): Promise<number> {
     return this.redis.zcard(this.name);
@@ -645,6 +960,31 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
     const r = await luaEval(this.redis, s, 1, this.name, String(score), this.encodeValue(value));
     return r === null ? -1 : Number(r);
   }
+  /** Java `addAndGetRevRank(double, V)`: atomic ZADD + ZREVRANK (null rank → -1). */
+  async addAndGetRevRank(score: number, value: V): Promise<number> {
+    const s = `redis.call('zadd', KEYS[1], ARGV[1], ARGV[2])
+return redis.call('zrevrank', KEYS[1], ARGV[2])`;
+    const r = await luaEval(this.redis, s, 1, this.name, String(score), this.encodeValue(value));
+    return r === null ? -1 : Number(r);
+  }
+  /** Java `addScore(V, Number)`: ZINCRBY — returns the resulting score. */
+  async addScore(value: V, score: number): Promise<number> {
+    return Number(await this.redis.zincrby(this.name, String(score), this.encodeValue(value)));
+  }
+  /** Java `addScoreAndGetRank(V, Number)`: atomic ZINCRBY + ZRANK (null rank → -1). */
+  async addScoreAndGetRank(value: V, score: number): Promise<number> {
+    const s = `redis.call('zincrby', KEYS[1], ARGV[1], ARGV[2])
+return redis.call('zrank', KEYS[1], ARGV[2])`;
+    const r = await luaEval(this.redis, s, 1, this.name, String(score), this.encodeValue(value));
+    return r === null ? -1 : Number(r);
+  }
+  /** Java `addScoreAndGetRevRank(V, Number)`: atomic ZINCRBY + ZREVRANK (null rank → -1). */
+  async addScoreAndGetRevRank(value: V, score: number): Promise<number> {
+    const s = `redis.call('zincrby', KEYS[1], ARGV[1], ARGV[2])
+return redis.call('zrevrank', KEYS[1], ARGV[2])`;
+    const r = await luaEval(this.redis, s, 1, this.name, String(score), this.encodeValue(value));
+    return r === null ? -1 : Number(r);
+  }
   async pollFirst(count = 1): Promise<V[]> {
     const m: any = await (this.redis as any).zpopmin?.(this.name, count);
     if (!m) return [];
@@ -668,6 +1008,81 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
   async last(): Promise<V | null> {
     const m = await this.redis.zrevrange(this.name, 0, 0);
     return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
+  }
+  /** Java `firstScore()`: ZRANGE 0 0 WITHSCORES — `null` when empty. */
+  async firstScore(): Promise<number | null> {
+    const m = await this.redis.zrange(this.name, 0, 0, 'WITHSCORES');
+    return m.length < 2 ? null : Number(m[1]);
+  }
+  /** Java `lastScore()`: ZRANGE -1 -1 WITHSCORES — `null` when empty. */
+  async lastScore(): Promise<number | null> {
+    const m = await this.redis.zrange(this.name, -1, -1, 'WITHSCORES');
+    return m.length < 2 ? null : Number(m[1]);
+  }
+  /** Java score-bound formatting: exclusive → '(' prefix, ±inf → ±inf. */
+  private scoreBound(score: number, inclusive: boolean): string {
+    const s = score === Infinity ? '+inf' : score === -Infinity ? '-inf' : String(score);
+    return inclusive ? s : `(${s}`;
+  }
+  /** Java `valueRangeReversed(int, int)`: ZREVRANGE by index. */
+  async valueRangeReversed(startIndex: number, endIndex: number): Promise<V[]>;
+  /** Java `valueRangeReversed(double, boolean, double, boolean[, int, int])`: ZREVRANGEBYSCORE (end bound first). */
+  async valueRangeReversed(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<V[]>;
+  async valueRangeReversed(a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<V[]> {
+    if (typeof b === 'number') {
+      const m = await this.redis.zrevrange(this.name, a, b);
+      return m.map((x) => this.decodeValue(x) as V);
+    }
+    const args: (string | number)[] = [this.name, this.scoreBound(c!, d ?? true), this.scoreBound(a, b)];
+    if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
+    const m: string[] = await (this.redis as any).zrevrangebyscore(...args);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java `entryRangeReversed(int, int)`: ZREVRANGE ... WITHSCORES by index. */
+  async entryRangeReversed(startIndex: number, endIndex: number): Promise<ScoredEntry<V>[]>;
+  /** Java `entryRangeReversed(double, boolean, double, boolean[, int, int])`: ZREVRANGEBYSCORE ... WITHSCORES. */
+  async entryRangeReversed(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]>;
+  async entryRangeReversed(a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]> {
+    if (typeof b === 'number') {
+      const m = await this.redis.zrevrange(this.name, a, b, 'WITHSCORES');
+      return this.decodeScoredFlat(m);
+    }
+    const args: (string | number)[] = [this.name, this.scoreBound(c!, d ?? true), this.scoreBound(a, b), 'WITHSCORES'];
+    if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
+    const m: string[] = await (this.redis as any).zrevrangebyscore(...args);
+    return this.decodeScoredFlat(m);
+  }
+  /** Java `entryRange(int, int)`: ZRANGE ... WITHSCORES by index. */
+  async entryRange(startIndex: number, endIndex: number): Promise<ScoredEntry<V>[]>;
+  /** Java `entryRange(double, boolean, double, boolean[, int, int])`: ZRANGEBYSCORE ... WITHSCORES. */
+  async entryRange(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]>;
+  async entryRange(a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<ScoredEntry<V>[]> {
+    if (typeof b === 'number') {
+      const m = await this.redis.zrange(this.name, a, b, 'WITHSCORES');
+      return this.decodeScoredFlat(m);
+    }
+    const args: (string | number)[] = [
+      this.name, this.scoreBound(a, b), this.scoreBound(c!, d ?? true), 'WITHSCORES',
+    ];
+    if (count !== undefined && count >= 0) args.push('LIMIT', offset ?? 0, count);
+    const m: string[] = await (this.redis as any).zrangebyscore(...args);
+    return this.decodeScoredFlat(m);
+  }
+  /** Java `count(double, boolean, double, boolean)`: ZCOUNT between the score bounds. */
+  async count(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean): Promise<number> {
+    return toNumber(await this.redis.zcount(
+      this.name, this.scoreBound(startScore, startScoreInclusive), this.scoreBound(endScore, endScoreInclusive),
+    ));
+  }
+  /** Java `removeRangeByRank(int, int)`: ZREMRANGEBYRANK. */
+  async removeRangeByRank(startIndex: number, endIndex: number): Promise<number> {
+    return toNumber(await this.redis.zremrangebyrank(this.name, startIndex, endIndex));
+  }
+  /** Java `removeRangeByScore(double, boolean, double, boolean)`: ZREMRANGEBYSCORE. */
+  async removeRangeByScore(startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean): Promise<number> {
+    return toNumber(await this.redis.zremrangebyscore(
+      this.name, this.scoreBound(startScore, startScoreInclusive), this.scoreBound(endScore, endScoreInclusive),
+    ));
   }
 
   // -- Set operations (mirror Redisson argument order exactly; see
@@ -697,11 +1112,11 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
   }
   /** Union of SELF + others (read-only). */
   async readUnion(...names: string[]): Promise<V[]> {
-    const m: string[] = await (this.redis as any).zunion(1 + names.length, this.name, ...names);
+    const m: string[] = await this.redis.zunion(1 + names.length, this.name, ...names);
     return m.map((x) => this.decodeValue(x) as V);
   }
   async readUnionEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
-    const m: string[] = await (this.redis as any).zunion(1 + names.length, this.name, ...names, 'WITHSCORES');
+    const m: string[] = await this.redis.zunion(1 + names.length, this.name, ...names, 'WITHSCORES');
     return this.decodeScoredFlat(m);
   }
   /** Intersection of the OTHER sets, stored into SELF. Returns result size. */
@@ -713,16 +1128,16 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
   }
   /** Intersection of SELF + others (read-only). */
   async readIntersection(...names: string[]): Promise<V[]> {
-    const m: string[] = await (this.redis as any).zinter(1 + names.length, this.name, ...names);
+    const m: string[] = await this.redis.zinter(1 + names.length, this.name, ...names);
     return m.map((x) => this.decodeValue(x) as V);
   }
   async readIntersectionEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
-    const m: string[] = await (this.redis as any).zinter(1 + names.length, this.name, ...names, 'WITHSCORES');
+    const m: string[] = await this.redis.zinter(1 + names.length, this.name, ...names, 'WITHSCORES');
     return this.decodeScoredFlat(m);
   }
   /** Cardinality of SELF ∩ others (0 limit = exact). */
   async countIntersection(...names: string[]): Promise<number> {
-    return toNumber(await (this.redis as any).zintercard(1 + names.length, this.name, ...names));
+    return toNumber(await this.redis.zintercard(1 + names.length, this.name, ...names));
   }
   async countIntersectionLimit(limit: number, ...names: string[]): Promise<number> {
     const args: (string | number)[] = [1 + names.length, this.name, ...names];
@@ -735,11 +1150,11 @@ return redis.call('zrank', KEYS[1], ARGV[2])`;
   }
   /** SELF minus others (read-only). */
   async readDiff(...names: string[]): Promise<V[]> {
-    const m: string[] = await (this.redis as any).zdiff(1 + names.length, this.name, ...names);
+    const m: string[] = await this.redis.zdiff(1 + names.length, this.name, ...names);
     return m.map((x) => this.decodeValue(x) as V);
   }
   async readDiffEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
-    const m: string[] = await (this.redis as any).zdiff(1 + names.length, this.name, ...names, 'WITHSCORES');
+    const m: string[] = await this.redis.zdiff(1 + names.length, this.name, ...names, 'WITHSCORES');
     return this.decodeScoredFlat(m);
   }
 }
@@ -764,10 +1179,10 @@ export class RLexSortedSet extends RedisDataStructure {
     return (this.redis as any).zrangebylex(...args);
   }
   async removeRangeByLex(min: string, max: string): Promise<number> {
-    return (this.redis as any).zremrangebylex(this.name, min, max);
+    return this.redis.zremrangebylex(this.name, min, max);
   }
   async countByLex(min: string, max: string): Promise<number> {
-    return (this.redis as any).zlexcount(this.name, min, max);
+    return this.redis.zlexcount(this.name, min, max);
   }
   async rank(value: string): Promise<number> {
     const r = await this.redis.zrank(this.name, value);

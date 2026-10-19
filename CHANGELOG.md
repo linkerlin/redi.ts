@@ -1,3 +1,224 @@
+## 2.0.0 — 2026-10-19
+
+Phase 21: modern packaging (ESM + CJS), a real Redis Cluster test pass, and
+the delayed-queue background migrator. Full suite: **188 tests / 25 files
+green in ~60 s**.
+
+- Packaging: dual-format build (`tsc` ×2) — `dist/cjs` (CommonJS) +
+  `dist/esm` (ES modules with `.js` specifiers), per-directory
+  `package.json` stubs, `exports` map in `package.json` (`scripts/build.mjs`
+  orchestrates). `npm run pack-smoke` packages the tarball, installs it into
+  a temp consumer and asserts both `require` and `import` resolve the right
+  build and produce identical wire output.
+- ioredis typing: `Config.client` now accepts `Redis | Cluster` (exported
+  `RedisClient` type). ~87 internal `(client as any).cmd(...)` casts dropped
+  so typed calls catch arity/shape mistakes at compile time — the cast-hiding
+  was what let the RSet store bug through (below).
+- **`RSet` wire fix** (latent since 1.0.0): `union/intersection/diff` store
+  variants sent `SOPSTORE dest numkeys self ...` (ioredis varargs treat the
+  trailing keys as a flat argv; there is no numkeys and `self` is only the
+  *destination*, never an input). Shape is now Java 4.6.1's bare-key form
+  `SOPSTORE self others...` — verified by black-box probe against the 4.6.1
+  jar (`sinterstore self other1 other2`, `sdiffstore` likewise). Read
+  variants keep `self` as first input (that part was correct). Mock + live
+  phase-15 tests now use discriminating seeds so a wrong shape cannot pass.
+- `RDelayedQueue`: opt-in background migrator ported from Java
+  `QueueTransferTask`/`QueueTransferService` — `start()` subscribes to the
+  queue channel over a `duplicate()` connection and arms a deadline timer,
+  `stop()`/`destroy()` release it (Java `destroy()` = detach only, data
+  survives). Scheduling semantics from 4.6.1: push immediately when the next
+  deadline is ≤ 10 ms away, otherwise `setTimeout` (timers `unref()`ed); the
+  migration Lua now returns the next head deadline (Java's `return v[2]`
+  tail) so each push re-arms; errors retry after 5 s. The push-on-subscribe
+  catch-up is done explicitly because ioredis `Cluster` re-emits `message`
+  but not `subscribe`. `poll()`/`peek()` keep their synchronous catch-up
+  migration, so behaviour is unchanged without `start()`. ioredis-mock
+  degrades to a no-op (offers already land in the destination there).
+- Live tests: phase-14 `nack` (`XNACK`) and phase-15 `countUnion`
+  (`SUNIONCARD`) are now capability-gated via `COMMAND INFO` with a logged
+  SKIP on older servers (Redis 8.6 lacks both); both verified live against
+  Redis 8.10.2 with `REDIS_URL` — the previous "2 environment failures" are
+  gone, full suite fully green.
+- Cluster: `scripts/cluster-up.sh` / `cluster-down.sh` (WSL, 3 masters on
+  ports 7100-7102) + `test/live-cluster.test.ts` (4 tests) running an
+  ioredis `Cluster` as the Redisson client — locks with a second client
+  contending through slot routing, MapCache TTL/bookkeeping + listener
+  events over the cluster bus, the delayed-queue migrator end-to-end, rate
+  limiter and topic pub/sub. All keys stay in one slot via the
+  `prefixName`/`suffixName` hash-tag rule. Skips with a logged warning when
+  no cluster is reachable.
+
+## 1.5.0 — 2026-10-19
+
+Phase 20: collection/bitmap depth APIs plus a resident Java probe REPL
+(full live suite 673 s → ~57 s).
+
+- Test infra: `TsProbe` gained a resident `repl` mode (`TsRepl`) so one JVM
+  serves every probe call (~5 ms per command instead of an `mvn exec:java`
+  boot); all live suites migrated to `test/helpers/java-probe.ts`. Full
+  `npm test` went from 673 s to ~57 s with the same semantic waits kept.
+- `RMap`: `valueSize` (HSTRLEN), `randomKeys`/`randomEntries` (HRANDFIELD
+  [WITHVALUES]) and lazy HSCAN iterators
+  `keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)`.
+- `RScoredSortedSet`: `firstScore`/`lastScore`, `addScore` (ZINCRBY),
+  `addScoreAndGetRank`/`addScoreAndGetRevRank`, `addAndGetRank`/
+  `addAndGetRevRank` (single Lua ZADD+rank), `count` (ZCOUNT), `entryRange`
+  (index and score forms), `valueRangeReversed`/`entryRangeReversed` (index
+  2-arg form and score 4/6-arg form; Java semantics: `startScore` is the
+  lower bound and the command is `ZREVRANGEBYSCORE key end start`),
+  `removeRangeByRank`/`removeRangeByScore`; `rank`/`revRank` now return
+  `number | null` like Java (previously `-1`).
+- `RBitSet`: `BitFieldArgs` builder (`get`/`set`/`increment` × signed/
+  unsigned, `BitOffset.bit/index`, `overflow`) with `bitField()` returning
+  `(number | null)[]` (`null` on OVERFLOW FAIL); typed helpers
+  `getSigned`/`setSigned`/`incrementAndGetSigned` and unsigned variants plus
+  `getByte/Short/Integer/Long` shortcuts; `size()` = STRLEN×8 and `length()`
+  matches the 4.6.1 bitpos Lua (highest set bit + 1 — the in-byte scan
+  direction was fixed); `or/and/xor/not` return the result byte length;
+  Redis 8 `diff`/`diffInverse`/`andOr`/`setExclusive`
+  (`BITOP DIFF/DIFF1/ANDOR/ONE`); `setRange`/`clear(from, to)` are
+  `to`-exclusive like Java.
+- `RGeo`: `GeoSearchArgs` builder (`from(lon,lat)` / `from(member)`,
+  `radius`/`box`, `order`, `count`/`countAny`), `search(args)`,
+  `searchWithDistance`, `searchWithPosition`, `storeSearchTo` /
+  `storeSortedSearchTo`, single-member `addIfExists` (Lua geopos→geoadd) and
+  `addIfExists(GeoEntry...)` (GEOADD XX; Redis only counts added elements, so
+  the reply is 0 even when a member moves — tests assert the effect).
+  Command selection mirrors Java 4.6.1 (verified via javap): radius →
+  `GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`, box → `GEOSEARCH`, stores →
+  `GEORADIUS ... STOREDIST` / `GEOSEARCHSTORE`. 4.6.1 has no polygon search
+  (newer versions only), so the ported surface is complete for 4.6.1.
+- Verification: 2 new mock tests (map iterators + HRANDFIELD/HSTRLEN;
+  scored-set score ops + reversed ranges incl. `entryRange` index form), a
+  `length()` regression assertion in the mock bitset test, and
+  `live-phase20.test.ts` (4 tests, Redis + Java 4.6.1 probes, both
+  directions: map views/random, zset score family/deletion, BITFIELD/BITOP
+  incl. the DIFF family, Geo search/stores/XX). Full suite: 182 tests,
+  180 passed, 2 known environment failures (`xnack`, `SUNIONCARD` missing on
+  local Redis 8.6), 56.9 s.
+
+## 1.4.0 — 2026-10-19
+
+Phase 19: key synchronizers, RW-lock views and map-cache depth APIs.
+
+- New `RedisKeyedStructure` base (`src/synchronizers.ts`): `RMap`, `RSet`,
+  `RMapCache(+Native)`, `RSetCache` and the multimaps gain the Java
+  `getLock`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/
+  `getCountDownLatch`/`getPermitExpirableSemaphore` family. Companion names
+  follow Java `suffixName(name, hash128toBase64(encode(key)) + ":" + suffix)`
+  with suffixes `lock`/`fairlock`/`rw_lock`/`semaphore`/`countdownlatch`/
+  `permitexpirablesemaphore`; verified byte-identical with the Java 4.6.1
+  probe. Synchronizers created through a `Redisson` factory inherit the
+  client owner id/watchdog (`attachOwner`).
+- `RReadWriteLock` views implement `isLocked` (read view: Java
+  `mode=='read' or (mode=='write' and hlen>2)`), `isHeldByThread`,
+  `getHoldCount` and `forceUnlock`. Unlock/forceUnlock wake-up publishes now
+  match Java `LockPubSub`: read → `UNLOCK_MESSAGE` (0, wake one), write →
+  `READ_UNLOCK_MESSAGE` (1, wake all) — previously inverted (TS and redi.go).
+- `RMultiLock`/`RRedLock` accept any `LockLike` (`tryLock`/`unlock`), so
+  `RFairLock` and read/write views can join multi-lock/red-lock orchestration.
+- `RMapCache`: `putAll(mapping, ttl, maxIdle)`, `expireEntry` (refuses
+  already-expired entries, repacks maxIdle), `remainTimeToLive` (`-2`
+  missing/expired, `-1` no expiry, else ms) and entry listeners
+  (`addListener`/`removeListener`/`removeAllListeners`). Listeners subscribe
+  on a dedicated connection through `messageBuffer` (u64LE length prefixes
+  survive binary-safe transport) and set the Java `has-listeners` flag so
+  Java writers publish too; published payloads are sent as Buffers because
+  ioredis encodes string args as UTF-8.
+- `RMapCacheNative`: `putIfAbsent(key, value, ttl)` (base `hsetnx`/`hget`
+  script when no TTL; 4.6.1 guard script + `HPEXPIRE ... FIELDS 1` when a TTL
+  is given — an existing entry keeps its value and TTL),
+  `expireEntry(IfNotSet/IfGreater/IfLess)` (HPEXPIRE
+  `[NX|GT|LT] FIELDS 1`), `clearExpire` (HPERSIST `FIELDS 1`) and
+  `remainTimeToLive` over HPTTL. Java 4.6.1 answers `null` for HPERSIST `-2`
+  (field already gone); TS keeps the `boolean` contract and returns `false`.
+- Verification: 3 new wire tests (event codec round-trip/truncation, Java
+  golden hash vector), 7 new mock tests + `live-phase19.test.ts` (5 tests,
+  Redis + Java 4.6.1: six companion names, key-lock exclusion both ways,
+  MapCache events both ways, conditional expiry/HPERSIST both ways).
+
+## 1.3.0 — 2026-10-19
+
+Phase 18: 64-bit precision and atomic-operation hardening.
+
+- `JsonCodec` encodes `bigint` directly as `["java.lang.Long",<decimal>]`
+  (including nested objects/arrays) without `Number()` rounding. New optional
+  `JsonCodecOptions.bigIntForUnsafeLong` makes `decode` return `BigInt` for
+  integer literals outside ±(2^53-1); default stays `number`.
+- `RAtomicLong` CAS now compares decimal strings exactly (Java 4.6.1 script,
+  including missing-key/expect=0). `LongValue = number | bigint` is accepted by
+  set/getAndSet/getAndAdd/addAndGet/compareAndSet/compareAndDelete;
+  `getAndAdd`/`addAndGet` use a single Lua round-trip and `get` returns `BigInt`
+  for values beyond the safe range.
+- `RAtomicDouble.getAndAdd` uses one Lua script (GET old + INCRBYFLOAT) instead
+  of client-side `newValue - delta`, removing float tail drift.
+- `RBlockingQueue.drainTo` extracts via one atomic Lua `LRANGE`+`LTRIM/DEL`,
+  so concurrent tail `RPUSH` is not lost; values are then offered to the
+  target queue through its codec. Bounded queues keep their permit-restoring
+  Lua variant.
+- Verification: 9 new wire/mock tests + `live-phase18.test.ts` (4 tests, Redis
+  + Java 4.6.1: Long.MAX/MIN buckets, exact string CAS, AtomicDouble old value,
+  drainTo visible in Java; mock includes concurrent tail-appends).
+
+## 1.2.0 — 2026-10-19
+
+Phase 17: bounded-queue semaphore protocol, blocking-connection isolation and
+topic subscription lifecycle.
+
+- `RBoundedBlockingQueue` now treats `redisson_bqs:{name}` as available
+  permits (Java semantics): `trySetCapacity` SET+PUBLISH; `offer` atomically
+  DECRBY+RPUSH; `poll`/`take`/`pollWithTimeout`/`remove`/`clear`/`drainTo`
+  INCRBY+PUBLISH `redisson_sc:redisson_bqs:{name}`. `put` and
+  `offer(value, timeoutMs)` block until a consumer releases capacity.
+  `remainingCapacity()` is the real value; `getCapacity()` is an alias.
+  Offering without a capacity now throws like Java (`assert`).
+- Blocking reads use dedicated connections (`duplicateRedis` /
+  `withDedicatedRedis`) so `BLPOP`/`BRPOP`/`BZPOPMIN`/`XREADGROUP BLOCK`
+  (including `RStream.readGroupWith({blockMs})`) cannot stall lock-watchdog
+  renewals or normal commands. Timeouts use Redis 6+ float seconds;
+  `timeoutMs <= 0` is non-blocking; mock clients without blocking commands
+  fall back to short polling. Duplicated connections wait for ioredis's INFO
+  ready-check before subscribing (avoids subscriber-mode errors).
+- Topics: `RTopic`/`RPatternTopic` attach handlers before SUBSCRIBE;
+  `RShardedTopic` stores its subscription connection/handlers and gains
+  `removeListener`/`removeAllListeners`; `RReliableTopic` consumes on a
+  dedicated connection and disconnects it on removal.
+- Verification: 6 new mock tests + `live-phase17.test.ts` (9 tests, Redis +
+  Java 4.6.1: shared permits, Java consumer wakes TS put, Java put waits for
+  TS poll, BLPOP/BZPOPMIN/XREADGROUP isolation including blocking stream
+  reads, topic lifecycle).
+
+## 1.1.0 — 2026-10-18
+
+Phase 16: lifecycle / companion-key hardening.
+
+- `delete()`/`unlink()` now close companion keys instead of deleting only the
+  main key: `RFairLock` (queue + timeout ZSET), `RFencedLock` (token),
+  `RPermitExpirableSemaphore` (`{name}:timeout`), `RSetCache` (idle ZSET +
+  touch HASH), `RBoundedBlockingQueue` (`redisson_bqs`), `RRingBuffer`
+  (`redisson_rb`), and `RMultimap`/`RMultimapCache` + native variants (child
+  collections + TTL ZSET; HASH is read before deletion).
+- `unlink()` now clears companions for structures whose `delete()` already did:
+  `RMapCache` (timeout/idle/access/options), `RBloomFilter` (config),
+  `RTimeSeries` (ttl/seq), `RRateLimiter` (value/permits), and
+  `RReliableTopic` (stream/timeout).
+- `RRingBuffer.clear()` keeps Java 4.6.1 semantics (LIST only); `delete()`
+  removes capacity too.
+- `RDelayedQueue.size()` now reads the staging LIST like Java
+  (`redisson_delay_queue:{name}`), not the destination queue; `targetSize()`
+  exposes the latter. `delete()` deletes staging + timeout only and preserves
+  the caller-owned destination queue.
+- `RLocalCachedMap` honours `timeToLiveMs`/`maxIdleMs` in the near cache
+  (entries track absolute expiry + last access); `UPDATE` broadcasts use the
+  configured TTL. Local reads now wait for the invalidation subscription ack,
+  which closes a constructor-time race that could leave a stale entry after a
+  concurrent writer (phase 8 LCM test regression). LRU/LFU + cache view remain
+  phase 19.
+- Verification: 11 new mock lifecycle tests + `live-phase16.test.ts` (7 tests,
+  Redis + Java 4.6.1: capacity re-init for BQ/Ring, DQ size/delete, multimap
+  cleanup, fenced-token reset, PES/SetCache/FairLock zero residue,
+  LocalCachedMap TTL/idle).
+
 ## 1.0.0 — 2026-10-14
 
 First stable release. TypeScript 1:1 port of Redisson, wire-compatible with

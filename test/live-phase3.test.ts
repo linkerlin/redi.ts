@@ -3,19 +3,12 @@
  * TimeSeries, LongAdder, PermitExpirableSemaphore. Needs real Redis + probe.
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p3:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -28,12 +21,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(probeArgs: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${probeArgs}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanKeys(r: Redisson, ...names: string[]): Promise<void> {
   if (names.length > 0) await r.getKeys().delete(...names);
@@ -66,10 +53,7 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
     const name = `${NS}rw:b`;
     try {
       await cleanKeys(r, name);
-      const holdW = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=rw-write-hold ${name} 4000"`,
-        { timeout: 60000, cwd: ROOT },
-      );
+      const holdW = probeBg(`rw-write-hold ${name} 4000`);
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));
@@ -86,10 +70,7 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
       await rw.getWriteLock().unlock(22);
 
       // shared read: Java holds read, TS read must also acquire, TS write must not
-      const holdR = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=rw-read-hold ${name} 4000"`,
-        { timeout: 60000, cwd: ROOT },
-      );
+      const holdR = probeBg(`rw-read-hold ${name} 4000`);
       held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));
@@ -161,20 +142,13 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
       await cleanKeys(r, tjRes);
       let tjVerdict = '';
       for (let attempt = 0; attempt < 2 && tjVerdict !== 'GOT:msg-ts-java'; attempt++) {
-        const listenP = execAsync(
-          `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=rt-listen ${tj} 15000 ${tjRes}"`,
-          { timeout: 90000, cwd: ROOT },
-        ).then(
-          (res) => res.stdout,
-          () => '',
-        );
+        const listenP = probeBg(`rt-listen ${tj} 15000 ${tjRes}`).catch(() => []);
         await new Promise((x) => setTimeout(x, 2500));
         await r.getReliableTopic<string>(tj).publish('msg-ts-java');
-        const stdout = await listenP;
+        const lines = await listenP;
         const fromKey = await r.getBucket<string>(tjRes).get();
         tjVerdict =
-          stdout.split('\n').map((l) => l.trim()).reverse()
-            .find((l) => l.startsWith('GOT:') || l === 'TIMEOUT') ?? '';
+          [...lines].reverse().find((l) => l.startsWith('GOT:') || l === 'TIMEOUT') ?? '';
         if (tjVerdict !== 'GOT:msg-ts-java' && fromKey) tjVerdict = fromKey;
         if (tjVerdict !== 'GOT:msg-ts-java') await cleanKeys(r, tjRes);
       }
@@ -231,13 +205,7 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
       const pats = await r.getKeys().getKeys(`{${name}}:*`, 100);
       await cleanKeys(r, name, signal, readyKey, resultKey, ...pats);
       // cohort JVM stays alive (local 100 + listener) across both sums
-      const cohortP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=longadder-cohort ${name} 100 ${signal}"`,
-        { timeout: 150000, cwd: ROOT },
-      ).then(
-        (res) => res.stdout,
-        (e) => String(e?.stdout ?? '') + String(e?.stderr ?? e?.message ?? e),
-      );
+      const cohortP = probeBg(`longadder-cohort ${name} 100 ${signal}`).catch((e) => [String(e)]);
       // wait for READY via key (immune to stdout timing/shell quoting)
       let ready = false;
       for (let i = 0; i < 450 && !ready; i++) {
@@ -249,7 +217,7 @@ describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () =>
       // both listeners live: TS flush 23 + Java flush 100 → 123
       expect(await ad.sum()).toBe(123);
       await r.redis.set(signal, '1');
-      const out = await cohortP;
+      const out = (await cohortP).join('\n');
       const res = await r.redis.get(resultKey);
       expect(`${res ?? ''}\n${out}`).toContain('ADDER_SUM:123');
     } finally {

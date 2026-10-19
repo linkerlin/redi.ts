@@ -2,9 +2,9 @@
  * Probabilistic / geo / bit / time-series / rate-limiter structures.
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
+import { RedisDataStructure } from './base.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
 import {
   bloomBitIndex,
   highwayHash128,
@@ -18,7 +18,7 @@ import {
   suffixName,
   toNumber,
   unpackTimeSeriesMember,
-} from './util';
+} from './util.js';
 import { randomBytes } from 'node:crypto';
 
 // Per-process fallback tag for PER_CLIENT windows built without a client id
@@ -139,6 +139,11 @@ return 1`;
     this.loaded = false;
     return true;
   }
+  override async unlink(): Promise<boolean> {
+    await this.unlinkKeys([this.name, this.configKey()]);
+    this.loaded = false;
+    return true;
+  }
 }
 
 // -- HyperLogLog ------------------------------------------------------------------
@@ -171,18 +176,113 @@ export interface GeoEntry<V = any> {
   dist?: number;
 }
 
+export type GeoUnit = 'm' | 'km' | 'mi' | 'ft';
+export type GeoOrder = 'ASC' | 'DESC';
+
+/**
+ * Java `GeoSearchArgs` builder: origin (member or coordinates), shape
+ * (radius or box) and optional ordering/count for `RGeo.search*`/`store*`.
+ */
+export class GeoSearchArgs<V = any> {
+  private memberValue?: V;
+  private longitude?: number;
+  private latitude?: number;
+  private radiusValue?: number;
+  private widthValue?: number;
+  private heightValue?: number;
+  private unitValue?: GeoUnit;
+  private orderValue?: GeoOrder;
+  private countValue?: number;
+  private countAnyValue = false;
+  private constructor() {}
+  /** Java `GeoSearchArgs.from(V member)`. */
+  static from<V>(member: V): GeoSearchArgs<V>;
+  /** Java `GeoSearchArgs.from(double longitude, double latitude)`. */
+  static from(longitude: number, latitude: number): GeoSearchArgs<any>;
+  static from(a: any, b?: number): GeoSearchArgs<any> {
+    const args = new GeoSearchArgs<any>();
+    if (typeof a === 'number') {
+      args.longitude = a;
+      args.latitude = b;
+    } else {
+      args.memberValue = a;
+    }
+    return args;
+  }
+  /** Java `radius(double, GeoUnit)`. */
+  radius(radius: number, unit: GeoUnit): this {
+    this.radiusValue = radius;
+    this.unitValue = unit;
+    return this;
+  }
+  /** Java `box(double width, double height, GeoUnit)` — selects GEOSEARCH/GEOSEARCHSTORE. */
+  box(width: number, height: number, unit: GeoUnit): this {
+    this.widthValue = width;
+    this.heightValue = height;
+    this.unitValue = unit;
+    return this;
+  }
+  /** Java `order(GeoOrder)`. */
+  order(order: GeoOrder): this {
+    this.orderValue = order;
+    return this;
+  }
+  /** Java `count(int)`. */
+  count(count: number): this {
+    this.countValue = count;
+    this.countAnyValue = false;
+    return this;
+  }
+  /** Java `countAny(int)`. */
+  countAny(count: number): this {
+    this.countValue = count;
+    this.countAnyValue = true;
+    return this;
+  }
+  getMember(): V | undefined {
+    return this.memberValue;
+  }
+  getLongitude(): number | undefined {
+    return this.longitude;
+  }
+  getLatitude(): number | undefined {
+    return this.latitude;
+  }
+  getRadius(): number | undefined {
+    return this.radiusValue;
+  }
+  getWidth(): number | undefined {
+    return this.widthValue;
+  }
+  getHeight(): number | undefined {
+    return this.heightValue;
+  }
+  getUnit(): GeoUnit | undefined {
+    return this.unitValue;
+  }
+  getOrder(): GeoOrder | undefined {
+    return this.orderValue;
+  }
+  getCount(): number | undefined {
+    return this.countValue;
+  }
+  isCountAny(): boolean {
+    return this.countAnyValue;
+  }
+}
+
 export class RGeo<V = any> extends RedisDataStructure {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
   async add(lon: number, lat: number, member: V): Promise<boolean> {
-    return ((await (this.redis as any).geoadd(this.name, lon, lat, this.encodeValue(member))) as number) > 0;
+    return ((await this.redis.geoadd(this.name, lon, lat, this.encodeValue(member))) as number) > 0;
   }
   async addAll(entries: { lon: number; lat: number; member: V }[]): Promise<number> {
     if (entries.length === 0) return 0;
     const args: (string | number)[] = [];
     for (const e of entries) args.push(e.lon, e.lat, this.encodeValue(e.member));
-    return (this.redis as any).geoadd(this.name, ...args);
+    return this.redis.geoadd(this.name, ...args);
   }
   async tryAdd(lon: number, lat: number, member: V): Promise<boolean> {
     const s = `local sc = redis.call('zscore', KEYS[1], ARGV[3])
@@ -203,7 +303,7 @@ return 1`;
   }
   async pos(...members: V[]): Promise<(GeoEntry<V> | null)[]> {
     if (members.length === 0) return [];
-    const r: any = await (this.redis as any).geopos(this.name, ...members.map((m) => this.encodeValue(m)));
+    const r: any = await this.redis.geopos(this.name, ...members.map((m) => this.encodeValue(m)));
     return r.map((p: any, i: number) => {
       if (!p) return null;
       return { member: members[i], lon: Number(p[0]), lat: Number(p[1]) };
@@ -211,27 +311,157 @@ return 1`;
   }
   async hash(...members: V[]): Promise<(string | null)[]> {
     if (members.length === 0) return [];
-    return (this.redis as any).geohash(this.name, ...members.map((m) => this.encodeValue(m)));
+    return this.redis.geohash(this.name, ...members.map((m) => this.encodeValue(m)));
   }
-  async search(lon: number, lat: number, radius: number, unit: 'm' | 'km' | 'mi' | 'ft' = 'm', count = 10): Promise<GeoEntry<V>[]> {
-    const r: any = await (this.redis as any).geosearch(this.name, 'FROMLONLAT', lon, lat, 'BYRADIUS', radius, unit, 'WITHCOORD', 'ASC', 'COUNT', count);
-    return (r ?? []).map((e: any) => {
-      // ioredis returns [member, [lon, lat]] with WITHCOORD
-      if (Array.isArray(e)) {
-        const m = e[0];
+  /** Java `search(GeoSearchArgs)`: matching members (JGeoSearchArgs → GEOSEARCH / GEORADIUS_RO family). */
+  async search(args: GeoSearchArgs<V>): Promise<V[]>;
+  /** Convenience (TS extension): members with positions around a coordinate (GEOSEARCH BYRADIUS). */
+  async search(lon: number, lat: number, radius: number, unit?: GeoUnit, count?: number): Promise<GeoEntry<V>[]>;
+  async search(a: GeoSearchArgs<V> | number, lat?: number, radius?: number, unit: GeoUnit = 'm', count = 10): Promise<V[] | GeoEntry<V>[]> {
+    if (typeof a === 'number') {
+      const r: any = await this.redis.geosearch(this.name, 'FROMLONLAT', formatFloat(a), formatFloat(lat!), 'BYRADIUS', formatFloat(radius!), unit, 'WITHCOORD', 'ASC', 'COUNT', count);
+      return (r ?? []).map((e: any) => this.toEntry(e));
+    }
+    const { cmd, params } = this.buildSearch(a, 'none');
+    const r: any = await (this.redis as any)[cmd](...params);
+    return ((r ?? []) as any[]).map((m) => this.decodeValue(m) as V);
+  }
+  /** Java `searchWithDistance(GeoSearchArgs)`: members → distance (WITHDIST). */
+  async searchWithDistance(args: GeoSearchArgs<V>): Promise<Map<V, number>> {
+    const { cmd, params } = this.buildSearch(args, 'dist');
+    const r: any = await (this.redis as any)[cmd](...params);
+    const out = new Map<V, number>();
+    if (!r) return out;
+    if (Array.isArray(r) && r.length > 0 && Array.isArray(r[0])) {
+      for (const e of r) out.set(this.decodeValue(e[0]) as V, Number(e[1]));
+    } else {
+      for (let i = 0; i + 1 < r.length; i += 2) out.set(this.decodeValue(r[i]) as V, Number(r[i + 1]));
+    }
+    return out;
+  }
+  /** Java `searchWithPosition(GeoSearchArgs)`: members → coordinates (WITHCOORD). */
+  async searchWithPosition(args: GeoSearchArgs<V>): Promise<Map<V, { lon: number; lat: number }>> {
+    const { cmd, params } = this.buildSearch(args, 'pos');
+    const r: any = await (this.redis as any)[cmd](...params);
+    const out = new Map<V, { lon: number; lat: number }>();
+    if (!r) return out;
+    if (Array.isArray(r) && r.length > 0 && Array.isArray(r[0])) {
+      for (const e of r) {
         const c = e[1];
-        let member: V = m;
-        try {
-          member = this.decodeValue(m) as V;
-        } catch { /* raw */ }
-        return { member, lon: Number(c?.[0]), lat: Number(c?.[1]) };
+        out.set(this.decodeValue(e[0]) as V, { lon: Number(c?.[0]), lat: Number(c?.[1]) });
       }
-      let member: V = e;
+    }
+    return out;
+  }
+  /** Java `storeSearchTo(String, GeoSearchArgs)`: GEOSEARCHSTORE / GEORADIUS ... STORE. */
+  async storeSearchTo(destName: string, args: GeoSearchArgs<V>): Promise<number> {
+    const { cmd, params } = this.buildStore(destName, args, false);
+    return toNumber(await (this.redis as any)[cmd](...params));
+  }
+  /** Java `storeSortedSearchTo(String, GeoSearchArgs)`: GEOSEARCHSTORE ... STOREDIST / GEORADIUS ... STOREDIST. */
+  async storeSortedSearchTo(destName: string, args: GeoSearchArgs<V>): Promise<number> {
+    const { cmd, params } = this.buildStore(destName, args, true);
+    return toNumber(await (this.redis as any)[cmd](...params));
+  }
+  /** Java `addIfExists(double, double, V)`: GEOADD only when the member already exists. */
+  async addIfExists(lon: number, lat: number, member: V): Promise<boolean>;
+  /** Java `addIfExists(GeoEntry...)`: GEOADD XX — returns the raw reply (elements added; Redis never counts XX score updates, so it is 0), same as Java. */
+  async addIfExists(entries: { lon: number; lat: number; member: V }[]): Promise<number>;
+  async addIfExists(a: number | { lon: number; lat: number; member: V }[], lat?: number, member?: V): Promise<boolean | number> {
+    if (typeof a === 'number') {
+      const s = `local value = redis.call('geopos', KEYS[1], ARGV[3])
+if value[1] ~= false then
+redis.call('geoadd', KEYS[1], ARGV[1], ARGV[2], ARGV[3])
+return 1
+end
+return 0`;
       try {
-        member = this.decodeValue(e) as V;
-      } catch { /* raw */ }
-      return { member, lon: 0, lat: 0 };
-    });
+        return toNumber(await luaEval(this.redis, s, 1, this.name, formatFloat(a), formatFloat(lat!), this.encodeValue(member))) === 1;
+      } catch {
+        const p: any = await this.redis.geopos(this.name, this.encodeValue(member));
+        if (p && p[0]) {
+          await this.add(a, lat!, member as V);
+          return true;
+        }
+        return false;
+      }
+    }
+    if (a.length === 0) return 0;
+    const args: (string | number)[] = [];
+    for (const e of a) args.push(formatFloat(e.lon), formatFloat(e.lat), this.encodeValue(e.member));
+    return toNumber(await this.redis.geoadd(this.name, 'XX', ...args));
+  }
+  /** Java command selection: box → GEOSEARCH, radius → GEORADIUS_RO / GEORADIUSBYMEMBER_RO. */
+  private buildSearch(args: GeoSearchArgs<V>, kind: 'none' | 'dist' | 'pos'): { cmd: string; params: (string | number)[] } {
+    const hasBox = args.getHeight() !== undefined && args.getWidth() !== undefined;
+    const params: (string | number)[] = [this.name];
+    let cmd: string;
+    if (args.getLongitude() !== undefined && args.getLatitude() !== undefined) {
+      cmd = hasBox ? 'geosearch' : 'georadius_ro';
+      if (hasBox) params.push('FROMLONLAT');
+      params.push(formatFloat(args.getLongitude()!), formatFloat(args.getLatitude()!));
+    } else {
+      cmd = hasBox ? 'geosearch' : 'georadiusbymember_ro';
+      if (hasBox) params.push('FROMMEMBER');
+      params.push(this.encodeValue(args.getMember()));
+    }
+    const unit = args.getUnit();
+    if (args.getRadius() !== undefined && unit !== undefined) {
+      params.push(formatFloat(args.getRadius()!), unit);
+    }
+    if (hasBox && unit !== undefined) {
+      params.push('BYBOX', formatFloat(args.getWidth()!), formatFloat(args.getHeight()!), unit);
+      if (args.getOrder() !== undefined) params.push(args.getOrder()!);
+    }
+    if (kind === 'dist' && !hasBox) params.push('WITHDIST');
+    if (kind === 'pos' && !hasBox) params.push('WITHCOORD');
+    if (args.getCount() !== undefined) {
+      params.push('COUNT', args.getCount()!);
+      if (args.isCountAny()) params.push('ANY');
+    }
+    if (!hasBox && args.getOrder() !== undefined) params.push(args.getOrder()!);
+    if (kind === 'dist' && hasBox) params.push('WITHDIST');
+    if (kind === 'pos' && hasBox) params.push('WITHCOORD');
+    return { cmd, params };
+  }
+  private buildStore(destName: string, args: GeoSearchArgs<V>, sorted: boolean): { cmd: string; params: (string | number)[] } {
+    const hasBox = args.getHeight() !== undefined && args.getWidth() !== undefined;
+    const params: (string | number)[] = [];
+    if (hasBox) params.push(destName);
+    params.push(this.name);
+    let cmd: string;
+    if (args.getLongitude() !== undefined && args.getLatitude() !== undefined) {
+      cmd = hasBox ? 'geosearchstore' : 'georadius';
+      if (hasBox) params.push('FROMLONLAT');
+      params.push(formatFloat(args.getLongitude()!), formatFloat(args.getLatitude()!));
+    } else {
+      cmd = hasBox ? 'geosearchstore' : 'georadiusbymember';
+      if (hasBox) params.push('FROMMEMBER');
+      params.push(this.encodeValue(args.getMember()));
+    }
+    const unit = args.getUnit();
+    if (args.getRadius() !== undefined && unit !== undefined) {
+      params.push(formatFloat(args.getRadius()!), unit);
+    }
+    if (hasBox && unit !== undefined) {
+      params.push('BYBOX', formatFloat(args.getWidth()!), formatFloat(args.getHeight()!), unit);
+      if (args.getOrder() !== undefined) params.push(args.getOrder()!);
+    }
+    if (args.getCount() !== undefined) {
+      params.push('COUNT', args.getCount()!);
+      if (args.isCountAny()) params.push('ANY');
+    }
+    if (!hasBox && args.getOrder() !== undefined) params.push(args.getOrder()!);
+    if (sorted) params.push('STOREDIST');
+    if (!hasBox) params.push(destName);
+    return { cmd, params };
+  }
+  private toEntry(e: any): GeoEntry<V> {
+    if (Array.isArray(e)) {
+      const c = e[1];
+      return { member: this.decodeValue(e[0]) as V, lon: Number(c?.[0]), lat: Number(c?.[1]) };
+    }
+    return { member: this.decodeValue(e) as V, lon: 0, lat: 0 };
   }
   async size(): Promise<number> {
     return this.redis.zcard(this.name);
@@ -244,6 +474,80 @@ return 1`;
 
 // -- BitSet (native bit numbering, MSB-first = Redis native, no reversal) ----------
 
+export type BitFieldOverflow = 'WRAP' | 'SAT' | 'FAIL';
+
+/** Java `BitOffset`: plain bit offsets, or `#`-prefixed element indexes. */
+export const BitOffset = {
+  /** Zero-based bit offset. */
+  bit: (offset: number): string => String(offset),
+  /** Index of the addressed integer element (sent as `#index`). */
+  index: (index: number): string => `#${index}`,
+};
+
+/**
+ * Java `BitFieldArgs` builder for `RBitSet.bitField` (BITFIELD
+ * GET/SET/INCRBY operations plus OVERFLOW control). Chain calls and pass
+ * the instance to `bitField`.
+ */
+export class BitFieldArgs {
+  private readonly ops: (string | number)[] = [];
+  private write = false;
+  private pushOp(op: string, encoding: string, offset: number | string, value?: number): void {
+    const type = encoding[0];
+    const size = Number(encoding.slice(1));
+    if (type === 'u') {
+      if (size > 63) throw new Error("Size can't be greater than 63 bits");
+    } else if (type === 'i') {
+      if (size > 64) throw new Error("Size can't be greater than 64 bits");
+    } else {
+      throw new Error('Invalid encoding');
+    }
+    this.ops.push(op, encoding, offset);
+    if (value !== undefined) this.ops.push(value);
+  }
+  overflow(overflow: BitFieldOverflow): this {
+    this.ops.push('OVERFLOW', overflow);
+    return this;
+  }
+  getSigned(size: number, offset: number | string): this {
+    this.pushOp('GET', `i${size}`, offset);
+    return this;
+  }
+  getUnsigned(size: number, offset: number | string): this {
+    this.pushOp('GET', `u${size}`, offset);
+    return this;
+  }
+  setSigned(size: number, offset: number | string, value: number): this {
+    this.pushOp('SET', `i${size}`, offset, value);
+    this.write = true;
+    return this;
+  }
+  setUnsigned(size: number, offset: number | string, value: number): this {
+    this.pushOp('SET', `u${size}`, offset, value);
+    this.write = true;
+    return this;
+  }
+  incrementSignedBy(size: number, offset: number | string, increment: number): this {
+    this.pushOp('INCRBY', `i${size}`, offset, increment);
+    this.write = true;
+    return this;
+  }
+  incrementUnsignedBy(size: number, offset: number | string, increment: number): this {
+    this.pushOp('INCRBY', `u${size}`, offset, increment);
+    this.write = true;
+    return this;
+  }
+  /** @internal */
+  commandArgs(): (string | number)[] {
+    if (this.ops.length === 0) throw new Error('No bitfield operations defined');
+    return [...this.ops];
+  }
+  /** @internal */
+  isWrite(): boolean {
+    return this.write;
+  }
+}
+
 export class RBitSet extends RedisDataStructure {
   async get(bit: number): Promise<boolean> {
     return ((await this.redis.getbit(this.name, bit)) as number) === 1;
@@ -252,26 +556,40 @@ export class RBitSet extends RedisDataStructure {
     const prev = await this.redis.setbit(this.name, bit, value ? 1 : 0);
     return prev === 1;
   }
+  /** Java `set(long fromIndex, long toIndex, boolean)`: SETBIT loop, `to` exclusive. */
   async setRange(from: number, to: number, value = true): Promise<void> {
-    for (let i = from; i <= to; i++) await this.redis.setbit(this.name, i, value ? 1 : 0);
+    const pipeline = this.redis.pipeline();
+    for (let i = from; i < to; i++) pipeline.setbit(this.name, i, value ? 1 : 0);
+    await pipeline.exec();
   }
-  async clear(bit?: number): Promise<void> {
-    if (bit === undefined) await this.redis.del(this.name);
-    else await this.redis.setbit(this.name, bit, 0);
+  async clear(bit?: number, to?: number): Promise<void> {
+    if (bit === undefined) {
+      await this.redis.del(this.name);
+    } else if (to === undefined) {
+      await this.redis.setbit(this.name, bit, 0);
+    } else {
+      await this.setRange(bit, to, false);
+    }
   }
   async cardinality(): Promise<number> {
     return this.redis.bitcount(this.name);
   }
+  /** Java `size()`: STRLEN × 8 — the backing string length in bits. */
+  async size(): Promise<number> {
+    return toNumber(await this.redis.strlen(this.name)) * 8;
+  }
   async length(): Promise<number> {
-    // highest set bit + 1 (Java BitSet semantics)
+    // highest set bit + 1 (Java BitSet semantics; same result as the 4.6.1 bitpos Lua)
     const raw = await this.redis.getBuffer?.(this.name);
     const buf: Buffer | null = raw === null || raw === undefined ? null : Buffer.isBuffer(raw) ? raw : Buffer.from(raw as any, 'latin1');
     if (!buf || buf.length === 0) return 0;
     for (let i = buf.length - 1; i >= 0; i--) {
       const b = buf[i];
       if (b !== 0) {
-        for (let bit = 0; bit < 8; bit++) {
-          if (b & (1 << (7 - bit))) return i * 8 + bit + 1;
+        // Redis bit index k (0..7) inside a byte uses mask 1 << (7 - k); the highest
+        // global bit is the largest k, i.e. the smallest mask.
+        for (let mask = 1, k = 7; k >= 0; mask <<= 1, k--) {
+          if (b & mask) return i * 8 + k + 1;
         }
       }
     }
@@ -290,17 +608,125 @@ export class RBitSet extends RedisDataStructure {
     const buf = typeof data === 'string' ? data : Buffer.isBuffer(data) ? data : Buffer.from(data);
     await this.redis.set(this.name, buf);
   }
-  async and(...otherKeys: string[]): Promise<void> {
-    await (this.redis as any).bitop('AND', this.name, this.name, ...otherKeys);
+  private validateBitSize(size: number, unsigned: boolean): void {
+    if (unsigned) {
+      if (size > 63) throw new Error("Size can't be greater than 63 bits");
+    } else if (size > 64) {
+      throw new Error("Size can't be greater than 64 bits");
+    }
   }
-  async or(...otherKeys: string[]): Promise<void> {
-    await (this.redis as any).bitop('OR', this.name, this.name, ...otherKeys);
+  private async bitFieldCall(...args: (string | number)[]): Promise<(number | null)[]> {
+    const r = (await (this.redis as any).bitfield(this.name, ...args)) as (number | null)[];
+    return (r ?? []).map((v) => (v === null || v === undefined ? null : Number(v)));
   }
-  async xor(...otherKeys: string[]): Promise<void> {
-    await (this.redis as any).bitop('XOR', this.name, this.name, ...otherKeys);
+  /** Java `getSigned(int size, long offset)`: BITFIELD GET i<size>. */
+  async getSigned(size: number, offset: number): Promise<number> {
+    this.validateBitSize(size, false);
+    return Number((await this.bitFieldCall('GET', `i${size}`, offset))[0]);
   }
-  async not(): Promise<void> {
-    await (this.redis as any).bitop('NOT', this.name, this.name);
+  /** Java `setSigned(int size, long offset, long value)`: BITFIELD SET i<size>, returns the old value. */
+  async setSigned(size: number, offset: number, value: number): Promise<number> {
+    this.validateBitSize(size, false);
+    return Number((await this.bitFieldCall('SET', `i${size}`, offset, value))[0]);
+  }
+  /** Java `incrementAndGetSigned(int size, long offset, long increment)`: BITFIELD INCRBY i<size>. */
+  async incrementAndGetSigned(size: number, offset: number, increment: number): Promise<number> {
+    this.validateBitSize(size, false);
+    return Number((await this.bitFieldCall('INCRBY', `i${size}`, offset, increment))[0]);
+  }
+  /** Java `getUnsigned(int size, long offset)`: BITFIELD GET u<size>. */
+  async getUnsigned(size: number, offset: number): Promise<number> {
+    this.validateBitSize(size, true);
+    return Number((await this.bitFieldCall('GET', `u${size}`, offset))[0]);
+  }
+  /** Java `setUnsigned(int size, long offset, long value)`: BITFIELD SET u<size>, returns the old value. */
+  async setUnsigned(size: number, offset: number, value: number): Promise<number> {
+    this.validateBitSize(size, true);
+    return Number((await this.bitFieldCall('SET', `u${size}`, offset, value))[0]);
+  }
+  /** Java `incrementAndGetUnsigned(int size, long offset, long increment)`: BITFIELD INCRBY u<size>. */
+  async incrementAndGetUnsigned(size: number, offset: number, increment: number): Promise<number> {
+    this.validateBitSize(size, true);
+    return Number((await this.bitFieldCall('INCRBY', `u${size}`, offset, increment))[0]);
+  }
+  /** Java `getByte/setByte/incrementAndGetByte`: BITFIELD i8 at the given offset. */
+  async getByte(offset: number): Promise<number> {
+    return Number((await this.bitFieldCall('GET', 'i8', offset))[0]);
+  }
+  async setByte(offset: number, value: number): Promise<number> {
+    return Number((await this.bitFieldCall('SET', 'i8', offset, value))[0]);
+  }
+  async incrementAndGetByte(offset: number, increment: number): Promise<number> {
+    return Number((await this.bitFieldCall('INCRBY', 'i8', offset, increment))[0]);
+  }
+  /** Java `getShort/setShort/incrementAndGetShort`: BITFIELD i16 at the given offset. */
+  async getShort(offset: number): Promise<number> {
+    return Number((await this.bitFieldCall('GET', 'i16', offset))[0]);
+  }
+  async setShort(offset: number, value: number): Promise<number> {
+    return Number((await this.bitFieldCall('SET', 'i16', offset, value))[0]);
+  }
+  async incrementAndGetShort(offset: number, increment: number): Promise<number> {
+    return Number((await this.bitFieldCall('INCRBY', 'i16', offset, increment))[0]);
+  }
+  /** Java `getInteger/setInteger/incrementAndGetInteger`: BITFIELD i32 at the given offset. */
+  async getInteger(offset: number): Promise<number> {
+    return Number((await this.bitFieldCall('GET', 'i32', offset))[0]);
+  }
+  async setInteger(offset: number, value: number): Promise<number> {
+    return Number((await this.bitFieldCall('SET', 'i32', offset, value))[0]);
+  }
+  async incrementAndGetInteger(offset: number, increment: number): Promise<number> {
+    return Number((await this.bitFieldCall('INCRBY', 'i32', offset, increment))[0]);
+  }
+  /** Java `getLong/setLong/incrementAndGetLong`: BITFIELD i64 at the given offset. */
+  async getLong(offset: number): Promise<number> {
+    return Number((await this.bitFieldCall('GET', 'i64', offset))[0]);
+  }
+  async setLong(offset: number, value: number): Promise<number> {
+    return Number((await this.bitFieldCall('SET', 'i64', offset, value))[0]);
+  }
+  async incrementAndGetLong(offset: number, increment: number): Promise<number> {
+    return Number((await this.bitFieldCall('INCRBY', 'i64', offset, increment))[0]);
+  }
+  /** Java `bitField(BitFieldArgs)`: one BITFIELD call, replies in operation order (null on OVERFLOW FAIL). */
+  async bitField(args: BitFieldArgs): Promise<(number | null)[]> {
+    return this.bitFieldCall(...args.commandArgs());
+  }
+  private async bitOp(op: string, others: string[]): Promise<number> {
+    return toNumber(await this.redis.bitop(op, this.name, this.name, ...others));
+  }
+  /** Java `or(String...)`: BITOP OR — returns the byte length of the result. */
+  async or(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('OR', otherKeys);
+  }
+  /** Java `and(String...)`: BITOP AND — returns the byte length of the result. */
+  async and(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('AND', otherKeys);
+  }
+  /** Java `xor(String...)`: BITOP XOR — returns the byte length of the result. */
+  async xor(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('XOR', otherKeys);
+  }
+  /** Java `not()`: BITOP NOT — returns the byte length of the result. */
+  async not(): Promise<number> {
+    return this.bitOp('NOT', []);
+  }
+  /** Java `diff(String...)`: BITOP DIFF (Redis 8) — first minus the rest. */
+  async diff(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('DIFF', otherKeys);
+  }
+  /** Java `diffInverse(String...)`: BITOP DIFF1 (Redis 8). */
+  async diffInverse(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('DIFF1', otherKeys);
+  }
+  /** Java `andOr(String...)`: BITOP ANDOR (Redis 8) — AND of the first with the OR of the rest. */
+  async andOr(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('ANDOR', otherKeys);
+  }
+  /** Java `setExclusive(String...)`: BITOP ONE (Redis 8) — exactly one input set. */
+  async setExclusive(...otherKeys: string[]): Promise<number> {
+    return this.bitOp('ONE', otherKeys);
   }
 }
 
@@ -422,6 +848,10 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
   }
   override async delete(): Promise<boolean> {
     await this.redis.del(this.name, this.ttlKey, this.seqKey);
+    return true;
+  }
+  override async unlink(): Promise<boolean> {
+    await this.unlinkKeys([this.name, this.ttlKey, this.seqKey]);
     return true;
   }
 }
@@ -623,6 +1053,11 @@ redis.call('set', KEYS[1], newValue)`;
   }
   override async delete(): Promise<boolean> {
     await this.redis.del(this.name, this.valueKey(), this.permitsKey());
+    this.loaded = false;
+    return true;
+  }
+  override async unlink(): Promise<boolean> {
+    await this.unlinkKeys([this.name, this.valueKey(), this.permitsKey()]);
     this.loaded = false;
     return true;
   }

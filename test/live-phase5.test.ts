@@ -5,20 +5,13 @@
  * VectorSet sharing. Needs real Redis + probe.
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 import { suffixName } from '../src/util';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p5:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -31,12 +24,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(args: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanPattern(r: Redisson, pattern: string): Promise<void> {
   const keys = await r.getKeys().getKeys(pattern, 500);
@@ -58,10 +45,7 @@ describe('live interop phase 5: pattern/sharded/blocking/latch/geo/bits/hll/cach
       const chan = `${NS}pat:chan`;
       const resKey = `${NS}pat:listen-result`;
       await cleanExact(r, resKey);
-      const listenP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=pattern-listen ${pat} 15000 ${resKey}"`,
-        { timeout: 90000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
+      const listenP = probeBg(`pattern-listen ${pat} 15000 ${resKey}`).catch(() => []);
       // wait for Java psubscribe registration
       let npat = 0;
       for (let i = 0; i < 200 && npat === 0; i++) {
@@ -102,11 +86,8 @@ describe('live interop phase 5: pattern/sharded/blocking/latch/geo/bits/hll/cach
       const tj = `${NS}sht:tj`;
       const resKey = `${tj}:listen-result`;
       await cleanExact(r, resKey);
-      const listenP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=sharded-listen ${tj} 15000 ${resKey}"`,
-        { timeout: 90000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
-      await new Promise((x) => setTimeout(x, 9000)); // JVM boot + ssubscribe
+      const listenP = probeBg(`sharded-listen ${tj} 15000 ${resKey}`).catch(() => []);
+      await new Promise((x) => setTimeout(x, 2500)); // resident probe + ssubscribe
       await r.getShardedTopic<string>(tj).publish('s-msg-ts');
       await listenP;
       expect(await r.getBucket<string>(resKey).get()).toBe('GOT:s-msg-ts');
@@ -262,10 +243,7 @@ describe('live interop phase 5: pattern/sharded/blocking/latch/geo/bits/hll/cach
     try {
       const name = `${NS}relock`;
       await cleanExact(r, name);
-      const holdP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold-re ${name} 4000"`,
-        { timeout: 60000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
+      const holdP = probeBg(`lock-hold-re ${name} 4000`).catch(() => []);
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));
@@ -275,7 +253,7 @@ describe('live interop phase 5: pattern/sharded/blocking/latch/geo/bits/hll/cach
       const fields = await r.redis.hgetall(name);
       expect(Object.values(fields)).toEqual(['2']); // reentrant count wire
       expect(await r.getLock(name).tryLock(0, 5000, 77)).toBe(false);
-      const out = await holdP;
+      const out = (await holdP).join('\n');
       expect(out).toContain('RE_HOLDCOUNT:2');
       expect(await r.getLock(name).tryLock(0, 5000, 77)).toBe(true);
       await r.getLock(name).unlock(77);

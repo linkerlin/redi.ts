@@ -5,21 +5,14 @@
  * Needs real Redis + probe (except the static block).
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import RedisMock from 'ioredis-mock';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 import { prefixName, suffixName } from '../src/util';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p9:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -32,12 +25,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(args: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
   if (keys.length > 0) await r.getKeys().delete(...keys);
@@ -132,10 +119,7 @@ describe('live interop phase 9: multilock/redlock/lcm-strategies/cache-paths/mis
       expect(await probe(`lock-try ${m2}`)).toBe('ACQUIRED');
 
       // rollback: Java holds m1 → multilock fails → m2 must NOT stay held
-      const holdP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${m1} 5000"`,
-        { timeout: 60000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
+      const holdP = probeBg(`lock-hold ${m1} 5000`).catch(() => []);
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));
@@ -157,10 +141,7 @@ describe('live interop phase 9: multilock/redlock/lcm-strategies/cache-paths/mis
     const names = [`${NS}rl:a`, `${NS}rl:b`, `${NS}rl:c`];
     try {
       await cleanExact(r, ...names);
-      const holdP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=lock-hold ${names[0]} 6000"`,
-        { timeout: 60000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
+      const holdP = probeBg(`lock-hold ${names[0]} 6000`).catch(() => []);
       let held = false;
       for (let i = 0; i < 100 && !held; i++) {
         await new Promise((x) => setTimeout(x, 100));

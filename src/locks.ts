@@ -13,8 +13,8 @@
  * Lua scripts are verbatim ports of redi.go (verified against Redisson 4.6.1).
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import { LockNotHeldError, NonReentrantError, luaEval, prefixName, serverNowMs, sleep, suffixName, toNumber } from './util';
+import { RedisDataStructure } from './base.js';
+import { LockNotHeldError, NonReentrantError, luaEval, prefixName, serverNowMs, sleep, suffixName, toNumber } from './util.js';
 import { randomBytes } from 'node:crypto';
 
 export const UNLOCK_MSG = '0';
@@ -826,6 +826,19 @@ export class RFairLock extends RedisDataStructure {
     return this.isExists();
   }
 
+  // Java RedissonFairLock.deleteAsync() removes the lock HASH plus the FIFO
+  // queue and timeout ZSET. Leaving those behind would make the next client
+  // inherit stale waiters (and `trySet*` lifecycle checks fail).
+  override async delete(): Promise<boolean> {
+    this.stopAllWatchdogs();
+    return this.deleteKeys([this.name, this.queueKey, this.timeoutKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    this.stopAllWatchdogs();
+    return this.unlinkKeys([this.name, this.queueKey, this.timeoutKey]);
+  }
+
   private startWatchdog(threadId: number | string): void {
     const f = this.field(threadId);
     this.stopWatchdog(threadId);
@@ -909,6 +922,10 @@ class RWBase extends RedisDataStructure {
     if (t) clearInterval(t);
     this.timers.delete(this.primary(tid));
   }
+  protected stopAllWatchdogs(): void {
+    for (const t of this.timers.values()) clearInterval(t);
+    this.timers.clear();
+  }
   protected async waitLoop(fn: () => Promise<number | null>, waitMs: number): Promise<boolean> {
     if (waitMs <= 0) {
       return (await fn()) === null;
@@ -955,9 +972,40 @@ export class RReadLockView extends RWBase {
   async unlock(threadId: number | string = 1): Promise<void> {
     const read = this.primary(threadId);
     const write = `${read}:write`;
-    const r = await luaEval(this.redis, RW_READ_UNLOCK, 2, this.name, this.channel, read, write, String(this.watchdogMs), '1');
+    // Java LockPubSub: read release publishes UNLOCK_MESSAGE (0, wakes one
+    // waiter); write release publishes READ_UNLOCK_MESSAGE (1, wakes all).
+    const r = await luaEval(this.redis, RW_READ_UNLOCK, 2, this.name, this.channel, read, write, String(this.watchdogMs), '0');
     if (r === null || r === undefined || toNumber(r) < 0) throw new LockNotHeldError();
     if (toNumber(r) === 0) this.stopWatchdog(threadId);
+  }
+
+  // -- Java RedissonReadLock views (mode read | write + extra read fields) ----
+
+  async isLocked(): Promise<boolean> {
+    const script = `local mode = redis.call('hget', KEYS[1], 'mode')
+if (mode == 'read') or (mode == 'read-write') or (mode == 'write' and redis.call('hlen', KEYS[1]) > 2) then
+    return 1
+end
+return 0`;
+    return toNumber(await luaEval(this.redis, script, 1, this.name)) === 1;
+  }
+  async isHeldByThread(threadId: number | string = 1): Promise<boolean> {
+    return toNumber(await this.redis.hexists(this.name, this.primary(threadId))) === 1;
+  }
+  async getHoldCount(threadId: number | string = 1): Promise<number> {
+    const v = await this.redis.hget(this.name, this.primary(threadId));
+    return v === null ? 0 : Number(v);
+  }
+  async forceUnlock(): Promise<boolean> {
+    const script = `if redis.call('hget', KEYS[1], 'mode') == 'read' then
+    redis.call('del', KEYS[1])
+    redis.call('publish', KEYS[2], ARGV[1])
+    return 1
+end
+return 0`;
+    const ok = toNumber(await luaEval(this.redis, script, 2, this.name, this.channel, '0')) === 1;
+    if (ok) this.stopAllWatchdogs();
+    return ok;
   }
 }
 
@@ -988,9 +1036,35 @@ export class RWriteLockView extends RWBase {
   async unlock(threadId: number | string = 1): Promise<void> {
     const write = `${this.primary(threadId)}:write`;
     const read = this.primary(threadId);
-    const r = await luaEval(this.redis, RW_WRITE_UNLOCK, 2, this.name, this.channel, write, read, String(this.watchdogMs), '0');
+    // Java write release publishes READ_UNLOCK_MESSAGE (1, wakes all waiters).
+    const r = await luaEval(this.redis, RW_WRITE_UNLOCK, 2, this.name, this.channel, write, read, String(this.watchdogMs), '1');
     if (r === null || r === undefined || toNumber(r) < 0) throw new LockNotHeldError();
     if (toNumber(r) === 0) this.stopWatchdog(threadId);
+  }
+
+  // -- Java RedissonWriteLock views (mode write only; field has :write) -------
+
+  async isLocked(): Promise<boolean> {
+    const mode = await this.redis.hget(this.name, 'mode');
+    return mode === 'write' || mode === 'read-write';
+  }
+  async isHeldByThread(threadId: number | string = 1): Promise<boolean> {
+    return toNumber(await this.redis.hexists(this.name, `${this.primary(threadId)}:write`)) === 1;
+  }
+  async getHoldCount(threadId: number | string = 1): Promise<number> {
+    const v = await this.redis.hget(this.name, `${this.primary(threadId)}:write`);
+    return v === null ? 0 : Number(v);
+  }
+  async forceUnlock(): Promise<boolean> {
+    const script = `if redis.call('hget', KEYS[1], 'mode') == 'write' then
+    redis.call('del', KEYS[1])
+    redis.call('publish', KEYS[2], ARGV[1])
+    return 1
+end
+return 0`;
+    const ok = toNumber(await luaEval(this.redis, script, 2, this.name, this.channel, '1')) === 1;
+    if (ok) this.stopAllWatchdogs();
+    return ok;
   }
 }
 
@@ -1170,6 +1244,15 @@ return removed`;
     const now = await serverNowMs(this.redis);
     return Math.max(0, Number(score) - now);
   }
+
+  // Java deletes both the permit counter and the acquired-permit timeout ZSET.
+  override async delete(): Promise<boolean> {
+    return this.deleteKeys([this.name, this.timeoutKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    return this.unlinkKeys([this.name, this.timeoutKey]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,16 +1293,35 @@ export class RFencedLock extends RLock {
     const v = await this.redis.get(this.tokenKey);
     return v === null ? 0 : Number(v);
   }
+
+  // Java deletes the RLock HASH plus the fencing-token counter. Without this
+  // a recreated lock would continue from the previous token sequence.
+  override async delete(): Promise<boolean> {
+    this.stopAllWatchdogs();
+    return this.deleteKeys([this.name, this.tokenKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    this.stopAllWatchdogs();
+    return this.unlinkKeys([this.name, this.tokenKey]);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // RMultiLock / RRedLock (client-side orchestration, no new keys)
 // ---------------------------------------------------------------------------
 
+/** Structural lock contract accepted by RMultiLock/RRedLock: RLock, RFairLock,
+ *  fenced locks and the RReadWriteLock views all satisfy it. */
+export interface LockLike {
+  tryLock(waitTimeMs?: number, leaseTimeMs?: number, threadId?: number | string): Promise<boolean>;
+  unlock(threadId?: number | string): Promise<void>;
+}
+
 export class RMultiLock {
-  constructor(private locks: RLock[]) {}
+  constructor(private locks: LockLike[]) {}
   async tryLock(threadId: number | string = 1, leaseMs = 30000): Promise<boolean> {
-    const acquired: RLock[] = [];
+    const acquired: LockLike[] = [];
     for (const l of this.locks) {
       if (await l.tryLock(0, leaseMs, threadId)) acquired.push(l);
       else {
@@ -1255,13 +1357,13 @@ export class RMultiLock {
 }
 
 export class RRedLock {
-  constructor(private locks: RLock[]) {}
+  constructor(private locks: LockLike[]) {}
   private quorum(): number {
     return Math.floor(this.locks.length / 2) + 1;
   }
   async tryLock(leaseMs = 30000, threadId: number | string = 1): Promise<boolean> {
     let n = 0;
-    const acquired: RLock[] = [];
+    const acquired: LockLike[] = [];
     for (const l of this.locks) {
       try {
         if (await l.tryLock(0, leaseMs, threadId)) {
@@ -1283,7 +1385,7 @@ export class RRedLock {
     const attemptTTL = waitMs > 0 && leaseMs > 0 ? 2 * waitMs : leaseMs;
     for (;;) {
       let n = 0;
-      const acquired: RLock[] = [];
+      const acquired: LockLike[] = [];
       for (const l of this.locks) {
         const remain = deadline - Date.now();
         if (remain <= 0) break;

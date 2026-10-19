@@ -14,6 +14,8 @@ redi.ts 就是干这个的。它跟 **Java Redisson**（`JsonJacksonCodec`，默
 npm install redi.ts ioredis
 ```
 
+双格式发布：ESM 走 `import { Redisson } from 'redi.ts'`，CommonJS 走 `const { Redisson } = require('redi.ts')`——`exports` 分别指向 `dist/esm` 和 `dist/cjs`，两边跑出来的 wire 输出一致（`npm run pack-smoke` 验证）。
+
 ## 先跑一个
 
 ```ts
@@ -35,6 +37,12 @@ await redisson.getMap('m').put('k', 'v');
 // 限流、信号量、门闩、布隆过滤器、Stream、发布订阅……
 await redisson.getRateLimiter('api').setRate('OVERALL', 10, 1000);
 
+// 延迟队列：start() 后按 deadline 后台迁移（Java QueueTransferTask 同款调度），
+// poll()/peek() 不 start() 也能手动补迁移
+const dq = redisson.getDelayedQueue('dq');
+await dq.start();
+await dq.offer('later', 5000);
+
 await redisson.shutdown();
 ```
 
@@ -43,18 +51,20 @@ await redisson.shutdown();
 ```ts
 import Redis from 'ioredis';
 const redis = new Redis.Cluster([{ host: '127.0.0.1', port: 7000 }]);
-const redisson = Redisson.create({ client: redis as any });
+const redisson = Redisson.create({ client: redis });
 ```
+
+集群下键得同槽。本库所有伴生键都带 hash-tag：`prefixName`/`suffixName` 把裸名包成 `{name}`，与裸名恰好同槽，所以上面这些结构在 Cluster 上开箱即用；`test/live-cluster.test.ts` 对着 3 主节点实测过（`scripts/cluster-up.sh` 起集群）。
 
 ## 有哪些结构
 
 六十多种，按你拿它来干什么分组。
 
-- 锁：`RLock`、`Fair`、`ReadWrite`、`Spin`、`NonReentrant`、`Fenced`、`Multi`、`Red`
-- 映射：`RMap`、`MapCache`（含 Native）、`LocalCachedMap`
+- 锁：`RLock`、`Fair`、`ReadWrite`、`Spin`、`NonReentrant`、`Fenced`、`Multi`、`Red`；以及 Key 级同步器（`map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`，伴生命名与 Java 逐字节一致）
+- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN` 与惰性 HSCAN 迭代器）、`MapCache`（含 Native）、`LocalCachedMap`
 - 集合：`RSet`、`SetCache`
 - 列表和队列：`RList`、`RQueue`、`RDeque`（含阻塞、有界）
-- 排序：`RScoredSortedSet`；`RLexSortedSet`（成员不编码，原样放）
+- 排序：`RScoredSortedSet`（分数区间正反向、`addScore` 家族、按分数/排名删除）；`RLexSortedSet`（成员不编码，原样放）
 - 单个值：`RBucket`、`RBuckets`、`RBinaryStream`、`RJsonBucket`
 - 数字：`RAtomicLong`、`Double`；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`
@@ -62,9 +72,9 @@ const redisson = Redisson.create({ client: redis as any });
 - 流：`RStream`（字段名是 JSON）
 - 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`）
 - 环形缓冲：`RRingBuffer`
-- 地理位置：`RGeo`（成员是 JSON）
+- 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
 - 去重计数：`RHyperLogLog`
-- 位图：`RBitSet`（位序跟 Redis 原生一致）
+- 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
 - 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
 - 键、脚本、函数、搜索：`RKeys`、`RScript`、`RFunction`、`RSearch`、`RVectorSet`
@@ -87,10 +97,13 @@ const redisson = Redisson.create({ client: redis as any });
 ## 怎么验
 
 ```sh
-npm test    # vitest：线格式向量 + mock 功能 + 跟 Python 实机互通（互通本身不用 Redis）
-npm run build
+npm test             # vitest：线格式向量 + mock 功能 + 跟 Python/Java 实机互通
+npm run build        # 双格式产物：dist/cjs + dist/esm
+npm run pack-smoke   # npm pack 后装进临时消费者，验证 CJS/ESM 都能解析并写出同一 wire 输出
 ```
 
 `test/interop.test.ts` 会拉起 `python`，用 `C:/GitHub/redi.py` 对三件事：编码输出是不是一样，HighwayHash 的测试向量对不对，multimap 的内部 id 是不是同一个。
 
-本机 `127.0.0.1:6379` 有一个真 Redis 的话，mock 那套也会换上真客户端再跑一遍：传给 `Redisson.create({ client })` 就行。
+本机 `127.0.0.1:6379` 有一个真 Redis 的话，mock 那套也会换上真客户端再跑一遍：传给 `Redisson.create({ client })` 就行。缺席的命令（比如 Redis 8.6 没有 `SUNIONCARD`/`XNACK`）按 `COMMAND INFO` 能力门控、打日志 SKIP，不会静默过。
+
+集群测试 `test/live-cluster.test.ts` 需要一个本机 3 主节点集群：WSL 里跑 `wsl -e bash scripts/cluster-up.sh`（起在 7100-7102，`scripts/cluster-down.sh` 收尾），Windows 侧自动经端口转发可达；找不到集群时用例打警告跳过。

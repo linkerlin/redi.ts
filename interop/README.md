@@ -11,7 +11,8 @@ Maven（非 Spring Boot，零业务依赖）：`Redisson 4.6.1` + `JsonJacksonCo
 interop/
 ├── pom.xml                     Redisson 4.6.1 + Jackson + exec 插件
 └── src/main/java/io/github/redits/interop/
-    ├── TsProbe.java            CLI: clean|write-java|read-ts|roundtrip [ns]
+    ├── TsProbe.java            CLI: clean|write-java|read-ts|roundtrip|repl [ns]
+    ├── TsRepl.java             常驻 REPL（vitest live 套件用，见「运行」）
     └── TsFixtures.java         两侧 fixtures 契约
 ```
 
@@ -56,10 +57,25 @@ interop/
 `map-get`、`atomic-get`、`stream-add/size`、`bbq-take`、`dq-offer2`。
 阶段八：`sc-contains`、`bucket-get`、`deque/list/set-read`、
 `atomicdouble-add/get`、`lmm-get`。
+阶段 16–20：`map-value-size`/`map-random-keys`/`map-random-entries`/
+`map-scan-keys`/`map-scan-entries`、`zset-addscore`/`zset-first-last`/
+`zset-rank`/`zset-count`/`zset-rev`/`zset-rev-score`/`zset-entry-rev`/
+`zset-entry-range`/`zset-remove-score`/`zset-remove-rank`、
+`bitset-size`/`bitset-length`/`bitset-cardinality`/`bitset-setrange`/
+`bitset-clearrange`/`bitset-typed-set|get|incr`/`bitset-long-set|get`/
+`bitset-bitfield`/`bitset-op`、`geo-search-radius|member|box`/
+`geo-search-dist|dist-box|pos`/`geo-store-search`/`geo-store-sorted`/
+`geo-add-if-exists`/`geo-add-if-exists-xx`、`geo-pos`。
 
 ## 运行
 
 ```powershell
+# 0. 常驻 REPL（vitest live 套件即用它：编译一次后单 JVM 逐行服务探针，
+#    取代每次 mvn exec:java 冷启；协议见 test/helpers/java-probe.ts）
+mvn -f interop/pom.xml -q compile dependency:build-classpath "-Dmdep.outputFile=target/cp.txt"
+java "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn" -cp "interop/target/classes;$((Get-Content interop/target/cp.txt -Raw).Trim())" io.github.redits.interop.TsProbe repl
+# 输入：<id> <command> <args...>；输出：<id> OUT <line>…，随后 <id> DONE 或 <id> ERROR <msg>
+
 # 1. Java 写，TS 读（TS 侧见 test/live-interop.test.ts）
 mvn -f interop/pom.xml -q compile exec:java "-Dexec.args=write-java TsJavaT:"
 

@@ -5,19 +5,12 @@
  * DelayedQueue deadline FIFO. Needs real Redis + probe.
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p7:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -30,12 +23,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(args: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanPattern(r: Redisson, pattern: string): Promise<void> {
   const keys = await r.getKeys().getKeys(pattern, 500);
@@ -72,11 +59,8 @@ describe('live interop phase 7: bstream/fanout/mc-maxsize/mmcache/zset+/trim/fn-
       const tj = `${NS}rt:fanout-tj`;
       const resKey = `${tj}:fanout-result`;
       await cleanExact(r, resKey);
-      const fanoutP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=rt-fanout ${tj} 15000 ${resKey}"`,
-        { timeout: 90000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
-      await new Promise((x) => setTimeout(x, 9000));
+      const fanoutP = probeBg(`rt-fanout ${tj} 15000 ${resKey}`).catch(() => []);
+      await new Promise((x) => setTimeout(x, 2500)); // resident probe + group creation
       await r.getReliableTopic<string>(tj).publish('fan-ts');
       await fanoutP;
       expect(await r.getBucket<string>(resKey).get()).toBe('FANOUT:G1:fan-ts,G2:fan-ts');
@@ -227,13 +211,11 @@ describe('live interop phase 7: bstream/fanout/mc-maxsize/mmcache/zset+/trim/fn-
     try {
       await cleanPattern(r, `${q}*`);
       await cleanExact(r, `redisson_bqs:{${q}}`);
-      const takeP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=bbq-take ${q} 15000 ${q}:take-result"`,
-        { timeout: 90000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
-      await new Promise((x) => setTimeout(x, 9000)); // JVM boot + blocking poll
+      expect(await r.getBoundedBlockingQueue<string>(q).trySetCapacity(1)).toBe(true);
+      const takeP = probeBg(`bbq-take ${q} 15000 ${q}:take-result`).catch(() => []);
+      await new Promise((x) => setTimeout(x, 2500)); // resident probe + blocking poll
       await r.getBoundedBlockingQueue<string>(q).offer('bb-ts');
-      const out = await takeP;
+      const out = (await takeP).join('\n');
       const key = await r.getBucket<string>(`${q}:take-result`).get();
       expect(`${out}\n${key}`).toContain('GOT:bb-ts');
     } finally {

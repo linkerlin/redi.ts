@@ -41,12 +41,68 @@ export class NonReentrantError extends Error {
 }
 
 export async function serverNowMs(redis: Redis): Promise<number> {
-  const t = await (redis as any).time();
+  const t = await redis.time();
   // ioredis TIME returns [seconds, microseconds] as strings
   if (Array.isArray(t) && t.length >= 2) {
     return Number(t[0]) * 1000 + Math.floor(Number(t[1]) / 1000);
   }
   return Date.now();
+}
+
+/** Duplicate a connection (pub/sub, blocking commands). Returns null when the
+ * client cannot duplicate (ioredis-mock or a closed client). */
+export async function duplicateRedis(redis: Redis): Promise<Redis | null> {
+  try {
+    const Dup = (redis as any).duplicate?.bind(redis);
+    if (!Dup) return null;
+    const conn = Dup() as Redis;
+    // ioredis performs an INFO ready-check on connect. Subscribing before it
+    // finishes puts the socket in subscriber mode and makes INFO fail with
+    // "Connection in subscriber mode, only subscriber commands may be used".
+    (conn as any).on?.('error', () => undefined);
+    if ((conn as any).status === 'wait') {
+      try { await (conn as any).connect?.(); } catch { /* handled by ready wait */ }
+    }
+    if ((conn as any).status && (conn as any).status !== 'ready') {
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          try {
+            (conn as any).off?.('ready', finish);
+            (conn as any).off?.('error', finish);
+          } catch { /* noop */ }
+          resolve();
+        };
+        const timer = setTimeout(finish, 5000);
+        (conn as any).once?.('ready', finish);
+        (conn as any).once?.('error', finish);
+      });
+    }
+    return conn;
+  } catch {
+    return null;
+  }
+}
+
+/** Run `fn` on a dedicated connection when possible, then disconnect it.
+ * Blocking commands (BLPOP/BRPOP/BZPOPMIN/XREADGROUP BLOCK) must never share
+ * the main connection: while blocked, ioredis cannot send lock watchdog
+ * renewals on that TCP connection. Falls back to the main connection when
+ * duplication is unavailable (mock). */
+export async function withDedicatedRedis<T>(
+  redis: Redis,
+  fn: (conn: Redis, dedicated: boolean) => Promise<T>,
+): Promise<T> {
+  const conn = await duplicateRedis(redis);
+  if (!conn) return fn(redis, false);
+  try {
+    return await fn(conn, true);
+  } finally {
+    try { (conn as any).disconnect?.(); } catch { /* noop */ }
+  }
 }
 
 /** Evaluate a Lua script. Returns null when Lua returns nil/false. Buffer args
@@ -60,7 +116,7 @@ export async function luaEval(
   ...keysAndArgs: (string | number | Buffer)[]
 ): Promise<any> {
   const args = keysAndArgs.map((a) => (Buffer.isBuffer(a) ? a : String(a)));
-  return (redis as any).eval(script, numKeys, ...args);
+  return redis.eval(script, numKeys, ...args);
 }
 
 export function toNumber(v: any, dflt = 0): number {
@@ -192,13 +248,25 @@ export function highwayHash128(data: Buffer | string): [bigint, bigint] {
   return [h1, h2];
 }
 
-/** Multimap internal id: HighwayHash-128 BE-packed + base64 RawStd (no padding). */
-export function multimapInternalId(encodedKey: string): string {
-  const [h1, h2] = highwayHash128(Buffer.from(encodedKey, 'utf8'));
+/** HighwayHash-128 of the encoded payload, BE-packed + base64 (no padding) —
+ * exact Java `Hash.hash128toBase64(ByteBuf)` used by multimap internal ids and
+ * by key-synchronizer companion names. */
+export function hash128toBase64(encodedContent: string): string {
+  const [h1, h2] = highwayHash128(Buffer.from(encodedContent, 'utf8'));
   const buf = Buffer.alloc(16);
   buf.writeBigUInt64BE(h1, 0);
   buf.writeBigUInt64BE(h2, 8);
   return buf.toString('base64').replace(/=+$/, '');
+}
+
+/** Multimap internal id == Hash.hash128toBase64 (historical name). */
+export const multimapInternalId = hash128toBase64;
+
+/** Companion key for RMap/RSet/RMultimap key synchronizers
+ * (RedissonObject.getLockByMapKey / getLockByValue):
+ *   suffixName(name, hash128toBase64(encode(key)) + ":" + suffix) */
+export function keySynchronizerName(name: string, encodedKey: string, suffix: string): string {
+  return suffixName(name, `${hash128toBase64(encodedKey)}:${suffix}`);
 }
 
 /** Bloom bit index: h starts at h1, alternately adding h2/h1, masked to 63 bits. */
@@ -341,4 +409,20 @@ export function encodeMapCacheEvent(parts: string[]): string {
     return Buffer.concat([h, b]);
   });
   return Buffer.concat(bufs).toString('latin1');
+}
+
+/** Decode map-cache event segments (inverse of encodeMapCacheEvent).
+ * Returns the raw codec-encoded segments; a truncated tail is dropped. */
+export function decodeMapCacheEvent(raw: string | Buffer): string[] {
+  const m = Buffer.isBuffer(raw) ? raw : Buffer.from(raw, 'latin1');
+  const parts: string[] = [];
+  let o = 0;
+  while (o + 8 <= m.length) {
+    const len = Number(m.readBigUInt64LE(o));
+    o += 8;
+    if (len < 0 || o + len > m.length) break;
+    parts.push(m.subarray(o, o + len).toString('utf8'));
+    o += len;
+  }
+  return parts;
 }

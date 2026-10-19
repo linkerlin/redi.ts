@@ -5,19 +5,12 @@
  * Buckets, Redis Functions, ReliableTopic ordering. Needs real Redis + probe.
  */
 import { describe, it, expect } from 'vitest';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { probe, probeBg } from './helpers/java-probe';
 
-const execAsync = promisify(exec);
 const NS = 'TsJavaT:p6:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const POM = path.join(ROOT, 'interop', 'pom.xml');
-const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\apache-maven-3.9.6-bin\\\\apache-maven-3.9.6\\\\bin\\\\mvn.cmd' : 'mvn');
 
 async function redisUp(): Promise<boolean> {
   try {
@@ -30,12 +23,6 @@ async function redisUp(): Promise<boolean> {
   }
 }
 
-async function probe(args: string, timeoutMs = 120000): Promise<string> {
-  const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
-  const { stdout } = await execAsync(cmd, { timeout: timeoutMs, cwd: ROOT });
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [...lines].reverse().find((l) => !l.startsWith('WARNING') && !l.startsWith('SLF4J')) ?? '';
-}
 
 async function cleanPattern(r: Redisson, pattern: string): Promise<void> {
   const keys = await r.getKeys().getKeys(pattern, 500);
@@ -57,10 +44,7 @@ describe('live interop phase 6: mc-events/stream-ack/dq-remove/rate-release/ts-l
       const resKey = `${name}:events`;
       const readyKey = `${resKey}:ready`;
       await cleanPattern(r, `${name}*`);
-      const listenP = execAsync(
-        `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=mc-listen ${name} 25000 ${resKey}"`,
-        { timeout: 90000, cwd: ROOT },
-      ).then((x) => x.stdout, () => '');
+      const listenP = probeBg(`mc-listen ${name} 12000 ${resKey}`).catch(() => []);
       // wait for Java subscriptions (deterministic; fixed sleeps race JVM boot)
       let ready = false;
       for (let i = 0; i < 450 && !ready; i++) {

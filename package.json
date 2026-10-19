@@ -1,17 +1,33 @@
 {
   "name": "redi.ts",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "TypeScript 1:1 port of Redisson — wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/linkerlin/redi.ts.git"
   },
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
   "files": ["dist", "README.md", "README_EN.md", "COMPATIBILITY.md", "CHANGELOG.md", "AGENTS.md"],
   "scripts": {
     "test": "vitest run",
-    "build": "tsc",
+    "build": "node scripts/build.mjs",
+    "pack-smoke": "node scripts/pack-smoke.mjs",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": ["redis", "redisson", "distributed", "lock", "map", "queue", "topic", "rate-limiter", "bloom-filter"],

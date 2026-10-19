@@ -15,7 +15,7 @@ TypeScript 1:1 复刻 Redisson（面向 Redis 8.x）。**wire format（key 布�
 
 ```sh
 npm run build   # tsc
-npm test        # 全量（live-* 需本机 Redis 127.0.0.1:6379 + mvn + interop/ 探针；缺失时 live 用例 skip，绝不静默过）
+npm test        # 全量（live-* 需本机 Redis 127.0.0.1:6379 + mvn + interop/ 探针；集群项另需 wsl bash scripts/cluster-up.sh 起的 3 主节点 7100-7102；缺失时 live 用例带日志 skip，绝不静默过）
 npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # 无 Redis 可跑子集
 ```
 
@@ -35,6 +35,9 @@ npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # �
 6. **ioredis 陷阱**：`eval` 的 Lua `nil` 回 `null`；`TIME` 取 server 时间；
    `RFairLock` 的 `ARGV[3]/[4]` 在 try/acquire 两脚本中顺序相反；fenced 返回
    `[ttl|−1, token]` 数组；mock 缺 `PFADD/GEOADD` 等命令时测试 skip 而非 fail。
+   订阅（MapCache 事件等）只挂 `messageBuffer`（ioredis 总会发射它；另注册
+   `message` 会双派发）；发布含 u64LE 长度前缀的负载必须传 `Buffer` 参数
+   （字符串按 UTF-8 编码会破坏字节）。
 7. **二进制成员必须走 Buffer**：struct-packed 值（MapCache `<dQ`、TimeSeries、
    DelayedQueue 成员、BinaryStream/BitSet 原始字节）在真实 Redis 上只能用
    `*Buffer` 命令 + Buffer 参数传输——ioredis 字符串按 UTF-8 编解码，会破坏

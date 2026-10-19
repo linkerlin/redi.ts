@@ -3,26 +3,16 @@
  * DelayedQueue / RingBuffer / BinaryStream.
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import { luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber, unpackDelayedMember } from './util';
+import { RedisDataStructure } from './base.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import { duplicateRedis, luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber, unpackDelayedMember, withDedicatedRedis } from './util.js';
 import { randomBytes } from 'node:crypto';
 
 export type MessageListener<V = any> = (message: V, channel?: string) => void;
 
-async function duplicate(redis: Redis): Promise<Redis | null> {
-  try {
-    const Dup = (redis as any).duplicate?.bind(redis);
-    if (!Dup) return null;
-    return Dup() as Redis;
-  } catch {
-    return null;
-  }
-}
-
 export class RTopic<V = any> extends RedisDataStructure {
-  private subs = new Map<number, { conn: Redis; cb: MessageListener<V> }>();
+  private subs = new Map<number, { conn: Redis; cb: MessageListener<V>; handler: (ch: string, payload: string) => void }>();
   private nextId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -32,19 +22,30 @@ export class RTopic<V = any> extends RedisDataStructure {
   }
   async addListener(cb: MessageListener<V>): Promise<number> {
     const id = this.nextId++;
-    const conn = await duplicate(this.redis);
+    const conn = await duplicateRedis(this.redis);
     if (!conn) {
       // mock fallback: no live delivery; listener registered as no-op
-      this.subs.set(id, { conn: this.redis, cb });
+      this.subs.set(id, { conn: this.redis, cb, handler: () => undefined });
       return id;
     }
-    await (conn as any).subscribe(this.name);
-    (conn as any).on('message', (_ch: string, payload: string) => {
+    const handler = (_ch: string, payload: string) => {
       try {
         cb(this.decodeValue(payload) as V, this.name);
       } catch { /* noop */ }
-    });
-    this.subs.set(id, { conn, cb });
+    };
+    // Attach before SUBSCRIBE: a message published between the ack and the
+    // handler registration would otherwise be dropped.
+    (conn as any).on('message', handler);
+    try {
+      await conn.subscribe(this.name);
+    } catch (e) {
+      try {
+        (conn as any).off?.('message', handler);
+        (conn as any).disconnect?.();
+      } catch { /* noop */ }
+      throw e;
+    }
+    this.subs.set(id, { conn, cb, handler });
     return id;
   }
   async removeListener(id: number): Promise<void> {
@@ -52,13 +53,14 @@ export class RTopic<V = any> extends RedisDataStructure {
     if (!s) return;
     this.subs.delete(id);
     try {
+      (s.conn as any).off?.('message', s.handler);
       await (s.conn as any).unsubscribe?.(this.name);
       if (s.conn !== this.redis) (s.conn as any).disconnect?.();
     } catch { /* noop */ }
   }
   async countSubscribers(): Promise<number> {
     try {
-      const r: any = await (this.redis as any).pubsub('NUMSUB', this.name);
+      const r: any = await this.redis.pubsub('NUMSUB', this.name);
       if (Array.isArray(r)) return Number(r[1] ?? 0);
       return 0;
     } catch {
@@ -71,7 +73,7 @@ export class RTopic<V = any> extends RedisDataStructure {
 }
 
 export class RPatternTopic<V = any> extends RedisDataStructure {
-  private subs = new Map<number, Redis>();
+  private subs = new Map<number, { conn: Redis; handler: (pat: string, ch: string, payload: string) => void }>();
   private nextId = 1;
   constructor(redis: Redis, pattern: string, codec: Codec = new JsonCodec()) {
     super(redis, pattern, codec);
@@ -81,32 +83,47 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
   }
   async addListener(cb: (channel: string, message: V) => void): Promise<number> {
     const id = this.nextId++;
-    const conn = await duplicate(this.redis);
+    const conn = await duplicateRedis(this.redis);
     if (!conn) {
-      this.subs.set(id, this.redis);
+      this.subs.set(id, { conn: this.redis, handler: () => undefined });
       return id;
     }
-    await (conn as any).psubscribe(this.name);
-    (conn as any).on('pmessage', (_pat: string, ch: string, payload: string) => {
+    const handler = (_pat: string, ch: string, payload: string) => {
       try {
         cb(ch, this.decodeValue(payload) as V);
       } catch { /* noop */ }
-    });
-    this.subs.set(id, conn);
+    };
+    (conn as any).on('pmessage', handler);
+    try {
+      await conn.psubscribe(this.name);
+    } catch (e) {
+      try {
+        (conn as any).off?.('pmessage', handler);
+        (conn as any).disconnect?.();
+      } catch { /* noop */ }
+      throw e;
+    }
+    this.subs.set(id, { conn, handler });
     return id;
   }
   async removeListener(id: number): Promise<void> {
-    const c = this.subs.get(id);
-    if (!c) return;
+    const s = this.subs.get(id);
+    if (!s) return;
     this.subs.delete(id);
     try {
-      await (c as any).punsubscribe?.(this.name);
-      if (c !== this.redis) (c as any).disconnect?.();
+      (s.conn as any).off?.('pmessage', s.handler);
+      await (s.conn as any).punsubscribe?.(this.name);
+      if (s.conn !== this.redis) (s.conn as any).disconnect?.();
     } catch { /* noop */ }
+  }
+  async removeAllListeners(): Promise<void> {
+    for (const id of [...this.subs.keys()]) await this.removeListener(id);
   }
 }
 
 export class RShardedTopic<V = any> extends RedisDataStructure {
+  private subs = new Map<number, { conn: Redis; handler: (ch: string, payload: string) => void; mode: 'sharded' | 'plain' }>();
+  private nextId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
@@ -118,7 +135,8 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
     }
   }
   async addListener(cb: MessageListener<V>): Promise<number> {
-    const conn = await duplicate(this.redis);
+    const id = this.nextId++;
+    const conn = await duplicateRedis(this.redis);
     if (!conn) return 0;
     const handler = (_ch: string, payload: string) => {
       try {
@@ -128,17 +146,40 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
     // NOTE: sharded deliveries arrive as `smessage`, plain as `message`.
     // Listening to both keeps interop working regardless of server/client path.
     (conn as any).on('message', handler);
-    (conn as any).on('smessage', (_ch: string, payload: string) => {
-      try {
-        cb(this.decodeValue(payload) as V, this.name);
-      } catch { /* noop */ }
-    });
+    (conn as any).on('smessage', handler);
+    let mode: 'sharded' | 'plain' = 'sharded';
     try {
-      await (conn as any).ssubscribe(this.name);
+      await conn.ssubscribe(this.name);
     } catch {
-      await (conn as any).subscribe(this.name);
+      try {
+        await conn.subscribe(this.name);
+        mode = 'plain';
+      } catch (e) {
+        try {
+          (conn as any).off?.('message', handler);
+          (conn as any).off?.('smessage', handler);
+          (conn as any).disconnect?.();
+        } catch { /* noop */ }
+        throw e;
+      }
     }
-    return 1;
+    this.subs.set(id, { conn, handler, mode });
+    return id;
+  }
+  async removeListener(id: number): Promise<void> {
+    const s = this.subs.get(id);
+    if (!s) return;
+    this.subs.delete(id);
+    try {
+      (s.conn as any).off?.('message', s.handler);
+      (s.conn as any).off?.('smessage', s.handler);
+      if (s.mode === 'sharded') await (s.conn as any).sunsubscribe?.(this.name);
+      else await (s.conn as any).unsubscribe?.(this.name);
+      (s.conn as any).disconnect?.();
+    } catch { /* noop */ }
+  }
+  async removeAllListeners(): Promise<void> {
+    for (const id of [...this.subs.keys()]) await this.removeListener(id);
   }
 }
 
@@ -150,14 +191,14 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
     this.timeoutKey = suffixName(name, 'timeout');
   }
   async publish(message: V): Promise<void> {
-    await (this.redis as any).xadd(this.name, '*', 'm', this.encodeValue(message));
+    await this.redis.xadd(this.name, '*', 'm', this.encodeValue(message));
   }
   async size(): Promise<number> {
-    return (this.redis as any).xlen(this.name);
+    return this.redis.xlen(this.name);
   }
   async countSubscribers(): Promise<number> {
     try {
-      const g: any = await (this.redis as any).xinfo('GROUPS', this.name);
+      const g: any = await this.redis.xinfo('GROUPS', this.name);
       return Array.isArray(g) ? g.length : 0;
     } catch {
       return this.loops.size;
@@ -168,7 +209,7 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
     const now = await serverNowMs(this.redis);
     await this.redis.zadd(this.timeoutKey, String(now + 120000), id);
     try {
-      await (this.redis as any).xgroup('CREATE', this.name, id, '0', 'MKSTREAM');
+      await this.redis.xgroup('CREATE', this.name, id, '0', 'MKSTREAM');
     } catch (e: any) {
       if (!String(e?.message ?? e).includes('BUSYGROUP')) throw e;
     }
@@ -188,10 +229,18 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
       } catch { /* noop */ }
     }
   }
-  private async consumeLoop(id: string, cb: (msg: V) => void | Promise<void>, state: { stop: boolean }): Promise<void> {
+  private async consumeLoop(id: string, cb: (msg: V) => void | Promise<void>, state: { stop: boolean; conn: Redis | null }): Promise<void> {
     while (!state.stop) {
       try {
-        const res: any = await (this.redis as any).xreadgroup('GROUP', id, id, 'COUNT', 10, 'BLOCK', 2000, 'STREAMS', this.name, '>');
+        // XREADGROUP BLOCK occupies the whole TCP connection; use a
+        // dedicated one so lock watchdogs and normal commands stay live.
+        if (!state.conn) state.conn = (await duplicateRedis(this.redis)) ?? this.redis;
+        if (state.stop) {
+          if (state.conn && state.conn !== this.redis) (state.conn as any).disconnect?.();
+          break;
+        }
+        const conn = state.conn;
+        const res: any = await conn.xreadgroup('GROUP', id, id, 'COUNT', 10, 'BLOCK', 2000, 'STREAMS', this.name, '>');
         if (!res) continue;
         const streams = Array.isArray(res[0]?.[1]) ? res : res;
         for (const stream of streams) {
@@ -207,12 +256,13 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
                 await cb(this.decodeValue(payload) as V);
               } catch { /* listener error: still ack? no — redeliver */ continue; }
               try {
-                await (this.redis as any).xack(this.name, id, msgId);
+                await this.redis.xack(this.name, id, msgId);
               } catch { /* noop */ }
             }
           }
         }
       } catch {
+        if (state.stop) break;
         await sleep(500);
       }
     }
@@ -222,13 +272,21 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
     if (s) s.stop = true;
     this.loops.delete(id);
     try {
-      await (this.redis as any).xgroup('DESTROY', this.name, id);
+      if (s?.conn && s.conn !== this.redis) (s.conn as any).disconnect?.();
+    } catch { /* noop */ }
+    try {
+      await this.redis.xgroup('DESTROY', this.name, id);
     } catch { /* noop */ }
     await this.redis.zrem(this.timeoutKey, id);
   }
   override async delete(): Promise<boolean> {
     for (const id of [...this.loops.keys()]) await this.removeListener(id);
     await this.redis.del(this.name, this.timeoutKey);
+    return true;
+  }
+  override async unlink(): Promise<boolean> {
+    for (const id of [...this.loops.keys()]) await this.removeListener(id);
+    await this.unlinkKeys([this.name, this.timeoutKey]);
     return true;
   }
 }
@@ -341,7 +399,7 @@ export class RStream extends RedisDataStructure {
     return (this.redis as any).xadd(...args);
   }
   async read(count = 10, lastId = '0'): Promise<StreamEntry[]> {
-    const res: any = await (this.redis as any).xrange(this.name, lastId === '0' ? '-' : `(${lastId}`, '+', 'COUNT', count);
+    const res: any = await this.redis.xrange(this.name, lastId === '0' ? '-' : `(${lastId}`, '+', 'COUNT', count);
     return (res ?? []).map(([eid, f]: [string, string[]]) => ({ id: eid, fields: this.decodeFields(f) }));
   }
   private decodeFields(fields: string[] | Record<string, string>): Record<string, any> {
@@ -371,7 +429,7 @@ export class RStream extends RedisDataStructure {
     return out;
   }
   async size(): Promise<number> {
-    return (this.redis as any).xlen(this.name);
+    return this.redis.xlen(this.name);
   }
   async trim(maxLen: number, approx = true): Promise<number> {
     // NOTE: exact form omits the marker entirely — sending '' would be a
@@ -384,10 +442,10 @@ export class RStream extends RedisDataStructure {
   }
   async deleteEntries(...ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
-    return (this.redis as any).xdel(this.name, ...ids);
+    return this.redis.xdel(this.name, ...ids);
   }
   async createGroup(group: string, lastId = '0'): Promise<void> {
-    await (this.redis as any).xgroup('CREATE', this.name, group, lastId, 'MKSTREAM');
+    await this.redis.xgroup('CREATE', this.name, group, lastId, 'MKSTREAM');
   }
   async readGroup(group: string, consumer: string, count = 10, blockMs = -1): Promise<StreamEntry[]> {
     return this.readGroupWith(group, consumer, { count, ...(blockMs >= 0 ? { blockMs } : {}) });
@@ -404,7 +462,11 @@ export class RStream extends RedisDataStructure {
     if (opts.claimIdleMs !== undefined && opts.claimIdleMs > 0) args.push('CLAIM', opts.claimIdleMs);
     if (opts.noAck) args.push('NOACK');
     args.push('STREAMS', this.name, '>');
-    const res: any = await (this.redis as any).xreadgroup(...args);
+    // A blocking XREADGROUP occupies the connection; keep the main one free
+    // for lock watchdogs and ordinary commands.
+    const res: any = opts.blockMs !== undefined && opts.blockMs >= 0
+      ? await withDedicatedRedis(this.redis, (conn) => (conn as any).xreadgroup(...args))
+      : await (this.redis as any).xreadgroup(...args);
     if (!res) return [];
     const out: StreamEntry[] = [];
     for (const stream of res) {
@@ -414,7 +476,7 @@ export class RStream extends RedisDataStructure {
   }
   async ack(group: string, ...ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
-    return (this.redis as any).xack(this.name, group, ...ids);
+    return this.redis.xack(this.name, group, ...ids);
   }
   /**
    * Conditional ack-and-delete (XACKDEL, Redis 8.2+):
@@ -439,20 +501,20 @@ export class RStream extends RedisDataStructure {
     return toNumber(await (this.redis as any).xnack(...args));
   }
   async removeGroup(group: string): Promise<boolean> {
-    return toNumber(await (this.redis as any).xgroup('DESTROY', this.name, group)) === 1;
+    return toNumber(await this.redis.xgroup('DESTROY', this.name, group)) === 1;
   }
   async createConsumer(group: string, consumer: string): Promise<boolean> {
-    return toNumber(await (this.redis as any).xgroup('CREATECONSUMER', this.name, group, consumer)) === 1;
+    return toNumber(await this.redis.xgroup('CREATECONSUMER', this.name, group, consumer)) === 1;
   }
   async removeConsumer(group: string, consumer: string): Promise<number> {
-    return toNumber(await (this.redis as any).xgroup('DELCONSUMER', this.name, group, consumer));
+    return toNumber(await this.redis.xgroup('DELCONSUMER', this.name, group, consumer));
   }
   async updateGroupMessageId(group: string, id: string): Promise<void> {
-    await (this.redis as any).xgroup('SETID', this.name, group, id);
+    await this.redis.xgroup('SETID', this.name, group, id);
   }
   /** XPENDING summary: [count, minId, maxId, [[consumer, count], ...]]. */
   async getPendingInfo(group: string): Promise<StreamPendingInfo> {
-    const r: any = await (this.redis as any).xpending(this.name, group);
+    const r: any = await this.redis.xpending(this.name, group);
     if (!r) return { count: 0, minId: null, maxId: null, consumers: {} };
     const consumers: Record<string, number> = {};
     for (const [c, n] of r[3] ?? []) consumers[String(c)] = Number(n);
@@ -480,7 +542,7 @@ export class RStream extends RedisDataStructure {
     const rows = await this.listPending(group, start, end, count);
     const out: StreamEntry[] = [];
     for (const row of rows) {
-      const got: any = await (this.redis as any).xrange(this.name, row.id, row.id);
+      const got: any = await this.redis.xrange(this.name, row.id, row.id);
       for (const [eid, f] of got ?? []) out.push({ id: String(eid), fields: this.decodeFields(f) });
     }
     return out;
@@ -488,12 +550,12 @@ export class RStream extends RedisDataStructure {
   /** XCLAIM: take ownership of idle pending entries. */
   async claim(group: string, consumer: string, minIdleMs: number, ...ids: string[]): Promise<StreamEntry[]> {
     if (ids.length === 0) return [];
-    const res: any = await (this.redis as any).xclaim(this.name, group, consumer, minIdleMs, ...ids);
+    const res: any = await this.redis.xclaim(this.name, group, consumer, minIdleMs, ...ids);
     return (res ?? []).map(([eid, f]: [string, string[]]) => ({ id: String(eid), fields: this.decodeFields(f) }));
   }
   /** XAUTOCLAIM: cursor-scan ownership transfer. Returns next cursor + entries. */
   async autoClaim(group: string, consumer: string, minIdleMs: number, startId = '0-0', count = 10): Promise<{ nextId: string; entries: StreamEntry[] }> {
-    const res: any = await (this.redis as any).xautoclaim(this.name, group, consumer, minIdleMs, startId, 'COUNT', count);
+    const res: any = await this.redis.xautoclaim(this.name, group, consumer, minIdleMs, startId, 'COUNT', count);
     if (!res) return { nextId: '0-0', entries: [] };
     const [cursor, rows] = res;
     return {
@@ -569,7 +631,13 @@ if #expiredValues > 0 then
         redis.call('lrem', KEYS[3], 1, v)
     end
     redis.call('zrem', KEYS[2], unpack(expiredValues))
-end`;
+end
+-- get startTime from scheduler queue head task (QueueTransferTask.pushTaskAsync)
+local v = redis.call('zrange', KEYS[2], 0, 0, 'WITHSCORES')
+if v[1] ~= nil then
+    return v[2]
+end
+return nil`;
 
 export class RDelayedQueue<V = any> extends RedisDataStructure {
   private timeoutKey: string;
@@ -581,11 +649,138 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
     this.queueKey = prefixName('redisson_delay_queue', name);
     this.channel = prefixName('redisson_delay_queue_channel', name);
   }
-  private async migrate(): Promise<void> {
+  private async migrateOnce(): Promise<number | null> {
     const now = await serverNowMs(this.redis);
+    const next = await luaEval(this.redis, DQ_MIGRATE, 3, this.name, this.timeoutKey, this.queueKey, String(now), '100');
+    return next === null || next === undefined ? null : Number(next);
+  }
+  private async migrate(): Promise<void> {
     try {
-      await luaEval(this.redis, DQ_MIGRATE, 3, this.name, this.timeoutKey, this.queueKey, String(now), '100');
+      await this.migrateOnce();
     } catch { /* mock fallback noop */ }
+  }
+
+  // -- background migrator (port of Java QueueTransferTask + QueueTransferService) --
+  //
+  // Java starts one shared transfer task per queue name when the object is
+  // created; redi.ts keeps it opt-in: start() once, stop()/destroy() to
+  // release the extra connection. poll()/peek() still run a synchronous
+  // catch-up migration so delayed delivery also works without the task.
+  private transferConn: Redis | null = null;
+  private transferHandler: ((channel: string, message: string) => void) | null = null;
+  private transferOnSubscribe: ((channel: string) => void) | null = null;
+  private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduleGen = 0;
+  private started = false;
+  private destroyed = false;
+
+  /** Subscribe to the queue channel and pump expired members in the
+   * background. Idempotent. Mock (no duplicate connection): no-op — offers
+   * already land in the destination queue there. */
+  async start(): Promise<void> {
+    if (this.started || this.destroyed) return;
+    this.started = true;
+    const conn = await duplicateRedis(this.redis);
+    if (!conn || !this.started) {
+      try { (conn as any)?.disconnect?.(); } catch { /* noop */ }
+      return;
+    }
+    this.transferConn = conn;
+    const onMessage = (channel: string, message: string) => {
+      if (channel !== this.channel) return;
+      const deadline = Number(message);
+      if (Number.isFinite(deadline)) void this.scheduleTask(deadline);
+    };
+    // Java BaseStatusListener.onSubscribe: catch up right after (re)subscribe
+    const onSubscribe = (channel: string) => {
+      if (channel === this.channel) void this.pushTask();
+    };
+    this.transferHandler = onMessage;
+    this.transferOnSubscribe = onSubscribe;
+    (conn as any).on?.('message', onMessage);
+    (conn as any).on?.('subscribe', onSubscribe);
+    try {
+      await conn.subscribe(this.channel);
+    } catch (e) {
+      await this.stop();
+      throw e;
+    }
+    // Java BaseStatusListener.onSubscribe → pushTask: catch up on members that
+    // expired while the migrator was not running. Done explicitly (not only via
+    // the 'subscribe' event) because ioredis Cluster does not re-emit it.
+    void this.pushTask();
+  }
+
+  /** Cancel the deadline timer and drop the subscription. Idempotent. */
+  async stop(): Promise<void> {
+    if (!this.started) return;
+    this.started = false;
+    this.scheduleGen++;
+    if (this.deadlineTimer) {
+      clearTimeout(this.deadlineTimer);
+      this.deadlineTimer = null;
+    }
+    const conn = this.transferConn;
+    this.transferConn = null;
+    if (conn) {
+      try {
+        if (this.transferHandler) (conn as any).off?.('message', this.transferHandler);
+        if (this.transferOnSubscribe) (conn as any).off?.('subscribe', this.transferOnSubscribe);
+        await (conn as any).unsubscribe?.(this.channel);
+      } catch { /* noop */ }
+      try { (conn as any).disconnect?.(); } catch { /* noop */ }
+    }
+    this.transferHandler = null;
+    this.transferOnSubscribe = null;
+  }
+
+  /** Java destroy(): detach the transfer task and its listeners only — the
+   * destination queue and staged members survive (use delete() for keys). */
+  async destroy(): Promise<void> {
+    this.destroyed = true;
+    await this.stop();
+  }
+
+  // Java QueueTransferTask.scheduleTask: >10ms → arm a timer, else push now
+  private async scheduleTask(deadline: number | null): Promise<void> {
+    if (!this.started || deadline === null || !Number.isFinite(deadline)) return;
+    const gen = ++this.scheduleGen;
+    if (this.deadlineTimer) {
+      clearTimeout(this.deadlineTimer);
+      this.deadlineTimer = null;
+    }
+    let now: number;
+    try {
+      now = await serverNowMs(this.redis);
+    } catch {
+      now = Date.now();
+    }
+    if (this.scheduleGen !== gen || !this.started) return;
+    const delay = deadline - now;
+    if (delay > 10) {
+      const t = setTimeout(() => {
+        this.deadlineTimer = null;
+        void this.pushTask();
+      }, delay);
+      (t as any).unref?.();
+      this.deadlineTimer = t;
+    } else {
+      await this.pushTask();
+    }
+  }
+
+  // Java QueueTransferTask.pushTask: migrate, then follow the next head
+  // deadline; on error retry after 5s.
+  private async pushTask(): Promise<void> {
+    if (!this.started) return;
+    let next: number | null;
+    try {
+      next = await this.migrateOnce();
+    } catch {
+      void this.scheduleTask(Date.now() + 5000);
+      return;
+    }
+    if (next !== null) void this.scheduleTask(next);
   }
   async offer(value: V, delayMs: number): Promise<void> {
     const now = await serverNowMs(this.redis);
@@ -612,7 +807,12 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
   async size(): Promise<number> {
-    await this.migrate();
+    // Java RedissonDelayedQueue.size() = staging LIST length (not yet
+    // migrated), NOT the destination queue length.
+    return this.redis.llen(this.queueKey);
+  }
+  /** Destination queue length (TS helper; Java's RBlockingQueue.size()). */
+  async targetSize(): Promise<number> {
     return this.redis.llen(this.name);
   }
   async pendingSize(): Promise<number> {
@@ -644,9 +844,13 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
   async clear(): Promise<void> {
     await this.redis.del(this.queueKey, this.timeoutKey);
   }
+  // Java deletes ONLY the staging LIST and timeout ZSET; the destination
+  // queue (`this.name`) belongs to the caller and must survive.
   override async delete(): Promise<boolean> {
-    await this.redis.del(this.name, this.queueKey, this.timeoutKey);
-    return true;
+    return this.deleteKeys([this.queueKey, this.timeoutKey]);
+  }
+  override async unlink(): Promise<boolean> {
+    return this.unlinkKeys([this.queueKey, this.timeoutKey]);
   }
 }
 
@@ -710,7 +914,17 @@ end`;
     return this.redis.llen(this.name);
   }
   async clear(): Promise<void> {
+    // Java RedissonRingBuffer.clear() deletes only the LIST; capacity
+    // survives by design. delete() (below) removes both.
     await this.redis.del(this.name);
+  }
+
+  override async delete(): Promise<boolean> {
+    return this.deleteKeys([this.name, this.capacityKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    return this.unlinkKeys([this.name, this.capacityKey]);
   }
 }
 

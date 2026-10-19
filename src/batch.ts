@@ -9,10 +9,10 @@
  * tests only; everything else runs on mock too.
  */
 import type { Redis } from 'ioredis';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import type { RBatch } from './infra';
-import type { ScoredEntry } from './collections';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import type { RBatch } from './infra.js';
+import type { ScoredEntry } from './collections.js';
 
 function dec<T>(fn: (raws: any[]) => T) {
   return fn;

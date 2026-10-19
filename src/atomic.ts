@@ -3,56 +3,80 @@
  * Wire: plain decimal strings (StringCodec semantics), BaseAdder pub/sub protocol.
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
-import { luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber } from './util';
+import { RedisDataStructure } from './base.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
+import { luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber } from './util.js';
 
-const ATOMIC_CAS = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;
-if tonumber(v) == tonumber(ARGV[1]) then redis.call('set', KEYS[1], ARGV[2]); return 1 else return 0 end`;
+const ATOMIC_CAS = `local currValue = redis.call('get', KEYS[1])
+if currValue == ARGV[1] or (tonumber(ARGV[1]) == 0 and currValue == false) then
+    redis.call('set', KEYS[1], ARGV[2])
+    return 1
+else
+    return 0
+end`;
 
 const ATOMIC_DEL = `local v = redis.call('get', KEYS[1]);
 if v ~= false and v == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+
+const ATOMIC_GET_AND_ADD = `local old = redis.call('get', KEYS[1])
+if old == false then old = '0' end
+redis.call('incrby', KEYS[1], ARGV[1])
+return old`;
+
+const ATOMIC_ADD_AND_GET = `redis.call('incrby', KEYS[1], ARGV[1])
+return redis.call('get', KEYS[1])`;
+
+export type LongValue = number | bigint;
+
+function parseLong(raw: string | null): LongValue {
+  if (raw === null || raw === undefined) return 0;
+  if (/^-?\d+$/.test(raw) && !Number.isSafeInteger(Number(raw))) {
+    try { return BigInt(raw); } catch { return Number(raw); }
+  }
+  return Number(raw);
+}
 
 export class RAtomicLong extends RedisDataStructure {
   constructor(redis: Redis, name: string) {
     super(redis, name, new JsonCodec());
   }
-  async get(): Promise<number> {
-    const v = await this.redis.get(this.name);
-    return v === null ? 0 : Number(v);
+  async get(): Promise<LongValue> {
+    return parseLong(await this.redis.get(this.name));
   }
-  async set(value: number): Promise<void> {
+  async set(value: LongValue): Promise<void> {
     await this.redis.set(this.name, String(value));
   }
-  async getAndSet(value: number): Promise<number> {
-    const old = await this.redis.getset(this.name, String(value));
-    return old === null ? 0 : Number(old);
+  async getAndSet(value: LongValue): Promise<LongValue> {
+    return parseLong(await this.redis.getset(this.name, String(value)));
   }
-  async getAndDelete(): Promise<number | null> {
+  async getAndDelete(): Promise<LongValue | null> {
     const v = await (this.redis as any).getdel?.(this.name);
-    if (v !== undefined) return v === null ? null : Number(v);
+    if (v !== undefined) return v === null ? null : parseLong(String(v));
     const old = await this.redis.get(this.name);
     if (old !== null) await this.redis.del(this.name);
-    return old === null ? null : Number(old);
+    return old === null ? null : parseLong(old);
   }
-  async incrementAndGet(): Promise<number> {
-    return this.redis.incr(this.name);
+  async incrementAndGet(): Promise<LongValue> {
+    return this.addAndGet(1);
   }
-  async decrementAndGet(): Promise<number> {
-    return this.redis.decr(this.name);
+  async decrementAndGet(): Promise<LongValue> {
+    return this.addAndGet(-1);
   }
-  async addAndGet(delta: number): Promise<number> {
-    return this.redis.incrby(this.name, delta);
+  async addAndGet(delta: LongValue): Promise<LongValue> {
+    // Return GET after INCRBY: Redis Lua numbers are doubles, but GET keeps
+    // the exact decimal string for values beyond 2^53.
+    const raw = await luaEval(this.redis, ATOMIC_ADD_AND_GET, 1, this.name, String(delta));
+    return parseLong(raw === null ? null : String(raw));
   }
-  async getAndAdd(delta: number): Promise<number> {
-    const n = await this.addAndGet(delta);
-    return n - delta;
+  async getAndAdd(delta: LongValue): Promise<LongValue> {
+    const raw = await luaEval(this.redis, ATOMIC_GET_AND_ADD, 1, this.name, String(delta));
+    return parseLong(raw === null ? null : String(raw));
   }
-  async compareAndSet(expect: number, update: number): Promise<boolean> {
+  async compareAndSet(expect: LongValue, update: LongValue): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_CAS, 1, this.name, String(expect), String(update))) === 1;
   }
-  async compareAndDelete(expect: number): Promise<boolean> {
+  async compareAndDelete(expect: LongValue): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_DEL, 1, this.name, String(expect))) === 1;
   }
   override async delete(): Promise<boolean> {
@@ -79,8 +103,14 @@ export class RAtomicDouble extends RedisDataStructure {
     return Number(await this.redis.incrbyfloat(this.name, delta));
   }
   async getAndAdd(delta: number): Promise<number> {
-    const n = await this.addAndGet(delta);
-    return n - delta;
+    // Single Lua round-trip: return the OLD value exactly as stored. The old
+    // `newValue - delta` client-side reverse calculation accumulated float
+    // error (0.1 + 0.2 -> 0.10000000000000003).
+    const old = await luaEval(this.redis, `local old = redis.call('get', KEYS[1])
+if old == false then old = '0' end
+redis.call('incrbyfloat', KEYS[1], ARGV[1])
+return old`, 1, this.name, String(delta));
+    return Number(old ?? 0);
   }
   async compareAndSet(expect: number, update: number): Promise<boolean> {
     const s = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;

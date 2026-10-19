@@ -3,10 +3,13 @@
  * RLocalCachedMap. Wire matches Redisson 4.6.1 (struct-packed values, companion ZSETs).
  */
 import type { Redis } from 'ioredis';
-import { RedisDataStructure } from './base';
-import type { Codec } from './codec';
-import { JsonCodec } from './codec';
+import { RedisDataStructure } from './base.js';
+import { RedisKeyedStructure } from './synchronizers.js';
+import type { Codec } from './codec.js';
+import { JsonCodec } from './codec.js';
 import {
+  decodeMapCacheEvent,
+  duplicateRedis,
   encodeMapCacheEvent,
   multimapInternalId,
   packMapCacheValue,
@@ -14,21 +17,53 @@ import {
   serverNowMs,
   sleep,
   suffixName,
+  toNumber,
   unpackMapCacheValue,
-} from './util';
-import { RMap } from './collections';
+} from './util.js';
+import { RMap } from './collections.js';
 
-export class RMapCache<K = any, V = any> extends RedisDataStructure {
+/** Map-cache entry event (mirrors Redisson EntryEvent + MapEntryListener). */
+export type MapEntryEventType = 'CREATED' | 'UPDATED' | 'REMOVED' | 'EXPIRED';
+
+export interface MapEntryEvent<K = any, V = any> {
+  readonly type: MapEntryEventType;
+  readonly key: K;
+  /** New value for CREATED/UPDATED/EXPIRED; null for REMOVED. */
+  readonly value: V | null;
+  /** Previous value for UPDATED/REMOVED; null otherwise. */
+  readonly oldValue: V | null;
+}
+
+export interface MapEntryListener<K = any, V = any> {
+  onCreated?(event: MapEntryEvent<K, V>): void;
+  onUpdated?(event: MapEntryEvent<K, V>): void;
+  onRemoved?(event: MapEntryEvent<K, V>): void;
+  onExpired?(event: MapEntryEvent<K, V>): void;
+}
+
+export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
   private ttlKey: string;
   private idleKey: string;
   private accessKey: string;
   private optionsKey: string;
+  private channels: Record<'created' | 'updated' | 'removed' | 'expired', string>;
+  private listenerSub: Redis | null = null;
+  private listeners = new Map<number, MapEntryListener<K, V>>();
+  private listenerKinds = new Map<number, Set<'created' | 'updated' | 'removed' | 'expired'>>();
+  private nextListenerId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.ttlKey = prefixName('redisson__timeout__set', name);
     this.idleKey = prefixName('redisson__idle__set', name);
     this.accessKey = prefixName('redisson__map_cache__last_access__set', name);
     this.optionsKey = suffixName(name, 'redisson_options');
+    // Java getCreatedChannelName() etc. all use prefixName (hash-tag aware).
+    this.channels = {
+      created: prefixName('redisson_map_cache_created', name),
+      updated: prefixName('redisson_map_cache_updated', name),
+      removed: prefixName('redisson_map_cache_removed', name),
+      expired: prefixName('redisson_map_cache_expired', name),
+    };
   }
 
   // NOTE: plain commands (no Lua) throughout: packed values carry arbitrary
@@ -50,7 +85,7 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
       // exact bytes for event payloads
       let raws: (Buffer | null)[] = [];
       try {
-        raws = await (this.redis as any).hmgetBuffer(this.name, ...expired);
+        raws = await this.redis.hmgetBuffer(this.name, ...expired);
       } catch {
         raws = expired.map(() => null);
       }
@@ -86,9 +121,19 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
   }
 
   private publishEvent(kind: 'created' | 'updated' | 'removed' | 'expired', field: string, ...values: string[]): void {
-    const ch = `redisson_map_cache_${kind}:{${this.name}}`;
+    const ch = this.channels[kind];
     const msg = encodeMapCacheEvent([field, ...values]);
-    void this.redis.publish(ch, msg).catch(() => undefined);
+    // Buffer transport: ioredis encodes string args as UTF-8, which would
+    // corrupt the u64LE length prefixes (bytes >= 0x80) on real Redis.
+    void this.redis.publish(ch, Buffer.from(msg, 'latin1')).catch(() => undefined);
+  }
+
+  private async readStoredBuffer(field: string): Promise<unknown> {
+    try {
+      return await this.redis.hgetBuffer(this.name, field);
+    } catch {
+      return this.redis.hget(this.name, field);
+    }
   }
 
   private async touchAccess(field: string, now: number): Promise<void> {
@@ -102,12 +147,7 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
   async get(key: K): Promise<V | null> {
     await this.evict();
     const field = this.encodeKey(key);
-    let raw: unknown;
-    try {
-      raw = await (this.redis as any).hgetBuffer(this.name, field);
-    } catch {
-      raw = await this.redis.hget(this.name, field);
-    }
+    const raw = await this.readStoredBuffer(field);
     const buf = this.toBuf(raw);
     if (buf === null) return null;
     const u = unpackMapCacheValue(buf);
@@ -189,6 +229,178 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
     return null;
   }
 
+  /** Batch put with a shared TTL / maxIdle (Java RMapCache.putAll(map, ttl, ...)).
+   * Per-key equivalent of the Java batch Lua: replaces TTL and idle scores,
+   * repacks values with the new maxIdle, publishes created/updated events. */
+  async putAll(mapping: Map<K, V> | Record<string, V>, ttlMs = 0, maxIdleMs = 0): Promise<void> {
+    if (ttlMs < 0) throw new Error("redi.ts: ttl can't be negative");
+    if (maxIdleMs < 0) throw new Error("redi.ts: maxIdleTime can't be negative");
+    const entries: [K, V][] = mapping instanceof Map
+      ? [...mapping.entries()]
+      : (Object.entries(mapping) as [K, V][]);
+    for (const [k, v] of entries) await this.put(k, v, ttlMs, maxIdleMs);
+  }
+
+  /** Redisson RMapCache.expireEntry: set TTL / maxIdle on an existing entry.
+   * Returns false when the entry is missing or already expired (Java: no
+   * resurrection) and true when the new expiry was written. */
+  async expireEntry(key: K, ttlMs: number, maxIdleMs = 0): Promise<boolean> {
+    const field = this.encodeKey(key);
+    const raw = await this.readStoredBuffer(field);
+    const buf = this.toBuf(raw);
+    if (buf === null) return false;
+    const now = await serverNowMs(this.redis);
+    const u = unpackMapCacheValue(buf);
+    const payload = u.ok ? u.codec : buf.toString('utf8');
+    const curMaxIdle = u.ok ? u.maxIdle : 0;
+    // effective expiry = min(ttl score, idle score when packed maxIdle is set)
+    const ttlScore = await this.redis.zscore(this.ttlKey, field);
+    let expireAt = ttlScore === null ? Infinity : Number(ttlScore);
+    if (curMaxIdle !== 0) {
+      const idleScore = await this.redis.zscore(this.idleKey, field);
+      if (idleScore !== null) expireAt = Math.min(expireAt, Number(idleScore));
+    }
+    if (expireAt <= now) return false;
+    const ttlAt = ttlMs > 0 ? now + ttlMs : 0;
+    const idleAt = maxIdleMs > 0 ? now + maxIdleMs : 0;
+    await this.redis.hset(this.name, field, Buffer.from(packMapCacheValue(payload, maxIdleMs), 'latin1'));
+    if (ttlAt > 0) await this.redis.zadd(this.ttlKey, String(ttlAt), field);
+    else await this.redis.zrem(this.ttlKey, field);
+    if (idleAt > 0) await this.redis.zadd(this.idleKey, String(idleAt), field);
+    else await this.redis.zrem(this.idleKey, field);
+    await this.touchAccess(field, now);
+    return true;
+  }
+
+  /** Java RMapCache.remainTimeToLive(key): -2 when the entry is missing or
+   * already expired, -1 when it has no expiry, else remaining ms.
+   * The no-arg call (RedisDataStructure) returns the HASH's own PTTL. */
+  override async remainTimeToLive(key?: K): Promise<number> {
+    if (key === undefined) return super.remainTimeToLive();
+    const field = this.encodeKey(key);
+    const raw = await this.readStoredBuffer(field);
+    const buf = this.toBuf(raw);
+    if (buf === null) return -2;
+    const u = unpackMapCacheValue(buf);
+    const now = await serverNowMs(this.redis);
+    const ttlScore = await this.redis.zscore(this.ttlKey, field);
+    let expireAt = ttlScore === null ? null : Number(ttlScore);
+    if (u.ok && u.maxIdle !== 0) {
+      const idleScore = await this.redis.zscore(this.idleKey, field);
+      if (idleScore !== null) {
+        expireAt = expireAt === null ? Number(idleScore) : Math.min(expireAt, Number(idleScore));
+      }
+    }
+    if (expireAt === null) return -1;
+    const remain = Math.round(expireAt - now);
+    return remain <= 0 ? -2 : remain;
+  }
+
+  // -- entry events (Java MapEntryListener over redisson_map_cache_* topics) --
+
+  private kindOfChannel(ch: string): 'created' | 'updated' | 'removed' | 'expired' | null {
+    if (ch === this.channels.created) return 'created';
+    if (ch === this.channels.updated) return 'updated';
+    if (ch === this.channels.removed) return 'removed';
+    if (ch === this.channels.expired) return 'expired';
+    return null;
+  }
+
+  private dispatch(channel: string, message: string | Buffer): void {
+    const kind = this.kindOfChannel(channel);
+    if (kind === null) return;
+    const parts = decodeMapCacheEvent(message);
+    if (parts.length < 2) return;
+    let key: K;
+    try {
+      key = this.decodeKey(parts[0]) as K;
+    } catch {
+      key = parts[0] as unknown as K;
+    }
+    const dec = (s: string | undefined): V | null => {
+      if (s === undefined) return null;
+      try {
+        return this.decodeValue(s) as V;
+      } catch {
+        return s as unknown as V;
+      }
+    };
+    const second = dec(parts[1]);
+    for (const [id, listener] of this.listeners) {
+      if (!this.listenerKinds.get(id)?.has(kind)) continue;
+      try {
+        if (kind === 'created') listener.onCreated?.({ type: 'CREATED', key, value: second, oldValue: null });
+        else if (kind === 'updated') listener.onUpdated?.({ type: 'UPDATED', key, value: second, oldValue: dec(parts[2]) });
+        else if (kind === 'removed') listener.onRemoved?.({ type: 'REMOVED', key, value: null, oldValue: second });
+        else listener.onExpired?.({ type: 'EXPIRED', key, value: second, oldValue: null });
+      } catch { /* listener exceptions must not kill the subscriber */ }
+    }
+  }
+
+  /** Register a MapEntryListener; returns the listener id.
+   * Subscribes on a dedicated connection (never the main one) and sets the
+   * Java `has-listeners` option flag so Java writers publish events too. */
+  async addListener(listener: MapEntryListener<K, V>): Promise<number> {
+    const kinds = new Set<'created' | 'updated' | 'removed' | 'expired'>();
+    if (listener.onCreated) kinds.add('created');
+    if (listener.onUpdated) kinds.add('updated');
+    if (listener.onRemoved) kinds.add('removed');
+    if (listener.onExpired) kinds.add('expired');
+    if (kinds.size === 0) throw new Error('redi.ts: MapEntryListener needs at least one handler');
+    const id = this.nextListenerId++;
+    this.listeners.set(id, listener);
+    this.listenerKinds.set(id, kinds);
+    try {
+      await this.redis.hset(this.optionsKey, 'has-listeners', '1');
+    } catch { /* mock / old server */ }
+    if (!this.listenerSub) {
+      const conn = await duplicateRedis(this.redis);
+      if (conn) {
+        // messageBuffer keeps arbitrary packed bytes intact (length prefixes
+        // may contain invalid UTF-8); 'message' decodes as UTF-8 and would
+        // corrupt them on real Redis.
+        const onMessage = (ch: Buffer | string, payload: Buffer) => {
+          try {
+            this.dispatch(String(ch), payload);
+          } catch { /* noop */ }
+        };
+        (conn as any).on('messageBuffer', onMessage);
+        try {
+          await conn.subscribe(...Object.values(this.channels));
+        } catch (e) {
+          try {
+            (conn as any).off?.('messageBuffer', onMessage);
+            (conn as any).disconnect?.();
+          } catch { /* noop */ }
+          this.listeners.delete(id);
+          this.listenerKinds.delete(id);
+          throw e;
+        }
+        this.listenerSub = conn;
+      }
+    }
+    return id;
+  }
+
+  async removeListener(id: number): Promise<void> {
+    this.listeners.delete(id);
+    this.listenerKinds.delete(id);
+    if (this.listeners.size === 0 && this.listenerSub) {
+      const conn = this.listenerSub;
+      this.listenerSub = null;
+      try {
+        await conn.unsubscribe(...Object.values(this.channels));
+      } catch { /* noop */ }
+      try {
+        (conn as any).disconnect?.();
+      } catch { /* noop */ }
+    }
+  }
+
+  async removeAllListeners(): Promise<void> {
+    for (const id of [...this.listeners.keys()]) await this.removeListener(id);
+  }
+
   async remove(key: K): Promise<V | null> {
     await this.evict();
     const field = this.encodeKey(key);
@@ -214,7 +426,7 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
     await this.evict();
     let all: Record<string, Buffer | string>;
     try {
-      all = await (this.redis as any).hgetallBuffer(this.name);
+      all = await this.redis.hgetallBuffer(this.name);
     } catch {
       all = await this.redis.hgetall(this.name);
     }
@@ -246,12 +458,16 @@ export class RMapCache<K = any, V = any> extends RedisDataStructure {
     await this.redis.del(this.optionsKey);
     return true;
   }
+  override async unlink(): Promise<boolean> {
+    await this.unlinkKeys([this.name, this.ttlKey, this.idleKey, this.accessKey, this.optionsKey]);
+    return true;
+  }
   async destroy(): Promise<void> {
     await this.clear();
   }
 }
 
-export class RMapCacheNative<K = any, V = any> extends RedisDataStructure {
+export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
@@ -261,10 +477,53 @@ export class RMapCacheNative<K = any, V = any> extends RedisDataStructure {
     await this.redis.hset(this.name, field, this.encodeValue(value));
     if (ttlMs > 0) {
       try {
-        await (this.redis as any).hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
+        await this.redis.hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
       } catch { /* server too old */ }
     }
     return old;
+  }
+
+  /** Java RedissonMapCacheNative.putIfAbsent(key, value, ttl). With a TTL
+   *  the 4.6.1 script guards on `hget` then applies `HPEXPIRE ... FIELDS 1`
+   *  atomically (existing entries keep value and TTL). ioredis-mock (and
+   *  Redis < 7.4) cannot run HPEXPIRE: one side-effect-free probe against a
+   *  nonexistent field decides whether the script is usable, otherwise the
+   *  base `hsetnx`/`hget` script guards without a TTL. */
+  private fieldExpireInLua: boolean | null = null;
+
+  private async canExpireFieldInLua(): Promise<boolean> {
+    if (this.fieldExpireInLua === null) {
+      try {
+        // missing field → reply -2; Redis neither creates the field nor the key
+        await this.redis.hpexpire(this.name, 1, 'FIELDS', 1, '\u0000__redi_probe__');
+        this.fieldExpireInLua = true;
+      } catch {
+        this.fieldExpireInLua = false;
+      }
+    }
+    return this.fieldExpireInLua;
+  }
+
+  async putIfAbsent(key: K, value: V, ttlMs = 0): Promise<V | null> {
+    if (ttlMs < 0) throw new Error("redi.ts: ms can't be negative");
+    const field = this.encodeKey(key);
+    if (value === null || value === undefined) return this.get(key);
+    const enc = this.encodeValue(value);
+    if (ttlMs > 0 && (await this.canExpireFieldInLua())) {
+      const lua = "local currValue = redis.call('hget', KEYS[1], ARGV[2]); if currValue ~= false then return currValue; end; redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); return nil;";
+      try {
+        const r: any = await this.redis.eval(lua, 1, this.name, String(ttlMs), field, enc, 'HPEXPIRE');
+        return r == null ? null : (this.decodeValue(r) as V);
+      } catch { /* fall through to the set-if-absent path */ }
+    }
+    const lua = "if redis.call('hsetnx', KEYS[1], ARGV[1], ARGV[2]) == 1 then return nil else return redis.call('hget', KEYS[1], ARGV[1]) end";
+    try {
+      const r: any = await this.redis.eval(lua, 1, this.name, field, enc);
+      return r == null ? null : (this.decodeValue(r) as V);
+    } catch {
+      const set: any = await this.redis.hsetnx(this.name, field, enc);
+      return toNumber(set) === 1 ? null : this.get(key);
+    }
   }
   async get(key: K): Promise<V | null> {
     const raw = await this.redis.hget(this.name, this.encodeKey(key));
@@ -277,16 +536,77 @@ export class RMapCacheNative<K = any, V = any> extends RedisDataStructure {
   }
   async remainTTL(key: K): Promise<number> {
     try {
-      const r: any = await (this.redis as any).hpttl(this.name, 'FIELDS', 1, this.encodeKey(key));
+      const r: any = await this.redis.hpttl(this.name, 'FIELDS', 1, this.encodeKey(key));
       if (Array.isArray(r)) return Number(r[0]);
       return Number(r);
     } catch {
       return -1;
     }
   }
+
+  /** Java RMapCacheNative.remainTimeToLive(key) — HPTTL FIELDS 1. */
+  override async remainTimeToLive(key?: K): Promise<number> {
+    if (key === undefined) return super.remainTimeToLive();
+    return this.remainTTL(key);
+  }
+
+  // -- conditional field expiry (Redis 8 HEXPIRE family) ----------------------
+  // Java RedissonMapCacheNative.expireEntryAsync: HPEXPIRE name ms [NX|GT|LT]
+  // FIELDS 1 field; per-field reply >= 1 means the new expiry was written.
+
+  private async hpexpireField(key: K, ttlMs: number, param?: 'NX' | 'GT' | 'LT'): Promise<boolean> {
+    const field = this.encodeKey(key);
+    try {
+      const args: any[] = [this.name, ttlMs];
+      if (param) args.push(param);
+      args.push('FIELDS', 1, field);
+      const r: any = await (this.redis as any).hpexpire(...args);
+      const first = Array.isArray(r) ? r[0] : r;
+      return toNumber(first) >= 1;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Set the field TTL (HPEXPIRE). */
+  async expireEntry(key: K, ttlMs: number): Promise<boolean> {
+    return this.hpexpireField(key, ttlMs);
+  }
+
+  /** Set the field TTL only when the field has no expiry (HPEXPIRE NX). */
+  async expireEntryIfNotSet(key: K, ttlMs: number): Promise<boolean> {
+    return this.hpexpireField(key, ttlMs, 'NX');
+  }
+
+  /** Set the field TTL only when it is longer than the current one (HPEXPIRE GT). */
+  async expireEntryIfGreater(key: K, ttlMs: number): Promise<boolean> {
+    return this.hpexpireField(key, ttlMs, 'GT');
+  }
+
+  /** Set the field TTL only when it is shorter than the current one (HPEXPIRE LT). */
+  async expireEntryIfLess(key: K, ttlMs: number): Promise<boolean> {
+    return this.hpexpireField(key, ttlMs, 'LT');
+  }
+
+  /** Remove the field TTL (HPERSIST; Java clearExpire). The no-arg call
+   *  (RedisDataStructure) PERSISTs the whole HASH. */
+  override async clearExpire(key?: K): Promise<boolean> {
+    if (key === undefined) return super.clearExpire();
+    const field = this.encodeKey(key);
+    try {
+      const hpersist = (this.redis as any).hpersist;
+      const r: any = typeof hpersist === 'function'
+        ? await hpersist.call(this.redis, this.name, 'FIELDS', 1, field)
+        : await this.redis.call('HPERSIST', this.name, 'FIELDS', 1, field);
+      const first = Array.isArray(r) ? r[0] : r;
+      return toNumber(first) === 1;
+    } catch {
+      return false;
+    }
+  }
 }
 
-export class RSetCache<V = any> extends RedisDataStructure {
+export class RSetCache<V = any> extends RedisKeyedStructure<V> {
   private idleKey: string;
   private touchKey: string;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
@@ -405,11 +725,26 @@ export class RSetCache<V = any> extends RedisDataStructure {
     const alive = await this.sweepIdle(m, now);
     return alive.map((x) => this.decodeValue(x) as V);
   }
+
+  // Java RSetCache.clear() delegates to delete(). The idle/touch pair is a TS
+  // extension, so delete() must remove it explicitly (main ZSET alone would
+  // leave orphaned sliding-window metadata behind).
+  override async delete(): Promise<boolean> {
+    return this.deleteKeys([this.name, this.idleKey, this.touchKey]);
+  }
+
+  override async unlink(): Promise<boolean> {
+    return this.unlinkKeys([this.name, this.idleKey, this.touchKey]);
+  }
+
+  async clear(): Promise<void> {
+    await this.delete();
+  }
 }
 
 // -- Multimaps ---------------------------------------------------------------
 
-abstract class RMultimapBase<K = any, V = any> extends RedisDataStructure {
+abstract class RMultimapBase<K = any, V = any> extends RedisKeyedStructure<K> {
   protected isSet: boolean;
   constructor(redis: Redis, name: string, codec: Codec, isSet: boolean) {
     super(redis, name, codec);
@@ -478,14 +813,40 @@ abstract class RMultimapBase<K = any, V = any> extends RedisDataStructure {
   async size(): Promise<number> {
     return this.redis.hlen(this.name);
   }
-  async clear(): Promise<void> {
+  /** Extra hash-tagged companion keys owned by subclasses (e.g. TTL ZSET). */
+  protected companionKeys(): string[] {
+    return [];
+  }
+
+  private async removeAll(mode: 'del' | 'unlink'): Promise<boolean> {
+    const existed = ((await this.redis.exists(this.name)) as number) > 0;
+    // Read the field→id map BEFORE deleting it: collections are only
+    // discoverable through the HASH (AGENTS.md:9).
     const ids = await this.redis.hvals(this.name);
-    if (ids.length > 0) {
-      for (let i = 0; i < ids.length; i += 500) {
-        await this.redis.del(...ids.slice(i, i + 500).map((id) => this.collKey(id)));
-      }
+    const childKeys = ids.map((id) => this.collKey(id));
+    for (let i = 0; i < childKeys.length; i += 500) {
+      const batch = childKeys.slice(i, i + 500);
+      if (mode === 'unlink') await this.unlinkKeys(batch);
+      else await this.deleteKeys(batch);
     }
-    await this.redis.del(this.name);
+    const tails = [this.name, ...this.companionKeys()];
+    if (mode === 'unlink') await this.unlinkKeys(tails);
+    else await this.deleteKeys(tails);
+    return existed;
+  }
+
+  async clear(): Promise<void> {
+    await this.removeAll('del');
+  }
+
+  // Java RedissonMultimap.deleteAsync() removes the HASH + every child
+  // collection in one Lua script. Direct delete() must not orphan children.
+  override async delete(): Promise<boolean> {
+    return this.removeAll('del');
+  }
+
+  override async unlink(): Promise<boolean> {
+    return this.removeAll('unlink');
   }
 }
 
@@ -526,6 +887,12 @@ abstract class RMultimapCacheBase<K = any, V = any> extends RMultimapBase<K, V> 
     await this.checkExpiry(this.encodeKey(key));
     return super.put(key, value);
   }
+  // TTL ZSET holds fields (not child ids); clear never touched it before, so
+  // delete()/clear() left an orphan after the main HASH was gone.
+  protected override companionKeys(): string[] {
+    return [this.timeoutKey];
+  }
+
   async expireKey(key: K, ttlMs: number): Promise<boolean> {
     const field = this.encodeKey(key);
     if (!await this.containsKey(key)) return false;
@@ -563,18 +930,35 @@ export interface LocalCachedMapOptions {
 }
 
 export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
-  private cache = new Map<string, { value: V | null; expireAt: number }>();
+  private cache = new Map<string, { value: V | null; expireAt: number; lastAccess: number }>();
   private opts: LocalCachedMapOptions;
   private sub: Redis | null = null;
   private clientTag: string;
   private invalChannel: string;
+  private ready: Promise<void> = Promise.resolve();
 
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec(), opts: LocalCachedMapOptions = {}, clientTag = '') {
     super(redis, name, codec);
     this.opts = { evictionPolicy: 'NONE', syncStrategy: 'INVALIDATE', ...opts };
     this.clientTag = clientTag || Math.random().toString(36).slice(2);
     this.invalChannel = `${name}:inval`;
-    if (!this.opts.disableNearCache) void this.listen();
+    if (!this.opts.disableNearCache) this.ready = this.listen();
+  }
+
+  /** Absolute local-expiry timestamp; Infinity when timeToLiveMs is unset. */
+  private expiryAt(now: number): number {
+    const ttl = this.opts.timeToLiveMs ?? 0;
+    return ttl > 0 ? now + ttl : Infinity;
+  }
+
+  private buildEntry(value: V | null, now: number): { value: V | null; expireAt: number; lastAccess: number } {
+    return { value, expireAt: this.expiryAt(now), lastAccess: now };
+  }
+
+  private isStale(e: { expireAt: number; lastAccess: number }, now: number): boolean {
+    if (e.expireAt !== Infinity && now >= e.expireAt) return true;
+    const maxIdle = this.opts.maxIdleMs ?? 0;
+    return maxIdle > 0 && now - e.lastAccess > maxIdle;
   }
 
   private async listen(): Promise<void> {
@@ -590,7 +974,7 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
           if (m.op === 'clear') this.cache.clear();
           else if (m.op === 'del') this.cache.delete(m.field);
           else if (m.op === 'put' && this.opts.syncStrategy === 'UPDATE') {
-            this.cache.set(m.field, { value: this.decodeValue(m.value) as V, expireAt: Date.now() + 60000 });
+            this.cache.set(m.field, this.buildEntry(this.decodeValue(m.value) as V, Date.now()));
           } else this.cache.delete(m.field);
         } catch { /* noop */ }
       });
@@ -610,23 +994,29 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
   private getCached(field: string): V | null | undefined {
     const e = this.cache.get(field);
     if (!e) return undefined;
-    if (e.expireAt < Date.now()) {
+    const now = Date.now();
+    if (this.isStale(e, now)) {
       this.cache.delete(field);
       return undefined;
     }
+    e.lastAccess = now;
     return e.value;
   }
   private setCached(field: string, value: V | null): void {
     if (this.opts.disableNearCache) return;
     const max = this.opts.maxSize ?? 0;
-    if (max > 0 && this.cache.size >= max) {
+    if (max > 0 && !this.cache.has(field) && this.cache.size >= max) {
       const first = this.cache.keys().next().value;
       if (first !== undefined) this.cache.delete(first);
     }
-    this.cache.set(field, { value, expireAt: Date.now() + 60000 });
+    this.cache.set(field, this.buildEntry(value, Date.now()));
   }
 
   async get(key: K): Promise<V | null> {
+    // Wait for the invalidation subscription ack before populating the near
+    // cache; otherwise a write racing the constructor can be missed and the
+    // stale value would live in the local map indefinitely.
+    await this.ready;
     const f = this.fieldOf(key);
     const c = this.getCached(f);
     if (c !== undefined) return c;
@@ -658,12 +1048,14 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
     this.cache.clear();
   }
   async clear(): Promise<void> {
+    await this.ready;
     await this.redis.del(this.name);
     this.cache.clear();
     this.broadcast({ op: 'clear' });
   }
   async destroy(): Promise<void> {
     try {
+      await this.ready;
       await (this.sub as any)?.unsubscribe?.(this.invalChannel);
       (this.sub as any)?.disconnect?.();
     } catch { /* noop */ }

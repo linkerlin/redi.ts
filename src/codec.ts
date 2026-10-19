@@ -103,7 +103,94 @@ export class ByteArrayCodec implements Codec {
 }
 
 /** JSON, compatible with Redisson JsonJacksonCodec default typing. */
+export interface JsonCodecOptions {
+  /** Decode integer literals outside ±(2^53-1) as BigInt instead of the
+   * precision-lossy JS number. Default false keeps the historical number
+   * contract. Encoding BigInt is always lossless. */
+  bigIntForUnsafeLong?: boolean;
+}
+
+function restoreBigInts(value: any, table: Map<string, bigint>): any {
+  if (typeof value === 'string') return table.get(value) ?? value;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) value[i] = restoreBigInts(value[i], table);
+    return value;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const k of Object.keys(value)) value[k] = restoreBigInts(value[k], table);
+  }
+  return value;
+}
+
+/** Replace unsafe integer literals outside JSON strings with unique string
+ * tokens, so JSON.parse cannot round them before we restore them as BigInt. */
+function protectUnsafeInts(raw: string): { text: string; table: Map<string, bigint> } {
+  const table = new Map<string, bigint>();
+  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  let out = '';
+  let i = 0;
+  let inString = false;
+  let escaped = false;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === '-' || (ch >= '0' && ch <= '9')) {
+      let j = i + 1;
+      while (j < raw.length && /[0-9eE+.\-]/.test(raw[j])) j++;
+      const token = raw.slice(i, j);
+      if (/^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token))) {
+        const key = `__redi_bigint_${nonce}_${table.size}__`;
+        table.set(key, BigInt(token));
+        out += JSON.stringify(key);
+      } else {
+        out += token;
+      }
+      i = j;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return { text: out, table };
+}
+
 export class JsonCodec implements Codec {
+  private readonly bigIntForUnsafeLong: boolean;
+
+  constructor(opts: JsonCodecOptions = {}) {
+    this.bigIntForUnsafeLong = opts.bigIntForUnsafeLong === true;
+  }
+
+  private stringifyTyped(value: unknown): string {
+    const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    const token = `__redi_bigint_enc_${nonce}_`;
+    const bigints: string[] = [];
+    const json = JSON.stringify(javaTypeWrap(value), (_k, v) => {
+      if (typeof v === 'bigint') {
+        const key = `${token}${bigints.length}`;
+        bigints.push(v.toString());
+        return key;
+      }
+      return v;
+    });
+    if (json === undefined) return 'null';
+    if (bigints.length === 0) return json;
+    return json.replace(new RegExp(`"${token}(\\d+)"`, 'g'), (_m, idx) => `["java.lang.Long",${bigints[Number(idx)]}]`);
+  }
+
   encode(value: unknown): string {
     // Long wrap: integers outside int32 (bool excluded)
     if (typeof value === 'number' && Number.isInteger(value)) {
@@ -113,17 +200,24 @@ export class JsonCodec implements Codec {
       return JSON.stringify(value);
     }
     if (typeof value === 'bigint') {
-      return JSON.stringify(['java.lang.Long', Number(value)]);
+      // Never route BigInt through Number(): snowflake ids and Long.MAX_VALUE
+      // must keep every decimal digit.
+      return `["java.lang.Long",${value.toString()}]`;
     }
     if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') {
       return JSON.stringify(value);
     }
-    return JSON.stringify(javaTypeWrap(value));
+    return this.stringifyTyped(value);
   }
   decode(raw: string | null | undefined): any {
     if (raw === null || raw === undefined) return null;
     if (raw === '') return null;
     try {
+      if (this.bigIntForUnsafeLong) {
+        const { text, table } = protectUnsafeInts(raw);
+        const parsed = JSON.parse(text);
+        return unwrap(restoreBigInts(parsed, table));
+      }
       return unwrap(JSON.parse(raw));
     } catch {
       return raw;

@@ -10,7 +10,9 @@
 1. **JsonJacksonCodec default typing**: bare `{...}`/`[...]` rejected by Java.
    Encode wraps maps (`@class: java.util.LinkedHashMap`) and arrays
    (`["java.util.ArrayList",[...]]`), longs (`["java.lang.Long",v]`); decode
-   strips all wrappers and any `@class`. `test/wire.test.ts` + live
+   strips all wrappers and any `@class`. `bigint` encodes losslessly;
+   `JsonCodec({bigIntForUnsafeLong:true})` decodes unsafe integer literals as
+   `BigInt` (default keeps `number`). `test/wire.test.ts` + live
    `test/interop.test.ts` (python) guard this.
 2. **HighwayHash-128**: BigInt port of `redipy/highway_hash.py` (= Redisson
    `org.redisson.misc.HighwayHash` fixed KEY). Vectors verified live against
@@ -25,45 +27,50 @@
    `latin1` (never UTF-8).
 5. **Permit ids** are fresh `randomBytes(16)` per acquire (ZADD dedup collapse
    otherwise); server time comes from `TIME` (no local skew).
+6. **Blocking commands never share the main connection**: `BLPOP`/`BRPOP`/
+   `BZPOPMIN`/`XREADGROUP BLOCK` run on `duplicate()` connections, otherwise
+   the TCP connection cannot carry lock-watchdog renewals. Timeouts are Redis
+   6+ float seconds; `<= 0` means non-blocking.
 
 ## Status matrix
 
 | Structure | Redis layout | Status |
 |-----------|--------------|--------|
 | RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim; Spin 默认指数退避 1→128ms×2+jitter（`BackOff` 可配，`getSpinLock(name, backOff?)`）；unlock-latch 为按请求幂等键，跨语言无影响 | WIRE_OK + live mutual exclusion both directions ✅ |
-| RFairLock / NonReentrantFair | + LIST `redisson_lock_queue:{name}` + ZSET `redisson_lock_timeout:{name}`, per-waiter `channel:field`, FIFO Lua verbatim | WIRE_OK |
-| RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}` (read→`1`, write→`0`), downgrade parity | WIRE_OK + live phase 3 (互斥双向+共享读） |
-| RFencedLock | RLock HASH + `redisson_lock_token:{name}` (`INCR` incl. re-entry, returns `{-1,token}`) | WIRE_OK + live phase 3 (token 跨语言单调） |
-| RMultiLock / RRedLock | client-side orchestration (quorum `n/2+1`, lease amplification) | WIRE_OK + live phase 9（全有或全无+回滚，多数派 2/3 ✅） |
+| RFairLock / NonReentrantFair | + LIST `redisson_lock_queue:{name}` + ZSET `redisson_lock_timeout:{name}`, per-waiter `channel:field`, FIFO Lua verbatim; `delete()/unlink()` clears all three keys + local watchdog timers | WIRE_OK + live phase 16 (capacity/keys re-init ✅) |
+| RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}`; unlock/forceUnlock wake constants follow Java `LockPubSub` (read → `UNLOCK_MESSAGE` 0 wake-one, write → `READ_UNLOCK_MESSAGE` 1 wake-all), downgrade parity; views: `isLocked` (read: `mode=='read' or (mode=='write' and hlen>2)`), `isHeldByThread`, `getHoldCount`, `forceUnlock` | WIRE_OK + live phase 3 (互斥双向+共享读） + live phase 19 (视图/强解 ✅) |
+| RFencedLock | RLock HASH + `redisson_lock_token:{name}` (`INCR` incl. re-entry, returns `{-1,token}`); `delete()` clears token so the next acquire restarts at 1 | WIRE_OK + live phase 3 (token 跨语言单调） + live phase 16 (token reset ✅) |
+| RMultiLock / RRedLock | client-side orchestration (quorum `n/2+1`, lease amplification); accepts any `LockLike` (`RLock`/`RFairLock`/RW views) | WIRE_OK + live phase 9（全有或全无+回滚，多数派 2/3 ✅） |
 | RSemaphore | STRING + `redisson_sc:{name}` Lua | WIRE_OK + live shared-permit ✅ |
 | RCountDownLatch | STRING + `redisson_countdownlatch__channel__{name}` (`1` set / `0` zero) | WIRE_OK (count shared, live read ✅) |
-| RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]` | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） |
-| RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON) | WIRE_OK + live bidirectional ✅ |
-| RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call` | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) |
-| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ |
+| RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]`; `delete()` removes the timeout ZSET | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） + live phase 16 (zero residue ✅) |
+| RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON); Bounded uses `redisson_bqs:{name}` as available permits: atomic DECRBY+RPUSH / INCRBY+PUBLISH, `put`/timed `offer` block, `remainingCapacity()`; BLPOP/BRPOP use dedicated connections + float seconds (0 = non-blocking); `drainTo` extracts with one atomic Lua; RMap 另有 `valueSize`（HSTRLEN）、`randomKeys`/`randomEntries`（HRANDFIELD [WITHVALUES]）、`keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)` 惰性 HSCAN 异步迭代器 | WIRE_OK + live bidirectional ✅ + live phase 4/7/16/17/18 + live phase 20 ✅ |
+| RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call`; key synchronizers shared with RMap (see below) | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) |
+| Key synchronizers (RMap/RSet/MapCache/SetCache/Multimap) | `getLock`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`: companion = `suffixName(name, hash128toBase64(encode(key)) + ":" + {lock\|fairlock\|rw_lock\|semaphore\|countdownlatch\|permitexpirablesemaphore})`; owners inherit the client id/watchdog | WIRE_OK + live phase 19（6/6 命名与 Java 4.6.1 逐字节一致、Key 锁双向互斥 ✅） |
+| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank`/`removeRangeByScore`；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
 | RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua) | WIRE_OK + live bidirectional ✅ |
-| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)` | WIRE_OK + live bidirectional ✅ |
+| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) |
 | RLongAdder / RDoubleAdder | `{name}:adder-topic` + `{name}:<id>:counter` + `{name}:<id>:semaphore` hash-tag 三元组；sum 只返回 GETDEL（请求者自 flush 已包含在内）；订阅先挂 handler 后 await ack | WIRE_OK + live phase 3 |
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
-| RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段） | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） |
-| RMapCacheNative | plain HASH + `HPEXPIRE` (≥7.4) | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） |
-| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable) | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) |
-| RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids | WIRE_OK |
-| RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE` | WIRE_OK / NATIVE_OK |
-| RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试 (Java binary protocol not ported — disable near-cache for mixed deploys) | PARTIAL |
-| RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件） | WIRE_OK / NATIVE_OK + live phase 4/5（Topic/Sharded/Pattern 双向 ✅） |
-| RReliableTopic | STREAM field **`m`** + per-subscriber group + `{name}:timeout` | WIRE_OK + live phase 3 (双向投递） |
-| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel | WIRE_OK + live bidirectional ✅ + live phase 13/14 ✅ |
-| RDelayedQueue | ZSET `redisson_delay_queue_timeout:{name}` + LIST `redisson_delay_queue:{name}` (`Bc0Lc0`) + channel（offer id 走 Buffer 保真；消费侧迁移须由 DelayedQueue 包装类调度，直接 poll 目标队列不会迁移） | WIRE_OK + live phase 3 (双向迁移） |
-| RRingBuffer | LIST + `redisson_rb:{name}` capacity | WIRE_OK |
-| RGeo | GEOADD/SEARCH, members JSON-encoded | WIRE_OK + live bidirectional ✅ |
+| RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段）; `putAll(mapping,ttl,maxIdle)` per-key、`expireEntry`（拒已过期条目、重写 maxIdle 打包）、`remainTimeToLive`（`-2` 缺失/已过期、`-1` 无过期）; `addListener`/`removeListener` 走独立连接 + `messageBuffer`（u64LE 长度前缀字节保真），写 `has-listeners=1` 使 Java 写端也发布，事件负载以 Buffer 发送; `unlink()` clears all companions | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） + live phase 19（双向事件 ✅、过期语义 ✅） |
+| RMapCacheNative | plain HASH + `HPEXPIRE`/`HPEXPIREAT` + `HPERSIST`/`HPTTL` `FIELDS` (≥7.4); `putIfAbsent`（无 TTL 走 base `hsetnx`/`hget` 脚本；带 TTL 走 4.6.1 guard 脚本 + HPEXPIRE——已有条目保持值与 TTL）、`expireEntry(IfNotSet/IfGreater/IfLess)`（`HPEXPIRE key ms [NX\|GT\|LT] FIELDS 1`，按 Java `expireSet[1] >= 1` 判定）、`clearExpire`（HPERSIST）、`remainTimeToLive`（HPTTL，`-2` 缺失）；4.6.1 Java 对 HPERSIST `-2` 返回 `null`，TS 统一 `false` | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） + live phase 19（条件过期/HPERSIST/putIfAbsent 双向 ✅） |
+| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable); `delete()/clear()` removes idle + touch | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) + live phase 16 (zero residue ✅) |
+| RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids; `delete()/clear()` reads the HASH first and removes every child collection | WIRE_OK + live phase 16 (Java reads empty after delete ✅) |
+| RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE`; `delete()/clear()`/`unlink()` also removes the TTL ZSET and (Native) child collections | WIRE_OK / NATIVE_OK + live phase 16 (zero residue ✅) |
+| RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试; near-cache honours `timeToLiveMs`/`maxIdleMs` (entries track expiry + last access; local reads await subscription ack; LRU/LFU + cache view remain phase 19); Java binary protocol not ported — disable near-cache for mixed deploys | PARTIAL + live phase 16 (TTL/idle ✅) |
+| RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件）; handlers attached before subscribe; Sharded saves conn and supports removeListener/removeAllListeners | WIRE_OK / NATIVE_OK + live phase 4/5/17（Topic/Sharded/Pattern 双向 + lifecycle ✅） |
+| RReliableTopic | STREAM field **`m`** + per-subscriber group + `{name}:timeout`; XREADGROUP BLOCK on a dedicated connection; `unlink()` clears stream+timeout | WIRE_OK + live phase 3/17 (双向投递） |
+| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel; blocking `readGroupWith({blockMs})` uses a dedicated connection | WIRE_OK + live bidirectional ✅ + live phase 13/14/17 ✅ |
+| RDelayedQueue | ZSET `redisson_delay_queue_timeout:{name}` + LIST `redisson_delay_queue:{name}` (`Bc0Lc0`) + channel（offer id 走 Buffer 保真；`size()` = staging LLEN，与 Java 一致；`targetSize()` = 目标队列；`delete()` 只删 staging+timeout，保留目标队列；消费侧迁移由 DelayedQueue 包装类调度：`start()` 起 Java `QueueTransferTask` 同款后台迁移（channel 订阅走 `duplicate()` 连接 + deadline 定时器 + 5s 错误重试 + 迁移 Lua 返回下一表头 deadline），`stop()` 释放、`destroy()` = 摘除任务不删数据；未 `start()` 时 `poll()`/`peek()` 同步补迁移——直接 poll 目标队列仍不会迁移） | WIRE_OK + live phase 3 (双向迁移） + live phase 16 (size/delete ✅) + live phase 21 (后台迁移端到端 ✅) + live cluster (集群下迁移器 ✅) |
+| RRingBuffer | LIST + `redisson_rb:{name}` capacity; `delete()` clears LIST+capacity, `clear()` clears LIST only (Java 4.6.1 parity) | WIRE_OK + live phase 16 (capacity re-init ✅) |
+| RGeo | GEOADD, members JSON-encoded; `GeoSearchArgs` 全族（`from(lon,lat)`/`from(member)`、`radius`/`box`、`order`、`count`/`countAny`）、`search`/`searchWithDistance`/`searchWithPosition`、`storeSearchTo`/`storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）。命令选择对齐 4.6.1 jar：半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`，Box→`GEOSEARCH`，存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE` | WIRE_OK + live bidirectional ✅ + live phase 20 ✅ |
 | RHyperLogLog | PFADD/PFCOUNT/MERGE, members JSON-encoded | NATIVE_OK + live bidirectional ✅ |
-| RBitSet | native MSB-first numbering, no reversal | WIRE_OK |
-| RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2` 无 label；unpack 与 n/t 无关故双向兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节） | WIRE_OK + live phase 3 |
-| RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128 | WIRE_OK + live bidirectional ✅ |
+| RBitSet | native MSB-first numbering, no reversal; `BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化 get/set/increment（signed/unsigned + Byte/Short/Integer/Long 快捷）、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`or/and/xor/not` 回字节长、Redis 8 `diff`/`diffInverse`/`andOr`/`setExclusive`（`BITOP DIFF/DIFF1/ANDOR/ONE`）、`setRange`/`clear(from,to)` 为 `to` 排他 | WIRE_OK + live phase 20 ✅（BITFIELD/BITOP 双向 + Redis 8.6 语义实测） |
+| RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2` 无 label；unpack 与 n/t 无关故双向兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节）；`unlink()` clears ttl/seq | WIRE_OK + live phase 3 |
+| RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128; `unlink()` clears both | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
-| RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads) | WIRE_OK + live shared-window ✅ |
+| RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads); `unlink()` clears value/permits | WIRE_OK + live shared-window ✅ |
 | RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 7 typed facades, reads resolve on execute) | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
 | RSortedSet / RTransaction / RRemoteService / RExecutorService / LiveObject / reactive | — | REFUSE_AS_FAKE |
@@ -72,8 +79,9 @@
 
 ## Verification
 
-- `npm test`: 115 tests — `wire` (codec/names/hash-vectors/struct),
-  mock functional, `interop` (live python codec/hash), `live-interop`
+- `npm test`: 188 tests / 25 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+  mock functional (incl. phase-21 delayed-queue migrator lifecycle), `interop`
+  (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
   permits, shared rate-limiter window), `live-phase3` (rwlock/fenced/delayed/
@@ -92,12 +100,33 @@
   `live-phase12` (batch Lua ops + cross-language reads, 2/2 PASS),
   `live-phase13` (stream groups/pending/claim, 2/2 PASS),
   `live-phase14` (stream add/read opts, nack, ackdel, 2/2 PASS),
-  `live-phase15` (plain-set store ops, union ✅ + gated inter/diff, 2/2 PASS).
-
-  探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
-  （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。
+  `live-phase15` (plain-set store ops; `SOPSTORE self others…` bare-key shape
+  verified against 4.6.1; `countUnion` gated on `SUNIONCARD`, 2/2 PASS),
+  `live-phase16` (companion-key cleanup / DQ size+delete / LCM TTL-idle, 7/7 PASS),
+  `live-phase17` (bounded semaphore / blocking isolation / topic lifecycle, 9/9 PASS),
+  `live-phase18` (BigInt buckets / exact CAS / AtomicDouble / drainTo, 4/4 PASS),
+  `live-phase19` (six key-synchronizer names vs Java / key-lock exclusion both
+  ways / MapCache events both ways / conditional expiry + HPERSIST + putIfAbsent, 5/5 PASS),
+  `live-phase21` (delayed-queue background migrator: channel re-arm on an
+  earlier head, stop halts, destroy keeps data, Java `list-read` cross-check, 1/1 PASS),
+  `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
+  second client contending through slot routing, MapCache TTL + events over the
+  cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).
+- Packaging: `npm run build` emits `dist/cjs` + `dist/esm` (two `tsc` passes,
+  per-dir `package.json` stubs); `npm run pack-smoke` packs the tarball,
+  installs it into a temp consumer and asserts `require`/`import` both resolve
+  and produce identical wire output.
+- Cluster keys: every companion key is hash-tagged (`prefixName`/`suffixName`),
+  so all multi-key Lua/EVAL calls stay single-slot; `live-cluster` runs with an
+  ioredis `Cluster` as the Redisson client (`Config.client` accepts
+  `Redis | Cluster`). Commands missing on the local server are capability-gated
+  via `COMMAND INFO` and logged as SKIP (`XNACK`/`SUNIONCARD` verified live on
+  Redis 8.10.2).
 - Byte-level: HighwayHash vectors + multimap ids asserted equal to
   `redi.py` in-process; Lua scripts ported verbatim from `redi.go`
   (Redisson 4.6.1 verified).
 - Live-Redis suites need Redis at `127.0.0.1:6379` (else skip) and, for the
   Java directions, `mvn` + `interop/` probe (else fail loudly, never silent).
+
+  探针 verdict 键是 JsonJacksonCodec 写入的 bucket——TS 侧读须走 `getBucket().get()`
+  （裸 `GET` 会拿到带引号的 JSON 字符串，对照断言会假失败）。

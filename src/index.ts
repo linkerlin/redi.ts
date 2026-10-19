@@ -1,14 +1,15 @@
-export * from './codec';
-export * from './util';
-export * from './base';
-export * from './collections';
-export * from './atomic';
-export * from './locks';
-export * from './caches';
-export * from './messaging';
-export * from './probabilistic';
-export * from './infra';
-export * from './batch';
-export * from './redisson';
+export * from './codec.js';
+export * from './util.js';
+export * from './base.js';
+export * from './synchronizers.js';
+export * from './collections.js';
+export * from './atomic.js';
+export * from './locks.js';
+export * from './caches.js';
+export * from './messaging.js';
+export * from './probabilistic.js';
+export * from './infra.js';
+export * from './batch.js';
+export * from './redisson.js';
 // Back-compat: historical flat imports
-export { RBucket as RBucketAlias } from './collections';
+export { RBucket as RBucketAlias } from './collections.js';
