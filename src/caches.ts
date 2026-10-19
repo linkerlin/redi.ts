@@ -904,6 +904,43 @@ abstract class RMultimapCacheBase<K = any, V = any> extends RMultimapBase<K, V> 
     await this.redis.zadd(this.timeoutKey, String(now + ttlMs), field);
     return true;
   }
+
+  private evictTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** One sweep over the expiry ZSET: drop every field whose deadline passed
+   *  (child collection + HASH entry + ZSET member). Returns the count. */
+  async evictExpired(): Promise<number> {
+    const now = await serverNowMs(this.redis);
+    const fields = await this.redis.zrangebyscore(this.timeoutKey, 0, now);
+    let removed = 0;
+    for (const field of fields) {
+      const id = await this.redis.hget(this.name, field);
+      if (id !== null) await this.redis.del(this.collKey(id));
+      await this.redis.hdel(this.name, field);
+      await this.redis.zrem(this.timeoutKey, field);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  /** Opt-in client-side purge timer (eviction stays lazy by default — see
+   *  `checkExpiry`). The timer is `unref()`ed and must be stopped with
+   *  `disablePeriodicEviction()` when no longer needed. */
+  enablePeriodicEviction(intervalMs = 1000): void {
+    this.disablePeriodicEviction();
+    const t = setInterval(() => {
+      void this.evictExpired().catch(() => undefined);
+    }, Math.max(50, intervalMs));
+    (t as any).unref?.();
+    this.evictTimer = t;
+  }
+
+  disablePeriodicEviction(): void {
+    if (this.evictTimer !== null) {
+      clearInterval(this.evictTimer);
+      this.evictTimer = null;
+    }
+  }
 }
 
 export class RSetMultimapCache<K = any, V = any> extends RMultimapCacheBase<K, V> {
@@ -930,7 +967,7 @@ export interface LocalCachedMapOptions {
 }
 
 export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
-  private cache = new Map<string, { value: V | null; expireAt: number; lastAccess: number }>();
+  private cache = new Map<string, { value: V | null; expireAt: number; lastAccess: number; hits: number }>();
   private opts: LocalCachedMapOptions;
   private sub: Redis | null = null;
   private clientTag: string;
@@ -951,8 +988,8 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
     return ttl > 0 ? now + ttl : Infinity;
   }
 
-  private buildEntry(value: V | null, now: number): { value: V | null; expireAt: number; lastAccess: number } {
-    return { value, expireAt: this.expiryAt(now), lastAccess: now };
+  private buildEntry(value: V | null, now: number): { value: V | null; expireAt: number; lastAccess: number; hits: number } {
+    return { value, expireAt: this.expiryAt(now), lastAccess: now, hits: 0 };
   }
 
   private isStale(e: { expireAt: number; lastAccess: number }, now: number): boolean {
@@ -1000,14 +1037,43 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
       return undefined;
     }
     e.lastAccess = now;
+    e.hits += 1;
     return e.value;
+  }
+  /** Victim for size-bounded local cache: NONE = FIFO (insertion order, the
+   *  historical behavior); LRU = oldest lastAccess; LFU = fewest accesses
+   *  (ties broken by oldest lastAccess). */
+  private victimField(): string | undefined {
+    const policy = this.opts.evictionPolicy ?? 'NONE';
+    if (policy === 'NONE') return this.cache.keys().next().value;
+    let victim: string | undefined;
+    let bestA = Infinity;
+    let bestB = Infinity;
+    for (const [f, e] of this.cache) {
+      if (policy === 'LFU') {
+        if (e.hits < bestA || (e.hits === bestA && e.lastAccess < bestB)) {
+          victim = f;
+          bestA = e.hits;
+          bestB = e.lastAccess;
+        }
+      } else if (e.lastAccess < bestA) {
+        victim = f;
+        bestA = e.lastAccess;
+      }
+    }
+    return victim;
   }
   private setCached(field: string, value: V | null): void {
     if (this.opts.disableNearCache) return;
     const max = this.opts.maxSize ?? 0;
-    if (max > 0 && !this.cache.has(field) && this.cache.size >= max) {
-      const first = this.cache.keys().next().value;
-      if (first !== undefined) this.cache.delete(first);
+    if (max > 0 && !this.cache.has(field)) {
+      const now = Date.now();
+      for (const [f, e] of this.cache) if (this.isStale(e, now)) this.cache.delete(f);
+      while (this.cache.size >= max) {
+        const victim = this.victimField();
+        if (victim === undefined) break;
+        this.cache.delete(victim);
+      }
     }
     this.cache.set(field, this.buildEntry(value, Date.now()));
   }
@@ -1046,6 +1112,19 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
   }
   async clearLocalCache(): Promise<void> {
     this.cache.clear();
+  }
+  /** Java `getCachedMap()`: snapshot of the live local cache (stale/idle
+   *  entries already dropped; empty when the near cache is disabled). */
+  getCachedMap(): Map<K, V | null> {
+    const now = Date.now();
+    const out = new Map<K, V | null>();
+    for (const [f, e] of this.cache) {
+      if (this.isStale(e, now)) continue;
+      let k: any = f;
+      try { k = this.decodeKey(f); } catch { /* raw field */ }
+      out.set(k, e.value);
+    }
+    return out;
   }
   async clear(): Promise<void> {
     await this.ready;

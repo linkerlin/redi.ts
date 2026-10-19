@@ -55,7 +55,7 @@ describe('live interop TS <-> Java Redisson (real Redis)', () => {
     if (!hasRedis) return;
     // Java writes canonical fixtures for TS to read.
     await mvnProbe(`write-java ${NS}`);
-  });
+  }, 60000); // JVM/Maven cold start under parallel workers can exceed Vitest's 10s default
 
   it('A: TS reads Java-written fixtures', async () => {
     if (!hasRedis) return;

@@ -992,3 +992,193 @@ describe('phase 21: delayed-queue background migrator (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 22: §3 leftovers (mock)', () => {
+  const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
+  const waitFor = async (check: () => Promise<boolean>, timeoutMs: number): Promise<boolean> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (await check()) return true;
+      await sleep(50);
+    }
+    return check();
+  };
+
+  it('fenced tryLockAndGetToken: non-blocking, waiting and contention', async () => {
+    const r = make();
+    const fl = r.getFencedLock('p22:fl');
+    const t1 = await fl.tryLockAndGetToken();
+    expect(t1).not.toBeNull();
+    expect(await fl.getToken()).toBe(t1);
+    await fl.unlock();
+
+    // contended by another thread: non-blocking → null; waiting → null on timeout
+    const held = await fl.lockAndGetToken(30000, 2);
+    expect(held).not.toBeNull();
+    expect(await fl.tryLockAndGetToken(0, 30000, 1)).toBeNull();
+    const waited = await fl.tryLockAndGetToken(120, 30000, 1);
+    expect(waited).toBeNull();
+    await fl.unlock(2);
+
+    // free again: waiting form succeeds immediately
+    const t2 = await fl.tryLockAndGetToken(500);
+    expect(t2).not.toBeNull();
+    expect(t2!).toBeGreaterThan(t1!);
+    await fl.unlock();
+    await r.shutdown();
+  });
+
+  it('blocking queue pollFromAny family + deque move/BLMOVE', async () => {
+    const r = make();
+    const q = r.getBlockingQueue<string>('p22:q');
+    const other = r.getBlockingQueue<string>('p22:q2');
+    await q.offer('a');
+    await q.offer('b');
+    expect(await q.pollFromAny(0, 'p22:q2')).toBe('a'); // this queue has priority
+    await other.offer('x');
+    // own queue still has 'b' → argument order wins over the other queue
+    expect(await q.pollFromAnyWithName(0, 'p22:q2')).toEqual({ key: 'p22:q', value: 'b' });
+    expect(await q.pollFromAnyWithName(0, 'p22:q2')).toEqual({ key: 'p22:q2', value: 'x' });
+    expect(await q.pollFromAny(0, 'p22:q2')).toBeNull(); // both empty, non-blocking
+
+    await q.offer('1');
+    await q.offer('2');
+    expect((await q.pollFirstFromAny(0, 2)).get('p22:q')).toEqual(['1', '2']);
+    await q.offer('3');
+    await q.offer('4');
+    expect((await q.pollLastFromAny(0, 2)).get('p22:q')).toEqual(['4', '3']);
+    // empty + non-blocking → empty map
+    expect((await q.pollFirstFromAny(0, 1)).size).toBe(0);
+
+    const d = r.getBlockingDeque<string>('p22:d');
+    const d2 = r.getBlockingDeque<string>('p22:d2');
+    await d.add('h');
+    await d.add('t'); // d=[h, t]
+    expect(await d.move('p22:d2', 'RIGHT', 'LEFT')).toBe('t'); // d=[h], d2=[t]
+    expect(await d2.peekFirst()).toBe('t');
+    // BLMOVE back: d2=[], d=[h, t] (non-blocking timeout=0 path)
+    expect(await d2.moveWithTimeout('p22:d', 'LEFT', 'RIGHT', 0)).toBe('t');
+    expect(await d2.size()).toBe(0);
+    expect(await d.pollLastAndOfferFirstTo('p22:d2', 0)).toBe('t'); // d=[h], d2=[t]
+    expect(await d.takeLastAndOfferFirstTo('p22:d2')).toBe('h'); // d=[], d2=[t, h]
+    expect(await d.size()).toBe(0);
+    // empty source with a deadline: polling fallback returns null in time
+    const t0 = Date.now();
+    expect(await d.moveWithTimeout('p22:d2', 'LEFT', 'RIGHT', 100)).toBeNull();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(80);
+    await r.shutdown();
+  });
+
+  it('rate limiter keepAlive is renewed on every successful acquire', async () => {
+    const r = make();
+    const rl = r.getRateLimiter('p22:rl');
+    await rl.setRate('OVERALL', 10, 1000, 3000);
+    expect(await rl.tryAcquire()).toBe(true);
+    const valueKey = suffixName('p22:rl', 'value');
+    const permitsKey = suffixName('p22:rl', 'permits');
+    for (const k of ['p22:rl', valueKey]) {
+      const ttl = await r.redis.pttl(k);
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(3000);
+    }
+    // a later successful acquire pushes the TTL back to ~keepAlive
+    await sleep(60);
+    expect(await rl.tryAcquire()).toBe(true);
+    expect(await r.redis.pttl(valueKey)).toBeGreaterThan(2900);
+    // permits ZSET exists only on real Redis (mock's Lua has no struct.pack)
+    if ((await r.redis.exists(permitsKey)) === 1) {
+      expect(await r.redis.pttl(permitsKey)).toBeGreaterThan(2900);
+    }
+    await r.shutdown();
+  });
+
+  it('local cached map: LRU/LFU eviction + getCachedMap snapshot', async () => {
+    const r = make();
+    const lru = r.getLocalCachedMap<string, string>('p22:lcm-lru', { maxSize: 2, evictionPolicy: 'LRU' });
+    await lru.put('a', '1');
+    await lru.put('b', '2');
+    await sleep(15);
+    expect(await lru.get('a')).toBe('1'); // a becomes most recently used
+    await lru.put('c', '3'); // evicts b, not a
+    expect([...lru.getCachedMap().keys()].sort()).toEqual(['a', 'c']);
+    await r.redis.hset('p22:lcm-lru', '"b"', '"fresh-b"');
+    expect(await lru.get('b')).toBe('fresh-b'); // b was evicted → fresh read
+    // ... and caching b now evicts a (older than c), proving LRU order
+    expect([...lru.getCachedMap().keys()].sort()).toEqual(['b', 'c']);
+
+    const lfu = r.getLocalCachedMap<string, string>('p22:lcm-lfu', { maxSize: 2, evictionPolicy: 'LFU' });
+    await lfu.put('a', '1');
+    await lfu.put('b', '2');
+    await lfu.get('a');
+    await lfu.get('a'); // a: 2 accesses, b: 0
+    await lfu.put('c', '3'); // evicts b (fewest accesses)
+    expect([...lfu.getCachedMap().keys()].sort()).toEqual(['a', 'c']);
+    await r.redis.hset('p22:lcm-lfu', '"b"', '"fresh-b"');
+    expect(await lfu.get('b')).toBe('fresh-b');
+    // caching b evicts c (0 hits), never the hot a (2 hits)
+    expect([...lfu.getCachedMap().keys()].sort()).toEqual(['a', 'b']);
+    await r.redis.hset('p22:lcm-lfu', '"a"', '"stale-a"');
+    expect(await lfu.get('a')).toBe('1'); // a survived, still cached
+    await r.shutdown();
+  });
+
+  it('multimap cache periodic eviction sweeps expired children without a read', async () => {
+    const r = make();
+    const mm = r.getSetMultimapCache<string, string>('p22:mm');
+    await mm.put('k1', 'v1');
+    await mm.put('k2', 'v2');
+    expect(await r.redis.hlen('p22:mm')).toBe(2);
+    await mm.expireKey('k1', 100);
+    mm.enablePeriodicEviction(50);
+    try {
+      expect(await waitFor(async () => (await r.redis.hlen('p22:mm')) === 1, 2000)).toBe(true);
+      expect(await r.redis.zcard(suffixName('p22:mm', 'redisson_set_multimap_ttl'))).toBe(0);
+    } finally {
+      mm.disablePeriodicEviction();
+    }
+    await r.shutdown();
+  });
+
+  it('batch facades: deque/atomic double/bitset/stream/mapcachenative', async () => {
+    const r = make();
+    const batch = r.createBatch();
+    const d = batch.getDeque<number>('p22:bdq');
+    d.offerFirst(1);
+    d.offerLast(2);
+    const df = d.pollFirst();
+    const dl = d.pollLast();
+    const dsz = d.size();
+    const ad = batch.getAtomicDouble('p22:bad');
+    ad.set(1.5);
+    const aplus = ad.addAndGet(0.25);
+    const aget = ad.get();
+    const bs = batch.getBitSet('p22:bbs');
+    const bset = bs.set(3);
+    const bget = bs.get(3);
+    const bcard = bs.cardinality();
+    const bsize = bs.size();
+    const st = batch.getStream('p22:bst');
+    const sid = st.add({ a: 1 });
+    const ssz = st.size();
+    const mc = batch.getMapCacheNative<string, number>('p22:bmc');
+    const mput = mc.put('k', 5);
+    const mget = mc.get('k');
+    const mrm = mc.remove('k');
+    await batch.execute();
+    expect(await df).toBe(1);
+    expect(await dl).toBe(2);
+    expect(await dsz).toBe(0);
+    expect(await aplus).toBeCloseTo(1.75, 10);
+    expect(await aget).toBeCloseTo(1.75, 10);
+    expect(await bset).toBe(false); // previous bit value
+    expect(await bget).toBe(true);
+    expect(await bcard).toBe(1);
+    expect(await bsize).toBe(8);
+    expect(String(await sid)).toMatch(/^\d+-\d+$/);
+    expect(await ssz).toBe(1);
+    expect(await mput).toBeNull();
+    expect(await mget).toBe(5);
+    expect(await mrm).toBe(5);
+    await r.shutdown();
+  });
+});

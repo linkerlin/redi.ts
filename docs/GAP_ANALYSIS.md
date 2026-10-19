@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.0.0（2026-10-19）更新 RSet store 形状、`RDelayedQueue` 后台迁移器与阶段 21 条目。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.1.0（2026-10-19）更新阶段 22 收口项（FencedLock `tryLockAndGetToken`、阻塞队列 pollFromAny 族、RateLimiter keepAlive、LocalCachedMap LRU/LFU、MultimapCache 周期清扫、RBatch 13 门面）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -39,9 +39,9 @@
 
 **`RMapCacheNative`**（现有 4 个 vs ~38）：`putIfAbsent(key, value, ttl)`、`expireEntry(IfNotSet/IfGreater/IfLess)` + `clearExpire` + `remainTimeToLive`（`-2` 缺失）✅ (1.4.0)；仍缺条件写全族其余变体、`Instant` 绝对过期、`PutArgs` 批量、`compute*`。注：Java 4.6.1 对 HPERSIST `-2` 回 `null`，TS 统一 `false`（boolean 契约）。
 
-**`RBlockingQueue/Deque`**：`pollFromAny` 全族（`BLMPOP`）、`pollLastAndOfferFirstTo`（`BLMOVE`）全缺；亚秒超时被 `ceil(ms/1000)` 放大到整秒，且 `timeoutMs<=0` 反转为无限阻塞；`take` 占整条连接（须 `duplicate()`）；`drainTo` 非原子（并发尾部追加可丢）。
+**`RBlockingQueue/Deque`**：`pollFromAny`/`pollFromAnyWithName`（BLPOP）、`pollFirstFromAny`/`pollLastFromAny`（BLMPOP + COUNT）、`pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo`（BLMOVE）、deque `move`/`moveWithTimeout`（LMOVE/BLMOVE）✅ (2.1.0)；亚秒超时/`timeoutMs<=0` 语义、`take` 独立连接、`drainTo` 原子化均已在 v1.2.0/v1.3.0 修正 ✅。仍缺 Java 4.6.1 的 `pollLastFromAnyWithName(Duration, names...)` 与 `subscribeOnElements/unsubscribe` 元素订阅。
 
-**`RLock` 面**：`lockInterruptibly` 全族、`tryLock` 四重载分解（TS 三参合一）、`*Async` 命名、`newCondition`、`RObservable.addListener`；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 缺 `tryLockAndGetToken` 四重载（且 TS `lockAndGetToken` 是 try-only，Java 默认阻塞——默认语义反转）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock` 缺 drift 扣减。
+**`RLock` 面**：`lockInterruptibly` 全族、`tryLock` 四重载分解（TS 三参合一）、`*Async` 命名、`newCondition`、`RObservable.addListener`；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock` 缺 drift 扣减。
 
 **`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`StatusListener`、`countListeners`（vs `PUBSUB NUMSUB` 语义不同）、按实例删除、`Class<M>` 类型门控；`RShardedTopic.addListener` 无 subs 管理恒返 1；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
 
@@ -67,13 +67,17 @@
 
 **`RAtomic*`**：Double 缺 `increment/decrement/getAndDelete/compareAndDelete`；两者缺 `setIfLess/setIfGreater/IncrementArgs/addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
-**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；缺 `preloadCache(count)`、本地缓存视图、LRU/LFU 策略、重连策略、Caffeine、`loader/writer`、过期事件策略。
+**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；仍缺 `preloadCache(count)`、重连策略、Caffeine、`loader/writer`、过期事件策略。
+
+**`RRateLimiter`**：`keepAliveTime` 续期 ✅ (2.1.0，acquire 脚本内 `PEXPIRE` config/value/permits；keepAlive=0 时 value/permits 继承 config HASH 的 TTL，与 Java 4.6.1 一致)。
+
+**`RMultimapCache`**：可选周期清扫 ✅ (2.1.0，`enablePeriodicEviction(intervalMs)` / `evictExpired()` / `disablePeriodicEviction()`；默认仍为 `checkExpiry` 惰性)。
 
 **`RDelayedQueue`**：`size()` 已对齐 Java（staging LLEN）✅、`delete()` 不再误删目标队列 ✅ (1.1.0)；**后台迁移调度器 ✅ (2.0.0)**：`start()/stop()/destroy()`（Java `QueueTransferTask`/`QueueTransferService` 移植——channel 订阅走 `duplicate()` 连接、deadline 定时器 >10ms 定时否则立即、5s 错误重试、迁移 Lua 返回下一表头 deadline 重臂；`destroy()` = 摘除任务不删数据），单机 + 集群实测；仍缺 `readAll/poll(limit)/move/addListener`、负延迟校验。
 
 **`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；`delete()` override 已补 ✅ (1.1.0，容量 key 与 LIST 一并清理；`clear()` 保持 Java 只删 LIST)。
 
-**`RBatch`**：类型覆盖已补常用 7 类 ✅ (1.8.5：`BatchBucket/Map/List/Set/Queue/AtomicLong/ScoredSortedSet`，写排队、读在 `execute()` 后 resolve，对齐 RFuture；Lua 版 ops 走 live 测，mock pipeline 无 `eval`)；读回占位非即时值；pub/sub 不可进 batch（`duplicate()` 真实连接）。
+**`RBatch`**：类型覆盖已补 13 类 ✅ (2.1.0：原 7 类 + `BatchDeque/AtomicDouble/BitSet/Geo/Stream/MapCacheNative`，写排队、读在 `execute()` 后 resolve，对齐 RFuture；`BatchAtomicDouble.getAndAdd` 单 Lua 精确旧值、native map-cache `HPEXPIRE FIELDS` 字段 TTL；Lua 版 ops 走 live 测，mock pipeline 无 `eval`)；仍存读回占位非即时值；pub/sub 不可进 batch（`duplicate()` 真实连接）。
 
 ## §3 P2（统一三刀，见报告正文）
 
@@ -93,5 +97,6 @@
 - **阶段 19（已完成 ✅，v1.4.0）**：Key 级同步器家族（6 种，命名与 Java 4.6.1 逐字节一致）、RW 视图补齐与 `LockPubSub` 唤醒常量对齐、`RMultiLock/RRedLock` 接受 `LockLike`、`RMapCache` `putAll/expireEntry/remainTimeToLive` 与双向事件监听、`RMapCacheNative` 条件过期/HPERSIST；验证见 `test/wire.test.ts` + `test/redisson.test.ts` + `test/live-phase19.test.ts`。
 - **阶段 20（已完成 ✅，v1.5.0）**：`TsProbe` REPL 常驻化（全量 live 测试 673s → 56.9s）、`RMap` HSCAN 异步迭代器 + `HRANDFIELD`/`HSTRLEN`、`RScoredSortedSet` 分数族与反向区间/分数删除、`RBitSet` `BITFIELD` 与 Redis 8 `BITOP` 族、`RGeo` `GeoSearchArgs` 族与 `GEOSEARCHSTORE`；验证见 `test/redisson.test.ts` + `test/live-phase20.test.ts`。
 - **阶段 21（已完成 ✅，v2.0.0）**：ESM+CJS 双格式构建与 `pack-smoke` 验收、`Config.client` 接受 `Redis | Cluster`（导出 `RedisClient`）及约 87 处内部 cast 清理、`RDelayedQueue` 后台迁移器（Java `QueueTransferTask` 移植，单机+集群实测）、`RSet` store wire 修复（4.6.1 裸键形状）、缺失命令能力门控（`COMMAND INFO` + SKIP 日志，`XNACK`/`SUNIONCARD` 在 Redis 8.10.2 实测通过）、3 主节点集群实测（`test/live-cluster.test.ts`）；验证见 `test/redisson.test.ts` + `test/live-phase21.test.ts` + `test/live-cluster.test.ts`。
+- **阶段 22（已完成 ✅，v2.1.0）**：`RFencedLock.tryLockAndGetToken`（4.6.1 非阻塞/等待语义，Java token 序列互通）、阻塞队列/双端队列 `pollFromAny`/BLMPOP/LMOVE/BLMOVE 全族、`RRateLimiter` keepAlive 脚本内续期（keepAlive=0 时继承 config TTL）、`RLocalCachedMap` LRU/LFU 淘汰 + `getCachedMap()` 视图、`RMultimapCache` 可选周期清扫、`RBatch` 门面扩至 13 类；验证见 `test/redisson.test.ts` + `test/live-phase22.test.ts`（5/5，含 Java 4.6.1 交叉断言）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

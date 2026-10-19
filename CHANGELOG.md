@@ -1,3 +1,43 @@
+## 2.1.0 — 2026-10-19
+
+Phase 22: closes every remaining row of 演进方案 §3 (API depth). Full suite:
+**199 tests / 26 files green in ~65 s**.
+
+- **`RFencedLock.tryLockAndGetToken(waitTimeMs?, leaseTimeMs?, threadId?)`** —
+  Java 4.6.1 shape (omitted/zero `waitTimeMs` = single non-blocking attempt,
+  otherwise wait up to the deadline). Token sequence cross-checked with the
+  `fenced-token` Java probe: TS `n` → Java `n+1` → TS `n+2`.
+- **`RBlockingQueue` / `RBlockingDeque` blocking ops**:
+  `pollFromAny` / `pollFromAnyWithName` (BLPOP over this queue + names in
+  argument order), `pollFirstFromAny` / `pollLastFromAny` (BLMPOP + `COUNT`,
+  result keyed by source queue), `pollLastAndOfferFirstTo` /
+  `takeLastAndOfferFirstTo` (BLMOVE RIGHT→LEFT); deque `move` (LMOVE) and
+  `moveWithTimeout` (BLMOVE). Blocking paths use `duplicate()` + float-second
+  Redis timeouts; unsupported mock commands fall back to polling. `timeout 0`
+  is a non-blocking scan, `null` blocks forever.
+- **`RRateLimiter` keepAlive**: renewal moved into the 4.6.1 acquire script —
+  a successful acquire PEXPIREs config/value/permits to `keepAliveTime`;
+  with keepAlive 0 but a TTL on the config HASH, companions inherit that TTL
+  (same `else` branch as Java). Verified by interleaving TS and Java acquires:
+  both renew the shared keys.
+- **`RLocalCachedMap`**: `evictionPolicy: 'LRU' | 'LFU'` is now actually
+  enforced under `maxSize` (LRU = oldest `lastAccess`; LFU = fewest accesses,
+  ties by oldest access). `getCachedMap()` returns a snapshot of the live
+  near-cache with decoded keys and stale entries dropped.
+- **`RMultimapCache`**: opt-in `enablePeriodicEviction(intervalMs)` /
+  `disablePeriodicEviction()` plus public `evictExpired()` — removes child
+  collection + HASH field + TTL ZSET member in one sweep. Default stays lazy.
+- **`RBatch`**: six new typed facades (13 total): `getDeque`,
+  `getAtomicDouble`, `getBitSet`, `getGeo`, `getStream`, `getMapCacheNative`.
+  `BatchAtomicDouble.getAndAdd` returns the float-exact old value from one Lua
+  script; native map-cache `put`/`fastPut` support field TTL via
+  `HPEXPIRE ... FIELDS`.
+- Tests: 6 mock regressions + `test/live-phase22.test.ts` 5/5 (fenced token
+  sequence vs Java, real BLPOP/BLMPOP/BLMOVE wake-ups, keepAlive renewal by
+  both implementations, periodic multimap sweep without a read, batch wire
+  incl. GEO and `HPEXPIRE`/`HPTTL`). `live-interop` gained a 60 s `beforeAll`
+  timeout so JVM cold-start jitter cannot flake the full parallel suite.
+
 ## 2.0.0 — 2026-10-19
 
 Phase 21: modern packaging (ESM + CJS), a real Redis Cluster test pass, and

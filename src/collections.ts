@@ -617,25 +617,133 @@ function createChannelWaker(conn: Redis, channel: string): ChannelWaker {
   };
 }
 
-/** BLPOP/BRPOP on a dedicated connection. `timeoutMs === null` blocks forever;
- * `<= 0` is non-blocking (LPOP/RPOP); positive values use Redis 6+ float
- * seconds. Mock clients without BLPOP fall back to short-interval polling. */
-async function blockingListPop(
+export type ListSide = 'LEFT' | 'RIGHT';
+
+function popOne(conn: Redis, name: string, side: ListSide): Promise<string | null> {
+  return side === 'LEFT' ? conn.lpop(name) : conn.rpop(name);
+}
+
+async function scanPop(redis: Redis, names: string[], side: ListSide): Promise<{ key: string; value: string } | null> {
+  for (const name of names) {
+    const value = await popOne(redis, name, side);
+    if (value !== null) return { key: name, value };
+  }
+  return null;
+}
+
+/** Blocking multi-key pop (BLPOP/BRPOP). `timeoutMs === null` blocks forever;
+ *  `<= 0` is a non-blocking scan in argument order (matching Redis BLPOP key
+ *  priority). Mock clients without BLPOP fall back to short-interval polling. */
+async function blockingListPopFrom(
   redis: Redis,
-  name: string,
-  side: 'left' | 'right',
+  names: string[],
+  side: ListSide,
+  timeoutMs: number | null,
+): Promise<{ key: string; value: string } | null> {
+  if (timeoutMs !== null && timeoutMs <= 0) return scanPop(redis, names, side);
+  const immediate = await scanPop(redis, names, side);
+  if (immediate !== null) return immediate;
+
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<{ key: string; value: string } | null> => {
+      for (;;) {
+        const r = await scanPop(redis, names, side);
+        if (r !== null) return r;
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const cmd = side === 'LEFT' ? 'blpop' : 'brpop';
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r: any = await (conn as any)[cmd](...names, seconds);
+      if (r === null || r === undefined) return null;
+      return Array.isArray(r) ? { key: String(r[0]), value: String(r[1]) } : { key: names[0], value: String(r) };
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
+}
+
+/** Blocking multi-key, multi-value pop (BLMPOP). Returns the source key and at
+ *  least one value. `timeoutMs === null` blocks forever; `<= 0` is a
+ *  non-blocking scan. Falls back to polling without BLMPOP (mock). */
+async function blockingListMultiPop(
+  redis: Redis,
+  names: string[],
+  side: ListSide,
+  count: number,
+  timeoutMs: number | null,
+): Promise<{ key: string; values: string[] } | null> {
+  const scan = async (): Promise<{ key: string; values: string[] } | null> => {
+    for (const name of names) {
+      const values: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const v = await popOne(redis, name, side);
+        if (v === null) break;
+        values.push(v);
+      }
+      if (values.length > 0) return { key: name, values };
+    }
+    return null;
+  };
+  if (timeoutMs !== null && timeoutMs <= 0) return scan();
+  const immediate = await scan();
+  if (immediate !== null) return immediate;
+
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<{ key: string; values: string[] } | null> => {
+      for (;;) {
+        const r = await scan();
+        if (r !== null) return r;
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r: any = await (conn as any).blmpop(seconds, names.length, ...names, side, 'COUNT', count);
+      if (r === null || r === undefined) return null;
+      const key = String(r[0]);
+      const vals = Array.isArray(r[1]) ? r[1] : [r[1]];
+      return { key, values: vals.map((x: any) => String(x)) };
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
+}
+
+/** Blocking LMOVE (BLMOVE). `timeoutMs === null` blocks forever; `<= 0` is a
+ *  non-blocking LMOVE. Mock clients without BLMOVE fall back to polling. */
+async function blockingListMove(
+  redis: Redis,
+  src: string,
+  dest: string,
+  from: ListSide,
+  to: ListSide,
   timeoutMs: number | null,
 ): Promise<string | null> {
-  const pop = (conn: Redis) => (side === 'left' ? conn.lpop(name) : conn.rpop(name));
-  if (timeoutMs !== null && timeoutMs <= 0) return pop(redis);
-  const immediate = await pop(redis);
+  const move = async (conn: Redis): Promise<string | null> => {
+    const r: any = await (conn as any).lmove(src, dest, from, to);
+    return r === undefined ? null : r;
+  };
+  if (timeoutMs !== null && timeoutMs <= 0) return move(redis);
+  const immediate = await move(redis);
   if (immediate !== null) return immediate;
 
   return withDedicatedRedis(redis, async (conn, dedicated) => {
     const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
     const poll = async (): Promise<string | null> => {
       for (;;) {
-        const v = await pop(redis);
+        const v = await move(redis);
         if (v !== null) return v;
         const remain = deadline === Infinity ? 50 : deadline - Date.now();
         if (remain <= 0) return null;
@@ -644,15 +752,27 @@ async function blockingListPop(
     };
     if (!dedicated) return poll();
     try {
-      const cmd = side === 'left' ? 'blpop' : 'brpop';
       const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
-      const r = await (conn as any)[cmd](name, seconds);
-      return r ? (Array.isArray(r) ? r[1] : r) : null;
+      const r: any = await (conn as any).blmove(src, dest, from, to, seconds);
+      return r === undefined ? null : r;
     } catch (e) {
       if (!isUnsupportedCommand(e)) throw e;
       return poll();
     }
   });
+}
+
+/** BLPOP/BRPOP on a dedicated connection. `timeoutMs === null` blocks forever;
+ * `<= 0` is non-blocking (LPOP/RPOP); positive values use Redis 6+ float
+ * seconds. Mock clients without BLPOP fall back to short-interval polling. */
+async function blockingListPop(
+  redis: Redis,
+  name: string,
+  side: ListSide,
+  timeoutMs: number | null,
+): Promise<string | null> {
+  const r = await blockingListPopFrom(redis, [name], side, timeoutMs);
+  return r === null ? null : r.value;
 }
 
 const QUEUE_DRAIN = `local max = tonumber(ARGV[1])
@@ -671,12 +791,12 @@ return vals`;
 export class RBlockingQueue<V = any> extends RQueue<V> {
   async take(): Promise<V> {
     for (;;) {
-      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      const raw = await blockingListPop(this.redis, this.name, 'LEFT', null);
       if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async pollWithTimeout(timeoutMs: number): Promise<V | null> {
-    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    const raw = await blockingListPop(this.redis, this.name, 'LEFT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
   async put(value: V): Promise<void> {
@@ -691,28 +811,102 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
     for (const v of all) await target.offer(this.decodeValue(v) as V);
     return all.length;
   }
+  /** Java `RBlockingQueue.pollFromAny(timeout, unit, queueNames...)`: BLPOP
+   *  over this queue plus the given ones (this one first). `timeoutMs === null`
+   *  blocks forever; `<= 0` is a non-blocking scan. */
+  async pollFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<V | null> {
+    const r = await blockingListPopFrom(this.redis, [this.name, ...otherNames], 'LEFT', timeoutMs);
+    return r === null ? null : (this.decodeValue(r.value) as V);
+  }
+  /** Java `pollFromAnyWithName(Duration, queueNames...)`: value plus the source
+   *  queue name that produced it. */
+  async pollFromAnyWithName(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V } | null> {
+    const r = await blockingListPopFrom(this.redis, [this.name, ...otherNames], 'LEFT', timeoutMs);
+    return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V };
+  }
+  /** Java `pollFirstFromAny(Duration, count, queueNames...)`: BLMPOP LEFT with
+   *  `COUNT count`; the result maps the source queue to its popped values (at
+   *  most one entry — the pop is atomic on one queue). */
+  async pollFirstFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, V[]>> {
+    const r = await blockingListMultiPop(this.redis, [this.name, ...otherNames], 'LEFT', Math.max(1, count), timeoutMs);
+    const out = new Map<string, V[]>();
+    if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
+    return out;
+  }
+  /** Java `pollLastFromAny(Duration, count, queueNames...)`: BLMPOP RIGHT. */
+  async pollLastFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, V[]>> {
+    const r = await blockingListMultiPop(this.redis, [this.name, ...otherNames], 'RIGHT', Math.max(1, count), timeoutMs);
+    const out = new Map<string, V[]>();
+    if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
+    return out;
+  }
+  /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT
+   *  from this queue to `dest`. `timeoutMs === null` blocks forever. */
+  async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null> {
+    const raw = await blockingListMove(this.redis, this.name, dest, 'RIGHT', 'LEFT', timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `takeLastAndOfferFirstTo(dest)`: BLMOVE RIGHT→LEFT, block forever. */
+  async takeLastAndOfferFirstTo(dest: string): Promise<V | null> {
+    return this.pollLastAndOfferFirstTo(dest, null);
+  }
 }
 
 export class RBlockingDeque<V = any> extends RDeque<V> {
   async takeFirst(): Promise<V> {
     for (;;) {
-      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      const raw = await blockingListPop(this.redis, this.name, 'LEFT', null);
       if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async takeLast(): Promise<V> {
     for (;;) {
-      const raw = await blockingListPop(this.redis, this.name, 'right', null);
+      const raw = await blockingListPop(this.redis, this.name, 'RIGHT', null);
       if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
   async pollFirstWithTimeout(timeoutMs: number): Promise<V | null> {
-    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    const raw = await blockingListPop(this.redis, this.name, 'LEFT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
   async pollLastWithTimeout(timeoutMs: number): Promise<V | null> {
-    const raw = await blockingListPop(this.redis, this.name, 'right', timeoutMs);
+    const raw = await blockingListPop(this.redis, this.name, 'RIGHT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `RBlockingDeque.move(Duration, DequeMoveArgs)` → LMOVE: atomically
+   *  pop one element from `from` here and push it to `to` of `dest` (no
+   *  blocking; `null` when this deque is empty). */
+  async move(dest: string, from: ListSide = 'LEFT', to: ListSide = 'LEFT'): Promise<V | null> {
+    const raw = await blockingListMove(this.redis, this.name, dest, from, to, 0);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Blocking LMOVE (`BLMOVE`). `timeoutMs === null` blocks forever. */
+  async moveWithTimeout(dest: string, from: ListSide, to: ListSide, timeoutMs: number | null): Promise<V | null> {
+    const raw = await blockingListMove(this.redis, this.name, dest, from, to, timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `pollFirstFromAny(Duration, count, queueNames...)`: BLMPOP LEFT. */
+  async pollFirstFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, V[]>> {
+    const r = await blockingListMultiPop(this.redis, [this.name, ...otherNames], 'LEFT', Math.max(1, count), timeoutMs);
+    const out = new Map<string, V[]>();
+    if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
+    return out;
+  }
+  /** Java `pollLastFromAny(Duration, count, queueNames...)`: BLMPOP RIGHT. */
+  async pollLastFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, V[]>> {
+    const r = await blockingListMultiPop(this.redis, [this.name, ...otherNames], 'RIGHT', Math.max(1, count), timeoutMs);
+    const out = new Map<string, V[]>();
+    if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
+    return out;
+  }
+  /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT. */
+  async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null> {
+    const raw = await blockingListMove(this.redis, this.name, dest, 'RIGHT', 'LEFT', timeoutMs);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `takeLastAndOfferFirstTo(dest)`: BLMOVE RIGHT→LEFT, block forever. */
+  async takeLastAndOfferFirstTo(dest: string): Promise<V | null> {
+    return this.pollLastAndOfferFirstTo(dest, null);
   }
 }
 
@@ -851,7 +1045,7 @@ export class RBoundedBlockingQueue<V = any> extends RBlockingQueue<V> {
 
   override async take(): Promise<V> {
     for (;;) {
-      const raw = await blockingListPop(this.redis, this.name, 'left', null);
+      const raw = await blockingListPop(this.redis, this.name, 'LEFT', null);
       if (raw !== null) {
         await this.releaseCapacity(1);
         return this.decodeValue(raw) as V;
@@ -861,7 +1055,7 @@ export class RBoundedBlockingQueue<V = any> extends RBlockingQueue<V> {
 
   override async pollWithTimeout(timeoutMs: number): Promise<V | null> {
     if (timeoutMs <= 0) return this.poll();
-    const raw = await blockingListPop(this.redis, this.name, 'left', timeoutMs);
+    const raw = await blockingListPop(this.redis, this.name, 'LEFT', timeoutMs);
     if (raw === null) return null;
     await this.releaseCapacity(1);
     return this.decodeValue(raw) as V;

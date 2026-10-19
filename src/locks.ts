@@ -1289,6 +1289,13 @@ export class RFencedLock extends RLock {
       if (t !== null) return t;
     }
   }
+  /** Java `RFencedLock.tryLockAndGetToken(...)`: without `waitTimeMs` it is a
+   *  single non-blocking attempt (null when contended); with it, waits up to
+   *  `waitTimeMs`. Returns the fencing token, or null on timeout. */
+  async tryLockAndGetToken(waitTimeMs?: number, leaseTimeMs?: number, threadId: number | string = 1): Promise<number | null> {
+    if (waitTimeMs === undefined || waitTimeMs <= 0) return this.lockAndGetToken(leaseTimeMs, threadId);
+    return this.lockWaitAndGetToken(waitTimeMs, leaseTimeMs, threadId);
+  }
   async getToken(): Promise<number> {
     const v = await this.redis.get(this.tokenKey);
     return v === null ? 0 : Number(v);

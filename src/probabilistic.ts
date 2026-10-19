@@ -909,6 +909,18 @@ if value >= permits then
     redis.call('zadd', KEYS[2], now, member)
     redis.call('set', KEYS[1], value - permits)
     redis.call('pexpire', KEYS[2], interval * 2)
+    local keepAliveTime = redis.call('hget', KEYS[3], 'keepAliveTime')
+    if keepAliveTime ~= false and tonumber(keepAliveTime) > 0 then
+        redis.call('pexpire', KEYS[3], keepAliveTime)
+        redis.call('pexpire', KEYS[1], keepAliveTime)
+        redis.call('pexpire', KEYS[2], keepAliveTime)
+    else
+        local ttl = redis.call('pttl', KEYS[3])
+        if ttl > 0 then
+            redis.call('pexpire', KEYS[1], ttl)
+            redis.call('pexpire', KEYS[2], ttl)
+        end
+    end
     return 1
 end
 redis.call('set', KEYS[1], value)
@@ -992,8 +1004,9 @@ export class RRateLimiter extends RedisDataStructure {
     const id = randomBytes(16).toString('hex');
     void packRatePermit;
     try {
-      const n = toNumber(await luaEval(this.redis, RATE_ACQUIRE, 2, this.valueKey(), this.permitsKey(),
+      const n = toNumber(await luaEval(this.redis, RATE_ACQUIRE, 3, this.valueKey(), this.permitsKey(), this.name,
         String(now), String(this.interval), String(this.rate), id, String(permits)));
+      // The 4.6.1 script renews keepAlive itself (same atomic write); no extra round trip.
       return n === 1;
     } catch {
       // mock fallback: token bucket via counter
@@ -1002,10 +1015,21 @@ export class RRateLimiter extends RedisDataStructure {
       const avail = cur === null ? this.rate : Number(cur);
       if (avail >= permits) {
         await this.redis.set(key, String(avail - permits));
+        await this.refreshKeepAlive();
         return true;
       }
       return false;
     }
+  }
+  /** Java `keepAliveTime`: every successful acquisition extends the TTL of the
+   *  config HASH and of both active value/permits keys (mirrors redi.go). */
+  private async refreshKeepAlive(): Promise<void> {
+    if (this.keepAlive <= 0) return;
+    try {
+      await this.redis.pexpire(this.name, this.keepAlive);
+      await this.redis.pexpire(this.valueKey(), this.keepAlive);
+      await this.redis.pexpire(this.permitsKey(), this.keepAlive);
+    } catch { /* noop */ }
   }
   async acquire(permits = 1): Promise<void> {
     for (;;) {

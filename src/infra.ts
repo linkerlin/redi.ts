@@ -7,7 +7,7 @@ import { RedisDataStructure } from './base.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import { luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
-import { BatchAtomicLong, BatchBucket, BatchList, BatchMap, BatchQueue, BatchScoredSortedSet, BatchSet } from './batch.js';
+import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchDeque, BatchGeo, BatchList, BatchMap, BatchMapCacheNative, BatchQueue, BatchScoredSortedSet, BatchSet, BatchStream } from './batch.js';
 
 // -- RKeys -----------------------------------------------------------------------
 
@@ -474,6 +474,24 @@ export class RBatch {
   }
   getAtomicLong(name: string): BatchAtomicLong {
     return new BatchAtomicLong(this, name);
+  }
+  getAtomicDouble(name: string): BatchAtomicDouble {
+    return new BatchAtomicDouble(this, name);
+  }
+  getDeque<V>(name: string, codec?: Codec): BatchDeque<V> {
+    return new BatchDeque<V>(this, name, codec ?? new JsonCodec());
+  }
+  getBitSet(name: string): BatchBitSet {
+    return new BatchBitSet(this, name);
+  }
+  getGeo<V>(name: string, codec?: Codec): BatchGeo<V> {
+    return new BatchGeo<V>(this, name, codec ?? new JsonCodec());
+  }
+  getStream(name: string, codec?: Codec): BatchStream {
+    return new BatchStream(this, name, codec ?? new JsonCodec());
+  }
+  getMapCacheNative<K, V>(name: string, codec?: Codec): BatchMapCacheNative<K, V> {
+    return new BatchMapCacheNative<K, V>(this, name, codec ?? new JsonCodec());
   }
   getScoredSortedSet<V>(name: string, codec?: Codec): BatchScoredSortedSet<V> {
     return new BatchScoredSortedSet<V>(this, name, codec ?? new JsonCodec());

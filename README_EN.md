@@ -66,17 +66,21 @@ work on a Cluster out of the box; `test/live-cluster.test.ts` exercises a real
 
 ## Coverage
 
-60+ structures: locks (`RLock`/`Fair`/`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`/
-`Multi`/`Red`, plus Java-style key synchronizers through
+60+ structures: locks (`RLock`/`Fair`/`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`
+with `tryLockAndGetToken` wait/non-blocking forms/`Multi`/`Red`, plus Java-style
+key synchronizers through
 `map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
 names), `RMap` (lazy HSCAN iterators, `HRANDFIELD`/`HSTRLEN`)/
-`MapCache`(+Native)/`LocalCachedMap`, `RSet`/`SetCache`,
-`RList`/`RQueue`/`RDeque`(+Blocking/Bounded), `RScoredSortedSet` (score
+`MapCache`(+Native)/`LocalCachedMap` (LRU/LFU under `maxSize`, `getCachedMap()`
+view), `RSet`/`SetCache`,
+`RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
+`move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
 ranges incl. reversed forms, `addScore` family, deletion by score/rank),
 `RLexSortedSet` (raw members), `RBucket`/`RBuckets`/`RBinaryStream`/`RJsonBucket`,
 `RAtomicLong`/`Double`, `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
-`RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`,
+`RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
+(keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`),
 `RStream` (JSON field names), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
@@ -84,7 +88,8 @@ distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
 `RTimeSeries` (`BBc0Lc0Lc0`), `RBloomFilter` (HighwayHash-128, verified vectors),
 `RKeys`/`RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
-(`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch`, …
+(`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
+facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).
 
 Honest non-goals (same as redi.go): `RSortedSet` (LIST+Comparator),
