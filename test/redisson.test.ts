@@ -1500,3 +1500,38 @@ describe('phase 28: interruptible lock + mapcache remainder (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 29: rwlock_timeout protocol (mock)', () => {
+  it('per-acquisition timeout keys + hash TTL recomputed while readers remain', async () => {
+    const r = make();
+    const name = 'p29:rw';
+    const rl = r.getReadWriteLock(name).getReadLock();
+    const tagged = '{p29:rw}';
+    await rl.lock(30000, 1);
+    const f1 = (await r.redis.hkeys(name)).find((f) => f !== 'mode')!;
+    expect(await r.redis.exists(`${tagged}:${f1}:rwlock_timeout:1`)).toBe(1);
+
+    await rl.lock(30000, 1); // reentrant acquisition → second timeout key
+    const afterSecond = (await r.redis.keys(`${tagged}:${f1}:rwlock_timeout:*`)).sort();
+    expect(afterSecond.length).toBe(2);
+    await rl.unlock(1);
+    const afterRelease = await r.redis.keys(`${tagged}:${f1}:rwlock_timeout:*`);
+    expect(afterRelease).toEqual([`${tagged}:${f1}:rwlock_timeout:1`]);
+    expect(await r.redis.hexists(name, f1)).toBe(1);
+
+    // a second reader keeps the lock alive after the first one fully releases
+    await rl.lock(30000, 2);
+    const f2 = (await r.redis.hkeys(name)).find((f) => f !== 'mode' && f !== f1)!;
+    expect((await r.redis.keys(`${tagged}:${f2}:rwlock_timeout:*`)).length).toBe(1);
+    await rl.unlock(1); // first holder gone, second still holds
+    expect(await r.redis.exists(name)).toBe(1);
+    expect(await r.redis.hget(name, 'mode')).toBe('read');
+    expect(await r.redis.pttl(name)).toBeGreaterThan(0);
+    expect((await r.redis.keys(`${tagged}:${f2}:rwlock_timeout:*`)).length).toBe(1);
+
+    await rl.unlock(2);
+    expect(await r.redis.exists(name)).toBe(0);
+    expect((await r.redis.keys(`${tagged}:${f2}:rwlock_timeout:*`)).length).toBe(0);
+    await r.shutdown();
+  });
+});

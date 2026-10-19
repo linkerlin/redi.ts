@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.7.0（2026-10-19）更新阶段 28 收口项（lockInterruptibly、RMapCache expireEntries/getWithTTLOnly/max-size）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.8.0（2026-10-20）更新阶段 29 收口项（RWLock 读锁 rwlock_timeout 协议）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -41,7 +41,7 @@
 
 **`RBlockingQueue/Deque`**：`pollFromAny`/`pollFromAnyWithName`（BLPOP）、`pollFirstFromAny`/`pollLastFromAny`（BLMPOP + COUNT）、`pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo`（BLMOVE）、deque `move`/`moveWithTimeout`（LMOVE/BLMOVE）✅ (2.1.0)；亚秒超时/`timeoutMs<=0` 语义、`take` 独立连接、`drainTo` 原子化均已在 v1.2.0/v1.3.0 修正 ✅。仍缺 Java 4.6.1 的 `pollLastFromAnyWithName(Duration, names...)` 与 `subscribeOnElements/unsubscribe` 元素订阅。
 
-**`RLock` 面**：`lockInterruptibly` ✅ (2.7.0，以 AbortSignal 模拟线程中断：等待中 abort 抛 `AbortError` 且不获取锁；`tryLock` 四重载分解（TS 三参合一）仍为 TS 形态、`*Async` 命名、`newCondition`、`RObservable.addListener` 未做；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock`：复核 4.6.1 jar/源码后确认 **RedissonRedLock 无 drift 扣减**（继承 MultiLock，末尾统一按完整 lease 重设 TTL），TS 现行实现与其一致，原“缺 drift”条目不成立。
+**`RLock` 面**：`lockInterruptibly` ✅ (2.7.0，以 AbortSignal 模拟线程中断：等待中 abort 抛 `AbortError` 且不获取锁)；`RWLock` 读锁 `:rwlock_timeout:<n>` 伴生键 ✅ (2.8.0，逐次获取创建、解锁按剩余键重算 HASH TTL、看门狗同步续期——修复 Java 释放读锁可能误删仍有其他读者的 HASH)；`tryLock` 四重载分解（TS 三参合一）仍为 TS 形态、`*Async` 命名、`newCondition`、`RObservable.addListener` 未做；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock`：复核 4.6.1 jar/源码后确认 **RedissonRedLock 无 drift 扣减**（继承 MultiLock，末尾统一按完整 lease 重设 TTL），TS 现行实现与其一致，原“缺 drift”条目不成立。
 
 **`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；仍缺 `StatusListener` 回调、`Class<M>` 类型门控、按实例删除；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
 
@@ -104,5 +104,6 @@
 - **阶段 26（已完成 ✅，v2.5.0）**：`RTopic/RPatternTopic/RShardedTopic` 管理面（channel/pattern names、countListeners、countSubscribers、getActiveTopics）、`RStream.fastClaim/fastAutoClaim`（JUSTID）与 `readMany`（多流 XREAD）、`RSet.addAllCounted/removeAllCounted/containsEach`；验证见 `test/redisson.test.ts` + `test/live-phase26.test.ts`（2/2，live 订阅计数/active topics、XCLAIM/XAUTOCLAIM JUSTID、多流读）。
 - **阶段 27（已完成 ✅，v2.6.0）**：`RMap` 物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace`；`RTimeSeries.stream/iterator` 分页产出值；验证见 `test/redisson.test.ts` + `test/live-phase27.test.ts`（2/2，视图 vs Java HSCAN、条件 replace/remove Java 读回、stream/iterator vs ts-range）。
 - **阶段 28（已完成 ✅，v2.7.0）**：`RLock.lockInterruptibly`（AbortSignal；等待中 abort → `AbortError`）、`RMapCache.expireEntries/getWithTTLOnly/getMaxSize`；RedLock drift 条目经 4.6.1 源码复核后更正为不适用；验证见 `test/redisson.test.ts` + `test/live-phase28.test.ts`（2/2，双客户端争锁中断、TTL ZSET/only-read/max-size）。
+- **阶段 29（已完成 ✅，v2.8.0）**：`RReadWriteLock` 读锁 `:rwlock_timeout:<n>` 伴生键协议（逐次获取 SET+PX、解锁删除并重算 HASH TTL、看门狗续期），修复 Java 释放读锁可能误删仍有其他读者的 HASH；验证见 `test/redisson.test.ts` + `test/live-phase29.test.ts`（1/1，Java 持有读锁 + TS 读锁混部存活）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

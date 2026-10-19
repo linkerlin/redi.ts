@@ -233,27 +233,40 @@ if (redis.call('del', KEYS[1]) == 1) then
 end
 return 0`;
 
-const RW_READ_ACQUIRE = `if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then
-    redis.call('hincrby', KEYS[1], ARGV[1], 1)
-    redis.call('pexpire', KEYS[1], ARGV[3])
+const RW_READ_ACQUIRE = `local lease = tonumber(ARGV[3])
+local function markRead(ind)
+    local key = KEYS[2] .. ':' .. ind
+    redis.call('set', key, 1)
+    redis.call('pexpire', key, lease)
+end
+if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then
+    local ind = redis.call('hincrby', KEYS[1], ARGV[1], 1)
+    markRead(ind)
+    local remain = redis.call('pttl', KEYS[1])
+    redis.call('pexpire', KEYS[1], math.max(remain, lease))
     return nil
 end
 if redis.call('exists', KEYS[1]) == 0 then
     redis.call('hincrby', KEYS[1], ARGV[1], 1)
     redis.call('hset', KEYS[1], 'mode', 'read')
-    redis.call('pexpire', KEYS[1], ARGV[3])
+    markRead(1)
+    redis.call('pexpire', KEYS[1], lease)
     return nil
 end
 local mode = redis.call('hget', KEYS[1], 'mode')
 if mode == 'read' or (mode == 'read-write' and redis.call('hexists', KEYS[1], ARGV[2]) == 1) then
     redis.call('hset', KEYS[1], 'mode', 'read-write')
-    redis.call('hincrby', KEYS[1], ARGV[1], 1)
-    redis.call('pexpire', KEYS[1], ARGV[3])
+    local ind = redis.call('hincrby', KEYS[1], ARGV[1], 1)
+    markRead(ind)
+    local remain = redis.call('pttl', KEYS[1])
+    redis.call('pexpire', KEYS[1], math.max(remain, lease))
     return nil
 end
 if mode == 'write' and redis.call('hexists', KEYS[1], ARGV[2]) == 1 then
-    redis.call('hincrby', KEYS[1], ARGV[1], 1)
-    redis.call('pexpire', KEYS[1], ARGV[3])
+    local ind = redis.call('hincrby', KEYS[1], ARGV[1], 1)
+    markRead(ind)
+    local remain = redis.call('pttl', KEYS[1])
+    redis.call('pexpire', KEYS[1], math.max(remain, lease))
     return nil
 end
 return redis.call('pttl', KEYS[1])`;
@@ -277,37 +290,71 @@ if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then
 end
 return redis.call('pttl', KEYS[1])`;
 
+const RW_READ_RENEW = `local counter = tonumber(redis.call('hget', KEYS[1], ARGV[1]))
+if counter == false then return 0 end
+for i = counter, 1, -1 do
+    redis.call('pexpire', KEYS[2] .. ':' .. ARGV[1] .. ':rwlock_timeout:' .. i, ARGV[2])
+end
+redis.call('pexpire', KEYS[1], ARGV[2])
+return 1`;
+
 const RW_READ_UNLOCK = `if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then
     return -1
 end
 local counter = redis.call('hincrby', KEYS[1], ARGV[1], -1)
+if counter == 0 then
+    redis.call('hdel', KEYS[1], ARGV[1])
+end
+redis.call('del', KEYS[3] .. ':' .. (counter + 1))
+local function maxRemain()
+    local maxr = -3
+    local fields = redis.call('hkeys', KEYS[1])
+    for _, key in ipairs(fields) do
+        local c = tonumber(redis.call('hget', KEYS[1], key))
+        if c ~= nil then
+            for i = c, 1, -1 do
+                local r = redis.call('pttl', KEYS[4] .. ':' .. key .. ':rwlock_timeout:' .. i)
+                if r > maxr then maxr = r end
+            end
+        end
+    end
+    return maxr
+end
 if counter > 0 then
-    redis.call('pexpire', KEYS[1], ARGV[3])
+    local mr = maxRemain()
+    if mr > 0 then redis.call('pexpire', KEYS[1], mr) end
     return counter
 end
-redis.call('hdel', KEYS[1], ARGV[1])
-local keys = redis.call('hkeys', KEYS[1])
-local anyReaders = false
-for _, k in ipairs(keys) do
-    if k ~= 'mode' and k ~= ARGV[2] then
-        anyReaders = true
-        break
-    end
-end
 if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then
-    if anyReaders then
+    local keys = redis.call('hkeys', KEYS[1])
+    local readers = false
+    for _, k in ipairs(keys) do
+        if k ~= 'mode' and k ~= ARGV[2] then readers = true break end
+    end
+    if readers then
         redis.call('hset', KEYS[1], 'mode', 'read-write')
     else
         redis.call('hset', KEYS[1], 'mode', 'write')
     end
+    local mr = maxRemain()
+    if mr > 0 then redis.call('pexpire', KEYS[1], mr) end
     return 0
 end
-if anyReaders then
+if redis.call('hlen', KEYS[1]) > 1 then
+    local mr = maxRemain()
+    if mr > 0 then
+        redis.call('hset', KEYS[1], 'mode', 'read')
+        redis.call('pexpire', KEYS[1], mr)
+        return 0
+    end
+    -- legacy holders without :rwlock_timeout keys: keep the lock alive
+    local ttl = redis.call('pttl', KEYS[1])
     redis.call('hset', KEYS[1], 'mode', 'read')
-else
-    redis.call('del', KEYS[1])
-    redis.call('publish', KEYS[2], ARGV[4])
+    if ttl > 0 then redis.call('pexpire', KEYS[1], ttl) end
+    return 0
 end
+redis.call('del', KEYS[1])
+redis.call('publish', KEYS[2], ARGV[4])
 return 0`;
 
 const RW_WRITE_UNLOCK = `if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then
@@ -948,7 +995,7 @@ class RWBase extends RedisDataStructure {
     const f = this.primary(tid);
     this.stopWatchdog(tid);
     const t = setInterval(() => {
-      luaEval(this.redis, LOCK_RENEW_SCRIPT, 1, this.name, f, String(this.watchdogMs))
+      this.renew(f)
         .then((r) => {
           if (toNumber(r) === 0) this.stopWatchdog(tid);
         })
@@ -956,6 +1003,10 @@ class RWBase extends RedisDataStructure {
     }, Math.max(1, Math.floor(this.watchdogMs / 3)));
     (t as any).unref?.();
     this.timers.set(f, t);
+  }
+  /** Renewal hook; read locks touch the :rwlock_timeout keys as well. */
+  protected async renew(field: string): Promise<number> {
+    return toNumber(await luaEval(this.redis, LOCK_RENEW_SCRIPT, 1, this.name, field, String(this.watchdogMs)));
   }
   protected stopWatchdog(tid: number | string): void {
     const t = this.timers.get(this.primary(tid));
@@ -983,6 +1034,10 @@ class RWBase extends RedisDataStructure {
 }
 
 export class RReadLockView extends RWBase {
+  protected override async renew(field: string): Promise<number> {
+    const tagged = this.name.includes('{') ? this.name : `{${this.name}}`;
+    return toNumber(await luaEval(this.redis, RW_READ_RENEW, 2, this.name, tagged, field, String(this.watchdogMs)));
+  }
   async lock(leaseTimeMs?: number, threadId: number | string = 1): Promise<void> {
     const ok = await this.tryLock(Infinity, leaseTimeMs, threadId);
     if (!ok) throw new Error('read lock acquisition failed');
@@ -992,8 +1047,9 @@ export class RReadLockView extends RWBase {
     const lease = useWatchdog ? this.watchdogMs : leaseTimeMs!;
     const read = this.primary(threadId);
     const write = `${read}:write`;
+    const timeoutPrefix = `${suffixName(this.name, read)}:rwlock_timeout`;
     const fn = async () => {
-      const r = await luaEval(this.redis, RW_READ_ACQUIRE, 1, this.name, read, write, String(lease));
+      const r = await luaEval(this.redis, RW_READ_ACQUIRE, 2, this.name, timeoutPrefix, read, write, String(lease));
       return r === null || r === undefined ? null : Number(r);
     };
     const first = await fn();
@@ -1012,11 +1068,17 @@ export class RReadLockView extends RWBase {
   async unlock(threadId: number | string = 1): Promise<void> {
     const read = this.primary(threadId);
     const write = `${read}:write`;
+    const tagged = this.name.includes('{') ? this.name : `{${this.name}}`;
+    const timeoutPrefix = `${suffixName(this.name, read)}:rwlock_timeout`;
     // Java LockPubSub: read release publishes UNLOCK_MESSAGE (0, wakes one
     // waiter); write release publishes READ_UNLOCK_MESSAGE (1, wakes all).
-    const r = await luaEval(this.redis, RW_READ_UNLOCK, 2, this.name, this.channel, read, write, String(this.watchdogMs), '0');
+    const r = await luaEval(this.redis, RW_READ_UNLOCK, 4, this.name, this.channel, timeoutPrefix, tagged, read, write, String(this.watchdogMs), '0');
     if (r === null || r === undefined || toNumber(r) < 0) throw new LockNotHeldError();
-    if (toNumber(r) === 0) this.stopWatchdog(threadId);
+    if (toNumber(r) === 0) {
+      const stillRead = toNumber(await this.redis.hexists(this.name, read)) === 1;
+      const stillWrite = toNumber(await this.redis.hexists(this.name, write)) === 1;
+      if (!stillRead && !stillWrite) this.stopWatchdog(threadId);
+    }
   }
 
   // -- Java RedissonReadLock views (mode read | write + extra read fields) ----

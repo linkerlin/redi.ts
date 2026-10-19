@@ -38,7 +38,7 @@
 |-----------|--------------|--------|
 | RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim; Spin 默认指数退避 1→128ms×2+jitter（`BackOff` 可配，`getSpinLock(name, backOff?)`）；`lockInterruptibly(lease?, signal?, threadId?)` 以 AbortSignal 模拟线程中断（等待中 abort → `AbortError`，不获取锁）；unlock-latch 为按请求幂等键，跨语言无影响 | WIRE_OK + live mutual exclusion both directions ✅ + live phase 28 (contended abort ✅) |
 | RFairLock / NonReentrantFair | + LIST `redisson_lock_queue:{name}` + ZSET `redisson_lock_timeout:{name}`, per-waiter `channel:field`, FIFO Lua verbatim; `delete()/unlink()` clears all three keys + local watchdog timers | WIRE_OK + live phase 16 (capacity/keys re-init ✅) |
-| RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}`; unlock/forceUnlock wake constants follow Java `LockPubSub` (read → `UNLOCK_MESSAGE` 0 wake-one, write → `READ_UNLOCK_MESSAGE` 1 wake-all), downgrade parity; views: `isLocked` (read: `mode=='read' or (mode=='write' and hlen>2)`), `isHeldByThread`, `getHoldCount`, `forceUnlock` | WIRE_OK + live phase 3 (互斥双向+共享读） + live phase 19 (视图/强解 ✅) |
+| RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}`; unlock/forceUnlock wake constants follow Java `LockPubSub` (read → `UNLOCK_MESSAGE` 0 wake-one, write → `READ_UNLOCK_MESSAGE` 1 wake-all), downgrade parity; read locks create per-acquisition `<tagged>:<field>:rwlock_timeout:<n>` keys (SET 1 + PX), delete them on unlock and recompute the HASH TTL from the remaining keys' max PTTL; watchdog renews every timeout key + HASH; views: `isLocked` (read: `mode=='read' or (mode=='write' and hlen>2)`), `isHeldByThread`, `getHoldCount`, `forceUnlock` | WIRE_OK + live phase 3 (互斥双向+共享读） + live phase 19 (视图/强解 ✅) + live phase 29 (Java 读锁与 TS 读锁混部存活 ✅) |
 | RFencedLock | RLock HASH + `redisson_lock_token:{name}` (`INCR` incl. re-entry, returns `{-1,token}`); `tryLockAndGetToken(waitTimeMs?, leaseTimeMs?, threadId?)` follows 4.6.1 (omitted wait = non-blocking, otherwise waits); `delete()` clears token so the next acquire restarts at 1 | WIRE_OK + live phase 3 (token 跨语言单调） + live phase 16 (token reset ✅) + live phase 22 (TS/Java token 序列 n→n+1→n+2 ✅) |
 | RMultiLock / RRedLock | client-side orchestration (quorum `n/2+1`, lease amplification); accepts any `LockLike` (`RLock`/`RFairLock`/RW views) | WIRE_OK + live phase 9（全有或全无+回滚，多数派 2/3 ✅） |
 | RSemaphore | STRING + `redisson_sc:{name}` Lua | WIRE_OK + live shared-permit ✅ |
@@ -79,11 +79,12 @@
 
 ## Verification
 
-- `npm test`: 228 tests / 32 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 230 tests / 33 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
-  map views/streaming and phase-28 interruptible lock/map-cache remainder), `interop`
+  map views/streaming, phase-28 interruptible lock/map-cache remainder and
+  phase-29 rwlock_timeout), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -127,6 +128,8 @@
   Java / TimeSeries stream+iterator vs ts-range, 2/2 PASS),
   `live-phase28` (contended lockInterruptibly abort across two clients /
   MapCache expireEntries TTL ZSET / TTL-only reads / max-size persistence, 2/2 PASS),
+  `live-phase29` (Java-held read lock survives a TS read acquire/release with
+  `rwlock_timeout` keys intact, then disappears on Java release, 1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

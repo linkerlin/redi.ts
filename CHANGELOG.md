@@ -1,3 +1,26 @@
+## 2.8.0 — 2026-10-20
+
+Phase 29: `rwlock_timeout` protocol (read-lock interop fix). Full suite:
+**230 tests / 33 files green in ~69 s**.
+
+- **`RReadWriteLock` read locks** now create Java's per-acquisition companion
+  keys `<tagged-name>:<clientId>:<threadId>:rwlock_timeout:<n>` on every
+  acquire/re-entry (SET 1 + PX lease), delete the released acquisition's key on
+  unlock, and recompute the lock HASH TTL from the remaining timeout keys
+  (`max PTTL`) instead of blindly re-applying the lease. The watchdog renews
+  every timeout key together with the HASH.
+- **Why it matters**: the Java 4.6.1 read-unlock script scans those keys to
+  decide whether other readers still hold the lock. Without them, a Java
+  release could delete the whole HASH while another reader (e.g. a TS client)
+  still holds it. Live phase 29 reproduces the mixed scenario: Java holds a
+  read lock, TS acquires/releases a second read lock, and the Java-held HASH
+  plus its timeout key must survive (then vanish after Java's own release).
+- **Mock note**: ioredis-mock's Lua renders numeric concatenation as `2.0`
+  (real Redis Lua gives `2`); the mock test asserts key patterns, while the
+  live test pins the real `:1` suffix.
+- Tests: 1 mock + `test/live-phase29.test.ts` 1/1 (reentrant/second-holder TTL
+  recomputation; mixed Java+TS read lock survival).
+
 ## 2.7.0 — 2026-10-19
 
 Phase 28: interruptible lock + map-cache remainder. Full suite:
