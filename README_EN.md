@@ -86,8 +86,11 @@ multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
 `getAndDelete`, `compareAndDelete`), `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
 (keepAlive renewed inside the acquire Lua),
-`RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`),
-`RStream` (JSON field names), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
+`RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;
+management: `getChannelNames`/`countListeners`/`countSubscribers`,
+pattern `getActiveTopics`),
+`RStream` (JSON field names; groups/claim/pending/nack, `fastClaim`/
+`fastAutoClaim` JUSTID, `readMany` multi-stream XREAD), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),

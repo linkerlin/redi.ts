@@ -68,8 +68,8 @@ const redisson = Redisson.create({ client: redis });
 - 单个值：`RBucket`、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`
 - 数字：`RAtomicLong`、`Double`（`getAndIncrement`/`Decrement`、`setIfLess`/`Greater`、`getAndDelete`/`compareAndDelete`）；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
-- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`）
-- 流：`RStream`（字段名是 JSON）
+- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）
+- 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany` 多流 `XREAD`）
 - 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`）
 - 环形缓冲：`RRingBuffer`
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）

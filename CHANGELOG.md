@@ -1,3 +1,22 @@
+## 2.5.0 — 2026-10-19
+
+Phase 26: remaining topic/stream/collection surfaces. Full suite:
+**220 tests / 30 files green in ~66 s**.
+
+- **`RTopic`**: `getChannelNames()` and `countListeners()` (local listeners;
+  `countSubscribers()` already used PUBSUB NUMSUB). **`RPatternTopic`**:
+  `getPatternNames()` and `getActiveTopics()` (PUBSUB CHANNELS matching the
+  pattern). **`RShardedTopic`**: `getChannelNames()`, `countListeners()` and
+  `countSubscribers()` (PUBSUB SHARDNUMSUB, NUMSUB fallback, then local count).
+- **`RStream`**: `fastClaim` (XCLAIM … JUSTID → id list), `fastAutoClaim`
+  (XAUTOCLAIM … JUSTID → cursor + ids) and `readMany` (one `XREAD COUNT …
+  STREAMS k1 k2 … id1 id2 …` returning `Map<stream, entries>`).
+- **`RSet`**: `addAllCounted` / `removeAllCounted` (SADD/SREM counts) and
+  `containsEach` (SMISMEMBER → subset that IS present), matching Java method
+  names.
+- Tests: 2 mock + `test/live-phase26.test.ts` 2/2 (live listener/subscriber
+  counts, active topics, XCLAIM/XAUTOCLAIM JUSTID, multi-stream XREAD).
+
 ## 2.4.0 — 2026-10-19
 
 Phase 25: `RTimeSeries` read/delete family. Full suite: **216 tests / 29

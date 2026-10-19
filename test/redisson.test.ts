@@ -1387,3 +1387,40 @@ describe('phase 24: RScoredSortedSet remainder (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 26: topic management + set counts (mock)', () => {
+  it('RTopic/RPatternTopic/RShardedTopic management surfaces', async () => {
+    const r = make();
+    const t = r.getTopic<string>('p26:t');
+    expect(await t.getChannelNames()).toEqual(['p26:t']);
+    expect(await t.countListeners()).toBe(0);
+    const id = await t.addListener(() => undefined);
+    expect(await t.countListeners()).toBe(1);
+    await t.removeListener(id);
+    expect(await t.countListeners()).toBe(0);
+
+    const p = r.getPatternTopic<string>('p26:*');
+    expect(await p.getPatternNames()).toEqual(['p26:*']);
+    expect(await p.getActiveTopics()).toEqual([]); // mock has no PUBSUB CHANNELS
+
+    const sh = r.getShardedTopic<string>('p26:s');
+    expect(await sh.getChannelNames()).toEqual(['p26:s']);
+    const sid = await sh.addListener(() => undefined);
+    expect(await sh.countListeners()).toBe(sid === 0 ? 0 : 1);
+    await sh.removeAllListeners();
+    expect(await sh.countListeners()).toBe(0);
+    await r.shutdown();
+  });
+
+  it('RSet addAllCounted/removeAllCounted/containsEach', async () => {
+    const r = make();
+    const s = r.getSet<number>('p26:set');
+    expect(await s.addAllCounted([1, 2, 3])).toBe(3);
+    expect(await s.addAllCounted([2, 3, 4])).toBe(1);
+    expect(await s.containsEach([1, 5, 4])).toEqual([1, 4]);
+    expect(await s.containsAll(1, 2, 3, 9)).toBe(3);
+    expect(await s.removeAllCounted([1, 2])).toBe(2);
+    expect((await s.readAll()).sort()).toEqual([3, 4]);
+    await r.shutdown();
+  });
+});

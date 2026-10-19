@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.2.0（2026-10-19）更新阶段 23 收口项（RKeys 运维族、原子标量余项、RBuckets 条件写、ZSet addIf 族）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.5.0（2026-10-19）更新阶段 26 收口项（Topic 管理面、RStream JUSTID/多流读、RSet counted/containsEach）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -29,9 +29,9 @@
 
 **`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) ✅ (2.2.0)；`addAll*` 条件批量、`random`/`randomEntries`、`firstEntry`/`lastEntry`、非阻塞 `pollFirst/LastEntry` 与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP）✅ (2.3.0)；区间读取改用 `ZRANGE ... BYSCORE [REV]` ✅ (2.3.0，弃用 `ZRANGEBYSCORE`/`ZREVRANGEBYSCORE`)；仍缺 `iterator/stream` 专用视图（ZSCAN/ZRANGE 迭代语义）。
 
-**`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`addIfAbsent`、`iterator/distributedIterator/stream` 视图。
+**`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；`addAllCounted/removeAllCounted/containsEach` ✅ (2.5.0)；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`iterator/distributedIterator/stream` 视图。
 
-**`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐）；仍缺 `fastClaim/fastAutoClaim` 变体、多流读、`addListener`。
+**`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`（单 XREAD 多流）✅ (2.5.0)；仍缺 `addListener`。
 
 **`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；缺 Java 形态的 `keySet/values/entrySet(pattern, count)` Set/Collection 视图（迭代器已覆盖大 key 扫描需求）、`putAllWithTTL`（在 `RMapCache.putAll`）、`replace(K, old, new)`（TS 叫 `replaceWithCheck`，须改名/重载）、`remove` 联合返回须收窄。
 
@@ -43,7 +43,7 @@
 
 **`RLock` 面**：`lockInterruptibly` 全族、`tryLock` 四重载分解（TS 三参合一）、`*Async` 命名、`newCondition`、`RObservable.addListener`；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `rwlock_timeout` 续期键 + `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock` 缺 drift 扣减。
 
-**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`StatusListener`、`countListeners`（vs `PUBSUB NUMSUB` 语义不同）、按实例删除、`Class<M>` 类型门控；`RShardedTopic.addListener` 无 subs 管理恒返 1；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
+**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；仍缺 `StatusListener` 回调、`Class<M>` 类型门控、按实例删除；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
 
 **`RBitSet`**：已补 ✅ (1.5.0)：`BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化读写（signed/unsigned 的 get/set/increment + `getByte/Short/Integer/Long` 快捷）、`or/and/xor/not` 回字节长、Redis 8 `BITOP DIFF/DIFF1/ANDOR/ONE`、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`setRange`/`clear(from,to)` 为 `to` 排他；仍缺 `get(long...)`/`set(long[], boolean)` 批读批写、`set(BitSet)`/`toBitSet()`。
 
@@ -100,5 +100,7 @@
 - **阶段 22（已完成 ✅，v2.1.0）**：`RFencedLock.tryLockAndGetToken`（4.6.1 非阻塞/等待语义，Java token 序列互通）、阻塞队列/双端队列 `pollFromAny`/BLMPOP/LMOVE/BLMOVE 全族、`RRateLimiter` keepAlive 脚本内续期（keepAlive=0 时继承 config TTL）、`RLocalCachedMap` LRU/LFU 淘汰 + `getCachedMap()` 视图、`RMultimapCache` 可选周期清扫、`RBatch` 门面扩至 13 类；验证见 `test/redisson.test.ts` + `test/live-phase22.test.ts`（5/5，含 Java 4.6.1 交叉断言）。
 - **阶段 23（已完成 ✅，v2.2.0）**：`RKeys` 运维族（expire/expireAt 单+多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern）、`RAtomicLong/Double` 标量余项（getAndIncrement/Decrement、setIfLess/Greater、getAndDelete、Double compareAndDelete）、`RBuckets` 条件写（MSETEX NX/XX）、`RScoredSortedSet` addIfAbsent/Exists/Less/Greater；验证见 `test/redisson.test.ts` + `test/live-phase23.test.ts`（4/4；含 Java 读回、live cluster `CLUSTER KEYSLOT` 对照、MOVE 跨 db）。
 - **阶段 24（已完成 ✅，v2.3.0）**：`RScoredSortedSet` 收口——`addAll*` 条件批量（NX/XX/GT/LT CH）、`random`/`randomEntries`、`firstEntry`/`lastEntry`、非阻塞 `pollFirst/LastEntry`、阻塞 `pollFirst/LastWithTimeout`（BZPOPMIN/MAX）与 `pollFirst/LastFromAny`（BZMPOP）、区间读取改 `ZRANGE … BYSCORE [REV]`；验证见 `test/redisson.test.ts` + `test/live-phase24.test.ts`（2/2；含 Java 分数读回与真实阻塞唤醒）。
+- **阶段 25（已完成 ✅，v2.4.0）**：`RTimeSeries` 读写全族（addAll、getEntry/getValue、first/last/poll 全族、正反向 range/entryRange（limit）、getAndRemove、remove/removeRange、TTL 惰性过滤、label n=2/3/4 兼容）；验证见 `test/redisson.test.ts` + `test/live-phase25.test.ts`（2/2，含 Java ts-range/ts-add-label 往返）。
+- **阶段 26（已完成 ✅，v2.5.0）**：`RTopic/RPatternTopic/RShardedTopic` 管理面（channel/pattern names、countListeners、countSubscribers、getActiveTopics）、`RStream.fastClaim/fastAutoClaim`（JUSTID）与 `readMany`（多流 XREAD）、`RSet.addAllCounted/removeAllCounted/containsEach`；验证见 `test/redisson.test.ts` + `test/live-phase26.test.ts`（2/2，live 订阅计数/active topics、XCLAIM/XAUTOCLAIM JUSTID、多流读）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

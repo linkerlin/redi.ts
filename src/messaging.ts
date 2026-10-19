@@ -67,6 +67,14 @@ export class RTopic<V = any> extends RedisDataStructure {
       return this.subs.size;
     }
   }
+  /** Java `getChannelNames()`: the underlying pub/sub channel(s). */
+  async getChannelNames(): Promise<string[]> {
+    return [this.name];
+  }
+  /** Java `countListeners()`: listeners registered on this instance. */
+  async countListeners(): Promise<number> {
+    return this.subs.size;
+  }
   async removeAllListeners(): Promise<void> {
     for (const id of [...this.subs.keys()]) await this.removeListener(id);
   }
@@ -118,6 +126,19 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
   }
   async removeAllListeners(): Promise<void> {
     for (const id of [...this.subs.keys()]) await this.removeListener(id);
+  }
+  /** Java `getPatternNames()`. */
+  async getPatternNames(): Promise<string[]> {
+    return [this.name];
+  }
+  /** Java `getActiveTopics()`: PUBSUB CHANNELS matching this pattern. */
+  async getActiveTopics(): Promise<string[]> {
+    try {
+      const r: any = await (this.redis as any).pubsub('CHANNELS', this.name);
+      return Array.isArray(r) ? r.map(String) : [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -180,6 +201,26 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
   }
   async removeAllListeners(): Promise<void> {
     for (const id of [...this.subs.keys()]) await this.removeListener(id);
+  }
+  /** Java `getChannelNames()` (sharded topic uses the same channel name). */
+  async getChannelNames(): Promise<string[]> {
+    return [this.name];
+  }
+  /** Java `countListeners()`: listeners registered on this instance. */
+  async countListeners(): Promise<number> {
+    return this.subs.size;
+  }
+  /** Java `countSubscribers()`: PUBSUB SHARDNUMSUB, falling back to NUMSUB. */
+  async countSubscribers(): Promise<number> {
+    try {
+      const r: any = await (this.redis as any).pubsub('SHARDNUMSUB', this.name);
+      if (Array.isArray(r) && r.length >= 2) return Number(r[1] ?? 0);
+    } catch { /* fall through */ }
+    try {
+      const r: any = await this.redis.pubsub('NUMSUB', this.name);
+      if (Array.isArray(r) && r.length >= 2 && Number(r[1]) > 0) return Number(r[1]);
+    } catch { /* fall through */ }
+    return this.subs.size;
   }
 }
 
@@ -562,6 +603,31 @@ export class RStream extends RedisDataStructure {
       nextId: String(cursor),
       entries: ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })),
     };
+  }
+  /** Java `fastClaim`: XCLAIM ... JUSTID — ids only, no field payload. */
+  async fastClaim(group: string, consumer: string, minIdleMs: number, ...ids: string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const res: any = await (this.redis as any).xclaim(this.name, group, consumer, minIdleMs, ...ids, 'JUSTID');
+    return (res ?? []).map((id: any) => String(id));
+  }
+  /** Java `fastAutoClaim`: XAUTOCLAIM ... JUSTID — cursor + claimed ids. */
+  async fastAutoClaim(group: string, consumer: string, minIdleMs: number, startId = '0-0', count = 10): Promise<{ nextId: string; ids: string[] }> {
+    const res: any = await (this.redis as any).xautoclaim(this.name, group, consumer, minIdleMs, startId, 'COUNT', count, 'JUSTID');
+    if (!res) return { nextId: '0-0', ids: [] };
+    const [cursor, ids] = res;
+    return { nextId: String(cursor), ids: ((ids ?? []) as any[]).map((x) => String(x)) };
+  }
+  /** Java `read(StreamMultiReadArgs)`: one XREAD over several streams.
+   *  `streams` maps stream name → last seen id (use `0` for the beginning). */
+  async readMany(streams: Record<string, string>, count = 10): Promise<Map<string, StreamEntry[]>> {
+    const names = Object.keys(streams);
+    const out = new Map<string, StreamEntry[]>();
+    if (names.length === 0) return out;
+    const res: any = await (this.redis as any).xread('COUNT', count, 'STREAMS', ...names, ...names.map((n) => streams[n]));
+    for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
+      out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
+    }
+    return out;
   }
   async getInfo(): Promise<StreamInfo> {
     const flat: any[] = (await (this.redis as any).xinfo('STREAM', this.name)) ?? [];

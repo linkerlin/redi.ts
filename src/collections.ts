@@ -384,6 +384,20 @@ export class RSet<V = any> extends RedisKeyedStructure<V> {
     const r = await this.redis.smismember(this.name, ...values.map((v) => this.encodeValue(v)));
     return (r as number[]).filter((x) => x === 1).length;
   }
+  /** Java `containsEach(Collection)`: the subset that IS present. */
+  async containsEach(values: V[]): Promise<V[]> {
+    if (values.length === 0) return [];
+    const r = (await this.redis.smismember(this.name, ...values.map((v) => this.encodeValue(v)))) as number[];
+    return values.filter((_, i) => r[i] === 1);
+  }
+  /** Java `addAllCounted(Collection)`: SADD count. */
+  async addAllCounted(values: V[]): Promise<number> {
+    return this.add(...values);
+  }
+  /** Java `removeAllCounted(Collection)`: SREM count. */
+  async removeAllCounted(values: V[]): Promise<number> {
+    return this.remove(...values);
+  }
   async size(): Promise<number> {
     return this.redis.scard(this.name);
   }
