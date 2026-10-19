@@ -220,8 +220,11 @@ redis.call('hset', KEYS[1], ARGV[1], ARGV[2]); return 1 else return 0 end`;
   async fastReplace(key: K, value: V): Promise<boolean> {
     return this.fastPutIfExists(key, value);
   }
-  async replace(key: K, value: V): Promise<V | null> {
-    return this.putIfExists(key, value);
+  async replace(key: K, value: V): Promise<V | null>;
+  async replace(key: K, oldValue: V, newValue: V): Promise<boolean>;
+  async replace(key: K, a: V, b?: V): Promise<V | null | boolean> {
+    if (b === undefined) return this.putIfExists(key, a);
+    return this.replaceWithCheck(key, a, b);
   }
   async replaceWithCheck(key: K, oldValue: V, newValue: V): Promise<boolean> {
     const s = `local cur = redis.call('hget', KEYS[1], ARGV[1])
@@ -278,6 +281,42 @@ if cur == ARGV[2] then return redis.call('hdel', KEYS[1], ARGV[1]) else return 0
   }
   async readAllValues(): Promise<V[]> {
     return [...(await this.readAllMap()).values()];
+  }
+  async readAllEntrySet(): Promise<[K, V][]> {
+    return [...(await this.readAllMap()).entries()];
+  }
+  /** Java `keySet()` views: no args, `keySet(count)`, or `keySet(pattern[, count])`. */
+  async keySet(): Promise<K[]>;
+  async keySet(count: number): Promise<K[]>;
+  async keySet(pattern: string, count?: number): Promise<K[]>;
+  async keySet(patternOrCount?: string | number, count = 100): Promise<K[]> {
+    const pattern = typeof patternOrCount === 'string' ? patternOrCount : '*';
+    const c = typeof patternOrCount === 'number' ? patternOrCount : count;
+    const out: K[] = [];
+    for await (const k of this.keysIterator(pattern, c)) out.push(k);
+    return out;
+  }
+  /** Java `values()` views. */
+  async values(): Promise<V[]>;
+  async values(count: number): Promise<V[]>;
+  async values(pattern: string, count?: number): Promise<V[]>;
+  async values(patternOrCount?: string | number, count = 100): Promise<V[]> {
+    const pattern = typeof patternOrCount === 'string' ? patternOrCount : '*';
+    const c = typeof patternOrCount === 'number' ? patternOrCount : count;
+    const out: V[] = [];
+    for await (const v of this.valuesIterator(pattern, c)) out.push(v);
+    return out;
+  }
+  /** Java `entrySet()` views (TS returns [key, value] pairs). */
+  async entrySet(): Promise<[K, V][]>;
+  async entrySet(count: number): Promise<[K, V][]>;
+  async entrySet(pattern: string, count?: number): Promise<[K, V][]>;
+  async entrySet(patternOrCount?: string | number, count = 100): Promise<[K, V][]> {
+    const pattern = typeof patternOrCount === 'string' ? patternOrCount : '*';
+    const c = typeof patternOrCount === 'number' ? patternOrCount : count;
+    const out: [K, V][] = [];
+    for await (const e of this.entriesIterator(pattern, c)) out.push(e);
+    return out;
   }
   /** Java `RMap.valueSize(K)`: byte length of the encoded value (HSTRLEN). */
   async valueSize(key: K): Promise<number> {

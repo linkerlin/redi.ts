@@ -1424,3 +1424,39 @@ describe('phase 26: topic management + set counts (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 27: map views + time-series stream (mock)', () => {
+  it('RMap keySet/values/entrySet views, readAllEntrySet, replace/remove overloads', async () => {
+    const r = make();
+    const m = r.getMap<string, number>('p27:m');
+    await m.putAll({ a: 1, b: 2, ab: 3 });
+    expect((await m.keySet()).sort()).toEqual(['a', 'ab', 'b']);
+    // MATCH applies to the ENCODED field names (HSCAN semantics, as in Java)
+    expect((await m.keySet('"a*')).sort()).toEqual(['a', 'ab']);
+    expect((await m.values()).sort()).toEqual([1, 2, 3]);
+    expect((await m.entrySet('"a*')).sort()).toEqual([['a', 1], ['ab', 3]]);
+    expect((await m.readAllEntrySet()).length).toBe(3);
+
+    expect(await m.replace('a', 9)).toBe(1);
+    expect(await m.replace('a', 9, 10)).toBe(true);
+    expect(await m.replace('a', 9, 11)).toBe(false); // stale old value
+    expect(await m.get('a')).toBe(10);
+    expect(await m.remove('a', 11)).toBe(false);
+    expect(await m.remove('a', 10)).toBe(true);
+    expect(await m.get('a')).toBeNull();
+    await r.shutdown();
+  });
+
+  it('RTimeSeries stream/iterator page values in ascending order', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p27:ts');
+    await ts.addAll([1000, 2000, 3000, 4000, 5000].map((t, i) => ({ timestamp: t, value: (i + 1) * 10 })));
+    const streamed: number[] = [];
+    for await (const v of ts.stream(2)) streamed.push(v);
+    expect(streamed).toEqual([10, 20, 30, 40, 50]);
+    const iterated: number[] = [];
+    for await (const v of ts.iterator(3)) iterated.push(v);
+    expect(iterated).toEqual([10, 20, 30, 40, 50]);
+    await r.shutdown();
+  });
+});

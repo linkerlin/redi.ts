@@ -953,49 +953,81 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
     }
     const out: TimeSeriesEntry<V>[] = [];
     for (let i = 0; i + 1 < raw.length; i += 2) {
-      const member = Buffer.isBuffer(raw[i]) ? raw[i] : Buffer.from(String(raw[i]), 'latin1');
-      let exp: any = null;
-      try {
-        exp = await this.redis.zscore(this.ttlKey, member as any);
-      } catch {
-        exp = await this.redis.zscore(this.ttlKey, member.toString('latin1'));
-      }
-      if (exp !== null && exp !== undefined && Number(exp) <= now) continue;
-      const u = unpackTimeSeriesMember(member);
-      let value: V = member as unknown as V;
-      let label = '';
-      if (u) {
-        try {
-          value = this.decodeValue(u.val) as V;
-        } catch {
-          value = u.val as unknown as V;
-        }
-        if (u.label !== '') {
-          try {
-            const d = this.decodeValue(u.label);
-            label = typeof d === 'string' ? d : u.label;
-          } catch {
-            label = u.label;
-          }
-        }
-      } else {
-        try {
-          value = this.decodeValue(member.toString('utf8')) as V;
-        } catch { /* raw */ }
-      }
-      const score = Buffer.isBuffer(raw[i + 1]) ? raw[i + 1].toString() : String(raw[i + 1]);
-      out.push({ timestamp: Number(score), value, label });
+      const entry = await this.decodeMember(raw[i], raw[i + 1], now);
+      if (entry === null) continue;
+      out.push(entry);
       if (limit > 0 && out.length >= limit) break;
     }
     return out;
   }
-  private async alive(members: Buffer[], now: number): Promise<Buffer[]> {
-    const out: Buffer[] = [];
-    for (const m of members) {
-      const score = await this.redis.zscore(this.ttlKey, m);
-      if (score === null || Number(score) > now) out.push(m);
+  /** Decode one packed member, dropping expired entries (TTL ZSET). */
+  private async decodeMember(rawMember: any, rawScore: any, now: number): Promise<TimeSeriesEntry<V> | null> {
+    const member = Buffer.isBuffer(rawMember) ? rawMember : Buffer.from(String(rawMember), 'latin1');
+    let exp: any = null;
+    try {
+      exp = await this.redis.zscore(this.ttlKey, member as any);
+    } catch {
+      exp = await this.redis.zscore(this.ttlKey, member.toString('latin1'));
     }
-    return out;
+    if (exp !== null && exp !== undefined && Number(exp) <= now) return null;
+    const u = unpackTimeSeriesMember(member);
+    let value: V = member as unknown as V;
+    let label = '';
+    if (u) {
+      try {
+        value = this.decodeValue(u.val) as V;
+      } catch {
+        value = u.val as unknown as V;
+      }
+      if (u.label !== '') {
+        try {
+          const d = this.decodeValue(u.label);
+          label = typeof d === 'string' ? d : u.label;
+        } catch {
+          label = u.label;
+        }
+      }
+    } else {
+      try {
+        value = this.decodeValue(member.toString('utf8')) as V;
+      } catch { /* raw */ }
+    }
+    const score = Buffer.isBuffer(rawScore) ? rawScore.toString() : String(rawScore);
+    return { timestamp: Number(score), value, label };
+  }
+  /** Index page over the data ZSET (used by the lazy stream/iterator). */
+  private async rawPage(offset: number, count: number): Promise<{ entries: TimeSeriesEntry<V>[]; rawCount: number }> {
+    const now = await serverNowMs(this.redis);
+    const args: (string | number)[] = [this.name, offset, offset + count - 1, 'WITHSCORES'];
+    let raw: any[];
+    try {
+      raw = await (this.redis as any).zrangeBuffer(...args);
+    } catch {
+      raw = await (this.redis as any).zrange(...args);
+    }
+    const rawCount = Math.floor(raw.length / 2);
+    const entries: TimeSeriesEntry<V>[] = [];
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const e = await this.decodeMember(raw[i], raw[i + 1], now);
+      if (e !== null) entries.push(e);
+    }
+    return { entries, rawCount };
+  }
+  /** Java `stream()` / `stream(int count)`: lazily yield VALUES in ascending
+   *  timestamp order, `count` entries per page. */
+  async *stream(count = 100): AsyncGenerator<V> {
+    const batch = count > 0 ? count : 100;
+    let offset = 0;
+    for (;;) {
+      const { entries, rawCount } = await this.rawPage(offset, batch);
+      for (const e of entries) yield e.value;
+      if (rawCount < batch) return;
+      offset += rawCount;
+    }
+  }
+  /** Java `iterator(int count)`: alias of `stream(count)` (values). */
+  async *iterator(count = 100): AsyncGenerator<V> {
+    yield* this.stream(count);
   }
   /** Unexpired entries in [from, to] ascending (Java `entryRange`; also the
    *  historical TS `range` — entries, not values). */

@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.5.0（2026-10-19）更新阶段 26 收口项（Topic 管理面、RStream JUSTID/多流读、RSet counted/containsEach）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.6.0（2026-10-19）更新阶段 27 收口项（RMap 物化视图/三参 replace、RTimeSeries stream/iterator）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -33,7 +33,7 @@
 
 **`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`（单 XREAD 多流）✅ (2.5.0)；仍缺 `addListener`。
 
-**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；缺 Java 形态的 `keySet/values/entrySet(pattern, count)` Set/Collection 视图（迭代器已覆盖大 key 扫描需求）、`putAllWithTTL`（在 `RMapCache.putAll`）、`replace(K, old, new)`（TS 叫 `replaceWithCheck`，须改名/重载）、`remove` 联合返回须收窄。
+**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace` ✅ (2.6.0)；仍缺 `putAllWithTTL`（在 `RMapCache.putAll`）、`remove` 联合返回的类型收窄（TS 以重载返回 `V|null|boolean`）。
 
 **`RMapCache`**：`expireEntry`（单条目，拒已过期）、`remainTimeToLive`（`-2/-1/ms`）、`putAll`（TTL 批量）、事件订阅双向 ✅ (1.4.0)；仍缺 `expireEntries` 批量、`getWithTTLOnly`（TS `get` 必刷新，无等价）、`compute*`、`RLeasedMap` 全族、`getMaxSize`。
 
@@ -49,7 +49,7 @@
 
 **`RGeo`**：已补 ✅ (1.5.0)：`search(GeoSearchArgs)` 全族（from lon-lat/member、radius/box、order、count/countAny）、`searchWithDistance/Position`、`storeSearchTo/storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）；命令选择与 4.6.1 jar 逐条对齐（半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`、Box→`GEOSEARCH`、存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE`；4.6.1 无 polygon，新版才有）；未继承 `RScoredSortedSet`。
 
-**`RTimeSeries`**：`addAll`、`getEntry/getValue/getAndRemove(Entry)`、`first/last`（值/Entry/Timestamp/count 变体）、`pollFirst/Last`（值/Entry/count）、`range/rangeReversed/entryRange/entryRangeReversed`（limit）、`remove/removeRange` ✅ (2.4.0，读侧按 TTL ZSET 惰性过滤；label 形状兼容 n=2/3/4)；仍缺 `stream()/iterator(int)` 视图与 `addListener`。
+**`RTimeSeries`**：`addAll`、`getEntry/getValue/getAndRemove(Entry)`、`first/last`（值/Entry/Timestamp/count 变体）、`pollFirst/Last`（值/Entry/count）、`range/rangeReversed/entryRange/entryRangeReversed`（limit）、`remove/removeRange` ✅ (2.4.0，读侧按 TTL ZSET 惰性过滤；label 形状兼容 n=2/3/4)；`stream/iterator` 分页取值 ✅ (2.6.0)；仍缺 `addListener`。
 
 **`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`getKeysStream*`、`time`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`。
 
@@ -102,5 +102,6 @@
 - **阶段 24（已完成 ✅，v2.3.0）**：`RScoredSortedSet` 收口——`addAll*` 条件批量（NX/XX/GT/LT CH）、`random`/`randomEntries`、`firstEntry`/`lastEntry`、非阻塞 `pollFirst/LastEntry`、阻塞 `pollFirst/LastWithTimeout`（BZPOPMIN/MAX）与 `pollFirst/LastFromAny`（BZMPOP）、区间读取改 `ZRANGE … BYSCORE [REV]`；验证见 `test/redisson.test.ts` + `test/live-phase24.test.ts`（2/2；含 Java 分数读回与真实阻塞唤醒）。
 - **阶段 25（已完成 ✅，v2.4.0）**：`RTimeSeries` 读写全族（addAll、getEntry/getValue、first/last/poll 全族、正反向 range/entryRange（limit）、getAndRemove、remove/removeRange、TTL 惰性过滤、label n=2/3/4 兼容）；验证见 `test/redisson.test.ts` + `test/live-phase25.test.ts`（2/2，含 Java ts-range/ts-add-label 往返）。
 - **阶段 26（已完成 ✅，v2.5.0）**：`RTopic/RPatternTopic/RShardedTopic` 管理面（channel/pattern names、countListeners、countSubscribers、getActiveTopics）、`RStream.fastClaim/fastAutoClaim`（JUSTID）与 `readMany`（多流 XREAD）、`RSet.addAllCounted/removeAllCounted/containsEach`；验证见 `test/redisson.test.ts` + `test/live-phase26.test.ts`（2/2，live 订阅计数/active topics、XCLAIM/XAUTOCLAIM JUSTID、多流读）。
+- **阶段 27（已完成 ✅，v2.6.0）**：`RMap` 物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace`；`RTimeSeries.stream/iterator` 分页产出值；验证见 `test/redisson.test.ts` + `test/live-phase27.test.ts`（2/2，视图 vs Java HSCAN、条件 replace/remove Java 读回、stream/iterator vs ts-range）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

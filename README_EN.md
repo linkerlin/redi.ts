@@ -71,7 +71,8 @@ with `tryLockAndGetToken` wait/non-blocking forms/`Multi`/`Red`, plus Java-style
 key synchronizers through
 `map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
-names), `RMap` (lazy HSCAN iterators, `HRANDFIELD`/`HSTRLEN`)/
+names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
+`readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
 `MapCache`(+Native)/`LocalCachedMap` (LRU/LFU under `maxSize`, `getCachedMap()`
 view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
@@ -96,7 +97,8 @@ distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
 `RTimeSeries` (`BBc0Lc0Lc0`; `addAll`, `getEntry`/`getValue`, first/last and
 poll families, forward/reversed ranges with limits, `getAndRemove`,
-`remove`/`removeRange`, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
+`remove`/`removeRange`, `stream`/`iterator` paging over values, lazy TTL
+filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed

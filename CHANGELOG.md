@@ -1,3 +1,20 @@
+## 2.6.0 — 2026-10-19
+
+Phase 27: map views + time-series streaming. Full suite:
+**224 tests / 31 files green in ~68 s**.
+
+- **`RMap`**: materialized Java views `keySet()`, `values()`, `entrySet()` with
+  the `(count)` and `(pattern, count)` overloads (backed by the lazy HSCAN
+  iterators; MATCH applies to encoded field names, same as Java), plus
+  `readAllEntrySet()`. `replace(key, value)` and the Java three-argument
+  `replace(key, oldValue, newValue)` are now both available
+  (`replaceWithCheck` kept as an alias).
+- **`RTimeSeries`**: `stream(count?)` and `iterator(count?)` async generators
+  over values in ascending timestamp order, page-by-page (index ZRANGE,
+  TTL-filtered, `count` = page size); no full-series materialization.
+- Tests: 2 mock + `test/live-phase27.test.ts` 2/2 (views/pattern vs Java HSCAN,
+  conditional replace/remove Java reads, stream/iterator vs Java ts-range).
+
 ## 2.5.0 — 2026-10-19
 
 Phase 26: remaining topic/stream/collection surfaces. Full suite:

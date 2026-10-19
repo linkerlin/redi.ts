@@ -61,7 +61,7 @@ const redisson = Redisson.create({ client: redis });
 六十多种，按你拿它来干什么分组。
 
 - 锁：`RLock`、`Fair`、`ReadWrite`、`Spin`、`NonReentrant`、`Fenced`（`tryLockAndGetToken` 非阻塞/等待两种语义）、`Multi`、`Red`；以及 Key 级同步器（`map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`，伴生命名与 Java 逐字节一致）
-- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN` 与惰性 HSCAN 迭代器）、`MapCache`（含 Native）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
+- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN`、惰性 HSCAN 迭代器、`keySet/values/entrySet` 视图、三参 `replace`）、`MapCache`（含 Native）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
 - 集合：`RSet`、`SetCache`
 - 列表和队列：`RList`、`RQueue`、`RDeque`（含阻塞、有界）；阻塞队列支持 `pollFromAny`/`pollFirstFromAny`/`pollLastFromAny`（BLPOP/BLMPOP）与 `move`/`moveWithTimeout`/`pollLastAndOfferFirstTo`（LMOVE/BLMOVE）
 - 排序：`RScoredSortedSet`（分数区间正反向、`addScore` 家族、`addIf*` 与 `addAll*` 条件批量、`random`/`randomEntries`、阻塞 `pollFirst/Last` 与 `FromAny`（BZPOP/BZMPOP）、按分数/排名删除，区间读取走 Redis 6.2+ `ZRANGE … BYSCORE`）；`RLexSortedSet`（成员不编码，原样放）
@@ -75,7 +75,7 @@ const redisson = Redisson.create({ client: redis });
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
 - 去重计数：`RHyperLogLog`
 - 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
-- 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`，TTL 惰性过滤）
+- 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`、`stream/iterator` 分页取值，TTL 惰性过滤）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
 - 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern）、`RScript`、`RFunction`、`RSearch`、`RVectorSet`
 - 优先级队列（`GO_ONLY`，ZSET 加分数）、`RTransferQueue`（`GO_ONLY`）、`RBatch`（13 类类型化门面），……
