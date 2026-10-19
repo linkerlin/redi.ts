@@ -60,8 +60,8 @@ const redisson = Redisson.create({ client: redis });
 
 六十多种，按你拿它来干什么分组。
 
-- 锁：`RLock`、`Fair`、`ReadWrite`、`Spin`、`NonReentrant`、`Fenced`（`tryLockAndGetToken` 非阻塞/等待两种语义）、`Multi`、`Red`；以及 Key 级同步器（`map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`，伴生命名与 Java 逐字节一致）
-- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN`、惰性 HSCAN 迭代器、`keySet/values/entrySet` 视图、三参 `replace`）、`MapCache`（含 Native）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
+- 锁：`RLock`（含 `lockInterruptibly` + AbortSignal）、`Fair`、`ReadWrite`、`Spin`、`NonReentrant`、`Fenced`（`tryLockAndGetToken` 非阻塞/等待两种语义）、`Multi`、`Red`；以及 Key 级同步器（`map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`，伴生命名与 Java 逐字节一致）
+- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN`、惰性 HSCAN 迭代器、`keySet/values/entrySet` 视图、三参 `replace`）、`MapCache`（含 Native；`expireEntries`/`getWithTTLOnly`/`getMaxSize`）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
 - 集合：`RSet`、`SetCache`
 - 列表和队列：`RList`、`RQueue`、`RDeque`（含阻塞、有界）；阻塞队列支持 `pollFromAny`/`pollFirstFromAny`/`pollLastFromAny`（BLPOP/BLMPOP）与 `move`/`moveWithTimeout`/`pollLastAndOfferFirstTo`（LMOVE/BLMOVE）
 - 排序：`RScoredSortedSet`（分数区间正反向、`addScore` 家族、`addIf*` 与 `addAll*` 条件批量、`random`/`randomEntries`、阻塞 `pollFirst/Last` 与 `FromAny`（BZPOP/BZMPOP）、按分数/排名删除，区间读取走 Redis 6.2+ `ZRANGE … BYSCORE`）；`RLexSortedSet`（成员不编码，原样放）

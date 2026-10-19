@@ -1460,3 +1460,43 @@ describe('phase 27: map views + time-series stream (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 28: interruptible lock + mapcache remainder (mock)', () => {
+  it('lockInterruptibly rejects with AbortError before acquiring', async () => {
+    const r = make();
+    const l = r.getLock('p28:lock');
+    const pre = new AbortController();
+    pre.abort();
+    await expect(l.lockInterruptibly(undefined, pre.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await l.isLocked()).toBe(false);
+
+    await l.lockInterruptibly(30000);
+    expect(await l.isLocked()).toBe(true);
+    await l.unlock();
+
+    // contended: holder on thread 2, waiter aborts while blocked
+    await l.lock(30000, 2);
+    const ac = new AbortController();
+    const pending = l.lockInterruptibly(undefined, ac.signal, 1);
+    setTimeout(() => ac.abort(), 120);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await l.isLocked()).toBe(true); // holder untouched
+    await l.unlock(2);
+    expect(await l.isLocked()).toBe(false);
+    await r.shutdown();
+  });
+
+  it('RMapCache expireEntries/getWithTTLOnly/getMaxSize', async () => {
+    const r = make();
+    const mc = r.getMapCache<string, string>('p28:mc');
+    await mc.put('a', '1');
+    await mc.put('b', '2');
+    expect(await mc.getMaxSize()).toBe(0);
+    expect(await mc.expireEntries(['a', 'b', 'ghost'], 60000)).toBe(2);
+    expect(await mc.getWithTTLOnly('a')).toBe('1');
+    expect(await mc.getWithTTLOnly('ghost')).toBeNull();
+    await mc.setMaxSize(5, 'LRU');
+    expect(await mc.getMaxSize()).toBe(5);
+    await r.shutdown();
+  });
+});

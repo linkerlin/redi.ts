@@ -66,14 +66,16 @@ work on a Cluster out of the box; `test/live-cluster.test.ts` exercises a real
 
 ## Coverage
 
-60+ structures: locks (`RLock`/`Fair`/`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`
+60+ structures: locks (`RLock` with `lockInterruptibly` + AbortSignal/`Fair`/
+`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`
 with `tryLockAndGetToken` wait/non-blocking forms/`Multi`/`Red`, plus Java-style
 key synchronizers through
 `map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
 names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
-`MapCache`(+Native)/`LocalCachedMap` (LRU/LFU under `maxSize`, `getCachedMap()`
+`MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`)/
+`LocalCachedMap` (LRU/LFU under `maxSize`, `getCachedMap()`
 view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score

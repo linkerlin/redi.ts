@@ -241,6 +241,35 @@ export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
     for (const [k, v] of entries) await this.put(k, v, ttlMs, maxIdleMs);
   }
 
+  /** Java `expireEntries(Set<K>, ttl, maxIdle)`: apply expiry to many keys;
+   *  returns how many existing (non-expired) entries were updated. */
+  async expireEntries(keys: K[], ttlMs: number, maxIdleMs = 0): Promise<number> {
+    let n = 0;
+    for (const k of keys) if (await this.expireEntry(k, ttlMs, maxIdleMs)) n += 1;
+    return n;
+  }
+
+  /** Java `getWithTTLOnly(K)`: value without touching idle/access bookkeeping. */
+  async getWithTTLOnly(key: K): Promise<V | null> {
+    const field = this.encodeKey(key);
+    const raw = await this.readStoredBuffer(field);
+    const buf = this.toBuf(raw);
+    if (buf === null) return null;
+    const u = unpackMapCacheValue(buf);
+    const payload = u.ok ? u.codec : buf.toString('utf8');
+    try {
+      return this.codec.decode(payload) as V;
+    } catch {
+      return payload as unknown as V;
+    }
+  }
+
+  /** Java `getMaxSize()`: configured max-size (0 = unbounded). */
+  async getMaxSize(): Promise<number> {
+    const raw = await this.redis.hget(this.optionsKey, 'max-size');
+    return raw === null ? 0 : Number(raw);
+  }
+
   /** Redisson RMapCache.expireEntry: set TTL / maxIdle on an existing entry.
    * Returns false when the entry is missing or already expired (Java: no
    * resurrection) and true when the new expiry was written. */

@@ -431,6 +431,28 @@ function threadField(clientId: string, threadId: number | string): string {
   return `${clientId}:${threadId}`;
 }
 
+function abortError(): Error {
+  const e = new Error('The operation was aborted');
+  e.name = 'AbortError';
+  return e;
+}
+
+/** Wait for a wake-up, rejecting with AbortError when `signal` fires first. */
+async function waitForWakeAbortable(redis: Redis, channel: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return waitForWake(redis, channel, timeoutMs);
+  if (signal.aborted) throw abortError();
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([waitForWake(redis, channel, timeoutMs), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Subscribe once and wait for a single wake-up or timeout. */
 async function waitForWake(redis: Redis, channel: string, timeoutMs: number): Promise<void> {
   let sub: Redis | null = null;
@@ -556,6 +578,24 @@ export class RLock extends RedisDataStructure {
         return true;
       }
       if (Date.now() >= deadline) return false;
+    }
+  }
+
+  /** Java `lockInterruptibly()`: acquire, but give up with an `AbortError`
+   *  when `signal` aborts while waiting (TS has no thread interruption, so an
+   *  AbortSignal plays that role). Already-acquired locks are unaffected. */
+  async lockInterruptibly(leaseTimeMs?: number, signal?: AbortSignal, threadId: number | string = 1): Promise<void> {
+    if (signal?.aborted) throw abortError();
+    const useWatchdog = !leaseTimeMs || leaseTimeMs <= 0;
+    const lease = useWatchdog ? this.watchdogMs : leaseTimeMs!;
+    for (;;) {
+      if (signal?.aborted) throw abortError();
+      const ttl = await this.tryAcquire(lease, threadId);
+      if (ttl === null) {
+        if (useWatchdog) this.startWatchdog(threadId);
+        return;
+      }
+      await waitForWakeAbortable(this.redis, this.channel, Math.min(Math.max(ttl, 1), 1000), signal);
     }
   }
 

@@ -1,3 +1,24 @@
+## 2.7.0 — 2026-10-19
+
+Phase 28: interruptible lock + map-cache remainder. Full suite:
+**228 tests / 32 files green in ~72 s**.
+
+- **`RLock.lockInterruptibly(leaseTimeMs?, signal?, threadId?)`** — Java
+  `lockInterruptibly()` analogue: blocks until acquired, but an `AbortSignal`
+  aborts the wait with an `AbortError` (TS has no thread interruption). A
+  pre-aborted signal never acquires; holders are unaffected.
+- **`RMapCache`**: `expireEntries(keys, ttlMs, maxIdleMs?)` (batch expiry,
+  returns updated count), `getWithTTLOnly(key)` (decode without refreshing
+  idle/access bookkeeping), `getMaxSize()` (reads `redisson_options`
+  max-size). `setMaxSize(size, mode?)` was already present.
+- Note: `RLock` drift was re-audited against the 4.6.1 jar — `RedissonRedLock`
+  inherits `RedissonMultiLock` and performs no drift subtraction (it re-applies
+  the full lease at the end); the TS implementation already mirrors that, so
+  no code change was needed. GAP wording corrected.
+- Tests: 2 mock + `test/live-phase28.test.ts` 2/2 (contended abort across two
+  clients; TTL ZSET deadlines from `expireEntries`, TTL-only reads,
+  max-size persistence).
+
 ## 2.6.0 — 2026-10-19
 
 Phase 27: map views + time-series streaming. Full suite:
