@@ -1,3 +1,32 @@
+## 2.2.0 — 2026-10-19
+
+Phase 23: operations & scalar remainder. Full suite: **207 tests / 27 files
+green in ~64 s**.
+
+- **`RKeys`**: `expire(key, ttlMs)` now has the Java multi-key overload
+  (`expire(ttlMs, ...keys)` → count), same for `expireAt`; added
+  `clearExpire` (PERSIST), `remainTimeToLive` (PTTL, `-2`/`-1`/ms),
+  `getSlot` (client-side CRC16-XMODEM, hash-tag aware — Java delegates to
+  `CLUSTER KEYSLOT`), `move(key, db)` (MOVE), `unlinkByPattern`
+  (SCAN + UNLINK with DELETE fallback).
+- **`RAtomicLong` / `RAtomicDouble`**: `getAndIncrement` / `getAndDecrement`,
+  Long/Double `setIfLess` / `setIfGreater` (single Lua, redi.go scripts),
+  Double `incrementAndGet` / `decrementAndGet` / `getAndDelete` /
+  `compareAndDelete`.
+- **`RBuckets`**: `setIfAllKeysExist` / `setIfAllKeysAbsent` via `MSETEX …
+  NX|XX [PX ms]` (Redis 8+, same command as Java 4.6.1); without MSETEX the
+  call fails loudly with a capability message instead of degrading.
+- **`RScoredSortedSet`**: `addIfExists` (ZADD XX CH), `addIfLess` (LT CH),
+  `addIfGreater` (GT CH) alongside the existing `addIfAbsent` (NX) — exact
+  Java 4.6.1 command shapes; scores cross-checked through Java reads.
+- Tests: 4 mock regressions + `test/live-phase23.test.ts` 4/4 (expire family /
+  MOVE to db 9 / slots vs a live cluster node's `CLUSTER KEYSLOT` / MSETEX
+  NX+XX written by TS and read by Java / atomic exactness incl. `0.1+0.2` on
+  the wire / ZADD GT/LT scores read back by Java).
+- Test infra: the resident-probe recompile now uses a shell command
+  (`execSync`) — Node ≥ 20.12 refuses to `execFile` a `.cmd` without a shell
+  (EINVAL), which surfaced the first time TsProbe changed on this Node.
+
 ## 2.1.0 — 2026-10-19
 
 Phase 22: closes every remaining row of 演进方案 §3 (API depth). Full suite:

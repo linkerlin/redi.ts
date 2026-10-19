@@ -47,10 +47,10 @@
 | RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON); Bounded uses `redisson_bqs:{name}` as available permits: atomic DECRBY+RPUSH / INCRBY+PUBLISH, `put`/timed `offer` block, `remainingCapacity()`; BLPOP/BRPOP use dedicated connections + float seconds (0 = non-blocking); `drainTo` extracts with one atomic Lua; blocking queue/deque also expose `pollFromAny`/`pollFromAnyWithName` (BLPOP), `pollFirstFromAny`/`pollLastFromAny` (BLMPOP + COUNT), `pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo` (BLMOVE), deque `move`/`moveWithTimeout` (LMOVE/BLMOVE); RMap 另有 `valueSize`（HSTRLEN）、`randomKeys`/`randomEntries`（HRANDFIELD [WITHVALUES]）、`keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)` 惰性 HSCAN 异步迭代器 | WIRE_OK + live bidirectional ✅ + live phase 4/7/16/17/18 + live phase 20 ✅ + live phase 22 (真实 BLPOP/BLMPOP/BLMOVE 唤醒 ✅) |
 | RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call`; key synchronizers shared with RMap (see below) | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) |
 | Key synchronizers (RMap/RSet/MapCache/SetCache/Multimap) | `getLock`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`: companion = `suffixName(name, hash128toBase64(encode(key)) + ":" + {lock\|fairlock\|rw_lock\|semaphore\|countdownlatch\|permitexpirablesemaphore})`; owners inherit the client id/watchdog | WIRE_OK + live phase 19（6/6 命名与 Java 4.6.1 逐字节一致、Key 锁双向互斥 ✅） |
-| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank`/`removeRangeByScore`；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ |
+| RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank`/`removeRangeByScore`；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) 直接对齐 4.6.1 命令形状；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ + live phase 23 (GT/LT/XX 分数 Java 读回 ✅) |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
-| RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua) | WIRE_OK + live bidirectional ✅ |
-| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) |
+| RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua); RBuckets conditional multi-set uses Java's `MSETEX numkeys k v… NX\|XX [PX ms]` (Redis 8+; without MSETEX it fails loudly), values codec-encoded | WIRE_OK + live bidirectional ✅ + live phase 23 (MSETEX NX/XX + Java read ✅) |
+| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value; `getAndIncrement`/`getAndDecrement`/`getAndDelete` and `setIfLess`/`setIfGreater` (single Lua from redi.go) on both; Double `compareAndDelete` | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) + live phase 23 (scalar remainder ✅) |
 | RLongAdder / RDoubleAdder | `{name}:adder-topic` + `{name}:<id>:counter` + `{name}:<id>:semaphore` hash-tag 三元组；sum 只返回 GETDEL（请求者自 flush 已包含在内）；订阅先挂 handler 后 await ack | WIRE_OK + live phase 3 |
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
 | RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段）; `putAll(mapping,ttl,maxIdle)` per-key、`expireEntry`（拒已过期条目、重写 maxIdle 打包）、`remainTimeToLive`（`-2` 缺失/已过期、`-1` 无过期）; `addListener`/`removeListener` 走独立连接 + `messageBuffer`（u64LE 长度前缀字节保真），写 `has-listeners=1` 使 Java 写端也发布，事件负载以 Buffer 发送; `unlink()` clears all companions | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） + live phase 19（双向事件 ✅、过期语义 ✅） |
@@ -71,7 +71,7 @@
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128; `unlink()` clears both | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
 | RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads); successful acquire renews `keepAliveTime` on config/value/permits inside the Lua (and companions inherit a config TTL when keepAlive is 0); `unlink()` clears value/permits | WIRE_OK + live shared-window ✅ + live phase 22 (TS/Java 双向续期 ✅) |
-| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 13 typed facades — bucket/map/list/set/queue/deque/atomicLong/atomicDouble/bitset/geo/stream/mapCacheNative/scoredSortedSet, reads resolve on execute) | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） + live phase 22（batch geo/bitset/HPEXPIRE ✅） |
+| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 13 typed facades — bucket/map/list/set/queue/deque/atomicLong/atomicDouble/bitset/geo/stream/mapCacheNative/scoredSortedSet, reads resolve on execute); RKeys: `PEXPIRE`/`PEXPIREAT` single + multi-key, `PERSIST`/`PTTL`, `MOVE`, `SCAN`+`UNLINK`, `getSlot` computed client-side (CRC16-XMODEM, hash-tag aware; Java delegates to `CLUSTER KEYSLOT`) | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） + live phase 22（batch geo/bitset/HPEXPIRE ✅） + live phase 23（keys ops / slots vs 集群节点 / MOVE db9 ✅） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
 | RSortedSet / RTransaction / RRemoteService / RExecutorService / LiveObject / reactive | — | REFUSE_AS_FAKE |
 | PRO-only (ReliableQueue/LocalCachedMapCache/ReliablePubSubTopic/BitVectorStore) | — | PRO (throw) |
@@ -79,9 +79,9 @@
 
 ## Verification
 
-- `npm test`: 199 tests / 26 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
-  mock functional (incl. phase-21 delayed-queue migrator lifecycle and phase-22
-  §3 leftovers), `interop`
+- `npm test`: 207 tests / 27 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+  mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
+  §3 leftovers and phase-23 keys/atomic remainder), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -113,6 +113,8 @@
   `live-phase22` (fenced token sequence TS→Java→TS / real BLPOP+BLMPOP+BLMOVE
   wake-ups / keepAlive renewal by TS and Java / periodic multimap sweep / batch
   geo+HPEXPIRE wire, 5/5 PASS),
+  `live-phase23` (RKeys expire family + MOVE to db 9 + slots vs a live cluster
+  node / MSETEX NX+XX read by Java / atomic exactness / ZADD GT/LT scores, 4/4 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

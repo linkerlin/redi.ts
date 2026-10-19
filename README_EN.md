@@ -77,8 +77,10 @@ view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
 ranges incl. reversed forms, `addScore` family, deletion by score/rank),
-`RLexSortedSet` (raw members), `RBucket`/`RBuckets`/`RBinaryStream`/`RJsonBucket`,
-`RAtomicLong`/`Double`, `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
+`RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
+multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
+`RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,
+`getAndDelete`, `compareAndDelete`), `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
 (keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`),
@@ -87,7 +89,8 @@ ranges incl. reversed forms, `addScore` family, deletion by score/rank),
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
 `RTimeSeries` (`BBc0Lc0Lc0`), `RBloomFilter` (HighwayHash-128, verified vectors),
-`RKeys`/`RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
+`RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
+move, unlinkByPattern), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).

@@ -27,6 +27,21 @@ return old`;
 const ATOMIC_ADD_AND_GET = `redis.call('incrby', KEYS[1], ARGV[1])
 return redis.call('get', KEYS[1])`;
 
+const ATOMIC_SET_IF = `local current = tonumber(redis.call('get', KEYS[1]) or '0')
+if (ARGV[1] == 'less' and current < tonumber(ARGV[2]))
+        or (ARGV[1] == 'greater' and current > tonumber(ARGV[2])) then
+    redis.call('set', KEYS[1], ARGV[3])
+    return 1
+end
+return 0`;
+
+const DOUBLE_COMPARE_DELETE = `local current = redis.call('get', KEYS[1])
+if current ~= false and tonumber(current) == tonumber(ARGV[1]) then
+    redis.call('del', KEYS[1])
+    return 1
+end
+return 0`;
+
 export type LongValue = number | bigint;
 
 function parseLong(raw: string | null): LongValue {
@@ -73,6 +88,18 @@ export class RAtomicLong extends RedisDataStructure {
     const raw = await luaEval(this.redis, ATOMIC_GET_AND_ADD, 1, this.name, String(delta));
     return parseLong(raw === null ? null : String(raw));
   }
+  async getAndIncrement(): Promise<LongValue> {
+    return this.getAndAdd(1);
+  }
+  async getAndDecrement(): Promise<LongValue> {
+    return this.getAndAdd(-1);
+  }
+  async setIfLess(threshold: LongValue, value: LongValue): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_SET_IF, 1, this.name, 'less', String(threshold), String(value))) === 1;
+  }
+  async setIfGreater(threshold: LongValue, value: LongValue): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_SET_IF, 1, this.name, 'greater', String(threshold), String(value))) === 1;
+  }
   async compareAndSet(expect: LongValue, update: LongValue): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_CAS, 1, this.name, String(expect), String(update))) === 1;
   }
@@ -102,6 +129,12 @@ export class RAtomicDouble extends RedisDataStructure {
   async addAndGet(delta: number): Promise<number> {
     return Number(await this.redis.incrbyfloat(this.name, delta));
   }
+  async incrementAndGet(): Promise<number> {
+    return this.addAndGet(1);
+  }
+  async decrementAndGet(): Promise<number> {
+    return this.addAndGet(-1);
+  }
   async getAndAdd(delta: number): Promise<number> {
     // Single Lua round-trip: return the OLD value exactly as stored. The old
     // `newValue - delta` client-side reverse calculation accumulated float
@@ -111,6 +144,28 @@ if old == false then old = '0' end
 redis.call('incrbyfloat', KEYS[1], ARGV[1])
 return old`, 1, this.name, String(delta));
     return Number(old ?? 0);
+  }
+  async getAndIncrement(): Promise<number> {
+    return this.getAndAdd(1);
+  }
+  async getAndDecrement(): Promise<number> {
+    return this.getAndAdd(-1);
+  }
+  async getAndDelete(): Promise<number | null> {
+    const v = await (this.redis as any).getdel?.(this.name);
+    if (v !== undefined) return v === null ? null : Number(v);
+    const old = await this.redis.get(this.name);
+    if (old !== null) await this.redis.del(this.name);
+    return old === null ? null : Number(old);
+  }
+  async setIfLess(threshold: number, value: number): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_SET_IF, 1, this.name, 'less', String(threshold), String(value))) === 1;
+  }
+  async setIfGreater(threshold: number, value: number): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, ATOMIC_SET_IF, 1, this.name, 'greater', String(threshold), String(value))) === 1;
+  }
+  async compareAndDelete(expect: number): Promise<boolean> {
+    return toNumber(await luaEval(this.redis, DOUBLE_COMPARE_DELETE, 1, this.name, String(expect))) === 1;
   }
   async compareAndSet(expect: number, update: number): Promise<boolean> {
     const s = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;

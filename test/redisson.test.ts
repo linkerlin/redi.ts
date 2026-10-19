@@ -1182,3 +1182,83 @@ describe('phase 22: §3 leftovers (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 23: RKeys ops + atomic scalars (mock)', () => {
+  it('expire overload/expireAt/clearExpire/remainTimeToLive/getSlot/unlinkByPattern', async () => {
+    const r = make();
+    await r.redis.set('p23:k1', 'v');
+    await r.redis.set('p23:k2', 'v');
+    expect(await r.getKeys().expire('p23:k1', 60000)).toBe(true);
+    expect(await r.getKeys().remainTimeToLive('p23:k1')).toBeGreaterThan(0);
+    expect(await r.getKeys().clearExpire('p23:k1')).toBe(true);
+    expect(await r.getKeys().remainTimeToLive('p23:k1')).toBe(-1);
+    expect(await r.getKeys().remainTimeToLive('p23:missing')).toBe(-2);
+
+    // Java expire(Duration, String...) multi-key form (overload by first arg)
+    expect(await r.getKeys().expire(60000, 'p23:k1', 'p23:k2')).toBe(2);
+    const ts = Date.now() + 60000;
+    expect(await r.getKeys().expireAt('p23:k1', ts)).toBe(true);
+    expect(await r.getKeys().expireAt(ts, 'p23:k1', 'p23:k2')).toBe(2);
+
+    // cluster slot: CRC16-XMODEM vector + hash-tag equality
+    expect(await r.getKeys().getSlot('123456789')).toBe(12739);
+    expect(await r.getKeys().getSlot('{user1000}.a')).toBe(await r.getKeys().getSlot('{user1000}.b'));
+    expect(await r.getKeys().getSlot('foo{}{bar}')).toBe(await r.getKeys().getSlot('foo{}{bar}'));
+
+    await r.redis.set('p23:pat:a', '1');
+    await r.redis.set('p23:pat:b', '1');
+    expect(await r.getKeys().unlinkByPattern('p23:pat:*')).toBe(2);
+    await r.shutdown();
+  });
+
+  it('atomic Long/Double remainder: getAndInc/Dec, setIfLess/Greater, getAndDelete, compareAndDelete', async () => {
+    const r = make();
+    const l = r.getAtomicLong('p23:l');
+    await l.set(10);
+    expect(await l.getAndIncrement()).toBe(10);
+    expect(await l.getAndDecrement()).toBe(11);
+    expect(await l.get()).toBe(10);
+    expect(await l.setIfLess(11, 5)).toBe(true); // 10 < 11 → set 5
+    expect(await l.setIfLess(4, 99)).toBe(false); // 5 >= 4
+    expect(await l.get()).toBe(5);
+    expect(await l.setIfGreater(4, 7)).toBe(true); // 5 > 4 → set 7
+    expect(await l.setIfGreater(8, 1)).toBe(false); // 7 <= 8
+    expect(await l.getAndDelete()).toBe(7);
+    expect(await l.get()).toBe(0);
+
+    const d = r.getAtomicDouble('p23:d');
+    await d.set(2.5);
+    expect(await d.incrementAndGet()).toBe(3.5);
+    expect(await d.decrementAndGet()).toBe(2.5);
+    expect(await d.getAndIncrement()).toBe(2.5);
+    expect(await d.getAndDecrement()).toBe(3.5);
+    expect(await d.get()).toBe(2.5);
+    expect(await d.setIfLess(3, 1.5)).toBe(true);
+    expect(await d.setIfGreater(2, 3.3)).toBe(false);
+    expect(await d.compareAndDelete(2)).toBe(false);
+    expect(await d.compareAndDelete(1.5)).toBe(true);
+    expect(await d.getAndDelete()).toBeNull();
+    await r.shutdown();
+  });
+
+  it('zset addIfAbsent/addIfExists honor the Java ZADD flags (mock has no GT/LT)', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('p23:z');
+    expect(await z.addIfAbsent(1, 'a')).toBe(true);
+    expect(await z.addIfAbsent(2, 'a')).toBe(false);
+    expect(await z.getScore('a')).toBe(1);
+    expect(await z.addIfExists(2, 'a')).toBe(true);
+    expect(await z.getScore('a')).toBe(2);
+    expect(await z.addIfExists(9, 'ghost')).toBe(false);
+    expect(await z.contains('ghost')).toBe(false);
+    await r.shutdown();
+  });
+
+  it('buckets conditional writes require MSETEX and fail loudly without it', async () => {
+    const r = make();
+    const b = r.getBuckets();
+    await expect(b.setIfAllKeysAbsent({ 'p23:b:a': 1 })).rejects.toThrow(/MSETEX/);
+    await expect(b.setIfAllKeysExist({ 'p23:b:a': 1 })).rejects.toThrow(/MSETEX/);
+    await r.shutdown();
+  });
+});

@@ -136,6 +136,32 @@ export class RBuckets {
     for (const [k, v] of entries) flat.push(k, this.codec.encode(v));
     return ((await this.redis.msetnx(...flat)) as number) === 1;
   }
+  /** Java `setIfAllKeysExist(SetArgs)`: MSETEX ... XX — all keys must already
+   *  exist, else nothing is written. Requires Redis 8+ (MSETEX). */
+  async setIfAllKeysExist(mapping: Record<string, unknown>, ttlMs?: number): Promise<boolean> {
+    return this.setIfAll('XX', mapping, ttlMs);
+  }
+  /** Java `setIfAllKeysAbsent(SetArgs)`: MSETEX ... NX. Requires Redis 8+. */
+  async setIfAllKeysAbsent(mapping: Record<string, unknown>, ttlMs?: number): Promise<boolean> {
+    return this.setIfAll('NX', mapping, ttlMs);
+  }
+  private async setIfAll(mode: 'NX' | 'XX', mapping: Record<string, unknown>, ttlMs?: number): Promise<boolean> {
+    const entries = Object.entries(mapping);
+    if (entries.length === 0) return false;
+    const args: (string | number)[] = [entries.length];
+    for (const [k, v] of entries) args.push(k, this.codec.encode(v));
+    args.push(mode);
+    if (ttlMs && ttlMs > 0) args.push('PX', ttlMs);
+    try {
+      return toNumber(await (this.redis as any).msetex(...args)) === 1;
+    } catch (e) {
+      // Missing on Redis < 8 and on ioredis-mock (the method itself is absent).
+      if (/unknown command|unsupported|is not a function/i.test(String((e as Error)?.message ?? e))) {
+        throw new Error('redi.ts: setIfAllKeysExist/Absent requires Redis 8+ (MSETEX)');
+      }
+      throw e;
+    }
+  }
 }
 
 export class RMap<K = any, V = any> extends RedisKeyedStructure<K> {
@@ -1108,6 +1134,18 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
   }
   async addIfAbsent(score: number, value: V): Promise<boolean> {
     return ((await this.redis.zadd(this.name, 'NX', String(score), this.encodeValue(value))) as number) > 0;
+  }
+  /** Java `addIfExists(double, V)`: ZADD XX CH — true when the score changed. */
+  async addIfExists(score: number, value: V): Promise<boolean> {
+    return ((await (this.redis as any).zadd(this.name, 'XX', 'CH', String(score), this.encodeValue(value))) as number) === 1;
+  }
+  /** Java `addIfLess(double, V)`: ZADD LT CH — adds missing, lowers existing. */
+  async addIfLess(score: number, value: V): Promise<boolean> {
+    return ((await (this.redis as any).zadd(this.name, 'LT', 'CH', String(score), this.encodeValue(value))) as number) === 1;
+  }
+  /** Java `addIfGreater(double, V)`: ZADD GT CH. */
+  async addIfGreater(score: number, value: V): Promise<boolean> {
+    return ((await (this.redis as any).zadd(this.name, 'GT', 'CH', String(score), this.encodeValue(value))) as number) === 1;
   }
   async remove(value: V): Promise<boolean> {
     return ((await this.redis.zrem(this.name, this.encodeValue(value))) as number) > 0;

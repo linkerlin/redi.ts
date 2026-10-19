@@ -426,3 +426,29 @@ export function decodeMapCacheEvent(raw: string | Buffer): string[] {
   }
   return parts;
 }
+
+/** CRC16-XMODEM (poly 0x1021, init 0) over the UTF-8 bytes — the Redis
+ * Cluster slot hash. Vectors: '123456789' -> 0x31C3. */
+export function crc16(data: string): number {
+  const buf = Buffer.from(data, 'utf8');
+  let crc = 0;
+  for (const b of buf) {
+    crc ^= b << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc & 0x8000) !== 0 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+    }
+  }
+  return crc;
+}
+
+/** Redis Cluster slot of a key: the `{tag}` content when a non-empty tag is
+ * present, else the whole key; 0..16383. Matches Java `RKeys.getSlot` /
+ * `ClusterSlotHashUtil`. */
+export function clusterSlot(key: string): number {
+  const open = key.indexOf('{');
+  if (open >= 0) {
+    const close = key.indexOf('}', open + 1);
+    if (close > open + 1) return crc16(key.slice(open + 1, close)) & 0x3fff;
+  }
+  return crc16(key) & 0x3fff;
+}

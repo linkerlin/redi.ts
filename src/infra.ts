@@ -6,7 +6,7 @@ import type { Redis } from 'ioredis';
 import { RedisDataStructure } from './base.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
-import { luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
+import { clusterSlot, luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
 import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchDeque, BatchGeo, BatchList, BatchMap, BatchMapCacheNative, BatchQueue, BatchScoredSortedSet, BatchSet, BatchStream } from './batch.js';
 
 // -- RKeys -----------------------------------------------------------------------
@@ -59,8 +59,53 @@ export class RKeys {
   async renamenx(oldKey: string, newKey: string): Promise<boolean> {
     return ((await this.redis.renamenx(oldKey, newKey)) as number) === 1;
   }
-  async expire(key: string, ttlMs: number): Promise<boolean> {
-    return ((await this.redis.pexpire(key, ttlMs)) as number) === 1;
+  /** Java `expire(String, long, TimeUnit)`: single key. */
+  async expire(key: string, ttlMs: number): Promise<boolean>;
+  /** Java `expire(Duration, String...)`: many keys, returns how many got a TTL. */
+  async expire(ttlMs: number, ...keys: string[]): Promise<number>;
+  async expire(a: string | number, ...rest: (number | string)[]): Promise<boolean | number> {
+    if (typeof a === 'string') {
+      return ((await this.redis.pexpire(a, Number(rest[0]))) as number) === 1;
+    }
+    const keys = rest as string[];
+    if (keys.length === 0) return 0;
+    const pipe = (this.redis as any).pipeline?.();
+    if (!pipe) {
+      let n = 0;
+      for (const k of keys) n += ((await this.redis.pexpire(k, a)) as number) === 1 ? 1 : 0;
+      return n;
+    }
+    for (const k of keys) pipe.pexpire(k, a);
+    const res = await pipe.exec();
+    return (res ?? []).reduce((n: number, [e, r]: [unknown, unknown]) => n + (e === null && Number(r) === 1 ? 1 : 0), 0);
+  }
+  /** Java `expireAt(String, long)` / `expireAt(Instant, String...)` (ms epoch). */
+  async expireAt(key: string, timestampMs: number): Promise<boolean>;
+  async expireAt(timestampMs: number, ...keys: string[]): Promise<number>;
+  async expireAt(a: string | number, ...rest: (number | string)[]): Promise<boolean | number> {
+    if (typeof a === 'string') {
+      return ((await this.redis.pexpireat(a, Number(rest[0]))) as number) === 1;
+    }
+    const keys = rest as string[];
+    let n = 0;
+    for (const k of keys) n += ((await this.redis.pexpireat(k, a)) as number) === 1 ? 1 : 0;
+    return n;
+  }
+  /** Java `clearExpire(String)`: PERSIST — true when a TTL was removed. */
+  async clearExpire(key: string): Promise<boolean> {
+    return ((await this.redis.persist(key)) as number) === 1;
+  }
+  /** Java `remainTimeToLive(String)`: PTTL — ms, `-1` no TTL, `-2` missing. */
+  async remainTimeToLive(key: string): Promise<number> {
+    return this.redis.pttl(key);
+  }
+  /** Java `getSlot(String)`: Redis Cluster slot (hash tag honoured). */
+  async getSlot(key: string): Promise<number> {
+    return clusterSlot(key);
+  }
+  /** Java `move(String, int)`: MOVE key to another logical database. */
+  async move(key: string, db: number): Promise<boolean> {
+    return ((await this.redis.move(key, db)) as number) === 1;
   }
   async touch(...keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
@@ -69,6 +114,21 @@ export class RKeys {
     } catch {
       return 0;
     }
+  }
+  /** Java `unlinkByPattern(String)`: SCAN MATCH + UNLINK (DELETE fallback). */
+  async unlinkByPattern(pattern: string): Promise<number> {
+    const keys = await this.getKeys(pattern);
+    if (keys.length === 0) return 0;
+    let total = 0;
+    for (let i = 0; i < keys.length; i += 500) {
+      const chunk = keys.slice(i, i + 500);
+      try {
+        total += await this.redis.unlink(...chunk);
+      } catch {
+        total += await this.redis.del(...chunk);
+      }
+    }
+    return total;
   }
   async flushdb(): Promise<void> {
     await this.redis.flushdb();

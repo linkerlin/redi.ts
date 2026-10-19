@@ -16,7 +16,7 @@
  * via Maven once per worker; afterwards the helper spawns `java -cp ...`
  * directly, skipping Maven/JVM per call.
  */
-import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -51,7 +51,11 @@ function ensureBuilt(): Promise<void> {
     );
     const stale = !existsSync(PROBE_CLASS_FILE) || mtime(PROBE_CLASS_FILE) < srcMax || !existsSync(CP_FILE);
     if (!stale) return;
-    execFileSync(MVN, ['-f', path.join(INTEROP, 'pom.xml'), '-q', 'compile', 'dependency:build-classpath', '-Dmdep.outputFile=target/cp.txt'], {
+    // execSync (not execFileSync): Node >= 20.12 refuses to spawn .cmd/.bat
+    // without a shell on Windows (EINVAL), and a shell command avoids the
+    // DEP0190 args+shell warning. Paths here contain no spaces.
+    const cmd = `"${MVN}" -f "${path.join(INTEROP, 'pom.xml')}" -q compile dependency:build-classpath "-Dmdep.outputFile=target/cp.txt"`;
+    execSync(cmd, {
       cwd: ROOT,
       stdio: 'pipe',
       timeout: 600000,

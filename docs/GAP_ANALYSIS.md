@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.1.0（2026-10-19）更新阶段 22 收口项（FencedLock `tryLockAndGetToken`、阻塞队列 pollFromAny 族、RateLimiter keepAlive、LocalCachedMap LRU/LFU、MultimapCache 周期清扫、RBatch 13 门面）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.2.0（2026-10-19）更新阶段 23 收口项（RKeys 运维族、原子标量余项、RBuckets 条件写、ZSet addIf 族）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -27,7 +27,7 @@
 
 按面积排序。命名精确到 Java 签名。
 
-**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；仍缺 `addIfExists/Less/Greater`、`random`、`pollFirst/Last` 阻塞版及 `FromAny`（`BZMPOP`）、`ZRANGESTORE`、专用迭代器；`rangeByScore` 调已废弃 `ZRANGEBYSCORE`。
+**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZREVRANGEBYSCORE key end start`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) ✅ (2.2.0，命令形状与 4.6.1 逐字一致)；仍缺 `random`、`pollFirst/Last` 阻塞版及 `FromAny`（`BZMPOP`）、`ZRANGESTORE`、专用迭代器；`rangeByScore` 调已废弃 `ZRANGEBYSCORE`。
 
 **`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`addIfAbsent`、`iterator/distributedIterator/stream` 视图。
 
@@ -51,13 +51,13 @@
 
 **`RTimeSeries`**：`add(TimeSeriesAddArgs)`（label+TTL 全参）、`addAll/addIfAbsent/addOrReplace`、`first/last/entryRange/rangeReversed` 全族、label 过滤读、聚合、`info` 全缺。
 
-**`RKeys`**：`move/migrate/copy`(跨节点)/`expire`(多key)/`clearExpire/remainTimeToLive/getSlot/getKeysStream/unlinkByPattern/time/swapdb/并行flush/监听` 缺。
+**`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`getKeysStream*`、`time`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`。
 
 **`RScript`**：丢 `mode`（集群读写路由）、缺 `STRING/MAPVALUELIST` 精确 cast、`scriptKill/scriptFlush`。
 
 **`RFunction`**：缺 `libraryName`（跨语言库名分叉）、`dump/restore/kill/list/stats`。
 
-**`RBuckets`**：缺 `setIfAllKeysExist/setIfAllKeysAbsent`（带 TTL 条件批量）。
+**`RBuckets`**：`setIfAllKeysExist/setIfAllKeysAbsent` ✅ (2.2.0，`MSETEX … NX|XX [PX ms]`，Redis 8+；无该命令时显式报错而非降级)。
 
 **`RJsonBucket`**：`JSON.SET/GET/DEL` 子集 vs ~40 方法（path 系列、`array*`、`compareAndSet` 全缺）。
 
@@ -65,7 +65,7 @@
 
 **概率三件套**：`RTDigest`（缺 merge/min/max/rank/info 等 10+）、`RCuckooFilter`（缺 init 参数/`addIfAbsent`/批量）、`RTopK`（`add` 丢 dropped 项）。
 
-**`RAtomic*`**：Double 缺 `increment/decrement/getAndDelete/compareAndDelete`；两者缺 `setIfLess/setIfGreater/IncrementArgs/addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
+**`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；仍缺 `IncrementArgs`（增量配置）与 `addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
 **`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；仍缺 `preloadCache(count)`、重连策略、Caffeine、`loader/writer`、过期事件策略。
 
@@ -98,5 +98,6 @@
 - **阶段 20（已完成 ✅，v1.5.0）**：`TsProbe` REPL 常驻化（全量 live 测试 673s → 56.9s）、`RMap` HSCAN 异步迭代器 + `HRANDFIELD`/`HSTRLEN`、`RScoredSortedSet` 分数族与反向区间/分数删除、`RBitSet` `BITFIELD` 与 Redis 8 `BITOP` 族、`RGeo` `GeoSearchArgs` 族与 `GEOSEARCHSTORE`；验证见 `test/redisson.test.ts` + `test/live-phase20.test.ts`。
 - **阶段 21（已完成 ✅，v2.0.0）**：ESM+CJS 双格式构建与 `pack-smoke` 验收、`Config.client` 接受 `Redis | Cluster`（导出 `RedisClient`）及约 87 处内部 cast 清理、`RDelayedQueue` 后台迁移器（Java `QueueTransferTask` 移植，单机+集群实测）、`RSet` store wire 修复（4.6.1 裸键形状）、缺失命令能力门控（`COMMAND INFO` + SKIP 日志，`XNACK`/`SUNIONCARD` 在 Redis 8.10.2 实测通过）、3 主节点集群实测（`test/live-cluster.test.ts`）；验证见 `test/redisson.test.ts` + `test/live-phase21.test.ts` + `test/live-cluster.test.ts`。
 - **阶段 22（已完成 ✅，v2.1.0）**：`RFencedLock.tryLockAndGetToken`（4.6.1 非阻塞/等待语义，Java token 序列互通）、阻塞队列/双端队列 `pollFromAny`/BLMPOP/LMOVE/BLMOVE 全族、`RRateLimiter` keepAlive 脚本内续期（keepAlive=0 时继承 config TTL）、`RLocalCachedMap` LRU/LFU 淘汰 + `getCachedMap()` 视图、`RMultimapCache` 可选周期清扫、`RBatch` 门面扩至 13 类；验证见 `test/redisson.test.ts` + `test/live-phase22.test.ts`（5/5，含 Java 4.6.1 交叉断言）。
+- **阶段 23（已完成 ✅，v2.2.0）**：`RKeys` 运维族（expire/expireAt 单+多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern）、`RAtomicLong/Double` 标量余项（getAndIncrement/Decrement、setIfLess/Greater、getAndDelete、Double compareAndDelete）、`RBuckets` 条件写（MSETEX NX/XX）、`RScoredSortedSet` addIfAbsent/Exists/Less/Greater；验证见 `test/redisson.test.ts` + `test/live-phase23.test.ts`（4/4；含 Java 读回、live cluster `CLUSTER KEYSLOT` 对照、MOVE 跨 db）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。
