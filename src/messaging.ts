@@ -281,15 +281,53 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
   }
 }
 
+const RT_MAINTENANCE = `local expired = redis.call('zrangebyscore', KEYS[2], 0, tonumber(ARGV[2]) - 1)
+for i, v in ipairs(expired) do
+    redis.call('xgroup', 'destroy', KEYS[1], v)
+    redis.call('zrem', KEYS[2], v)
+end
+local r = redis.call('zscore', KEYS[2], ARGV[1])
+local score = 92233720368547758
+local groups = redis.call('xinfo', 'groups', KEYS[1])
+for i, v in ipairs(groups) do
+    local id1, id2 = string.match(v[8], '(.*)%-(.*)')
+    score = math.min(tonumber(id1), score)
+end
+score = tostring(score) .. '-0'
+local range = redis.call('xrange', KEYS[1], score, '+')
+if #range == 0 or (#range == 1 and range[1][1] == score) then
+    redis.call('xtrim', KEYS[1], 'maxlen', 0)
+else
+    redis.call('xtrim', KEYS[1], 'maxlen', #range)
+end
+return r ~= false`;
+
+// Java RedissonReliableTopic: one subscriber group per client instance; all
+// local listeners share it. publish() returns the number of groups (XINFO
+// GROUPS), the heartbeat ZSET destroys stale groups, and the stream is trimmed
+// to the earliest group's last-delivered id after each poll.
 export class RReliableTopic<V = any> extends RedisDataStructure {
   private timeoutKey: string;
-  private loops = new Map<string, { stop: boolean; conn: Redis | null }>();
+  private subscriberId = randomHex(16);
+  private listeners = new Map<string, (msg: V) => void | Promise<void>>();
+  private subscribed = false;
+  private conn: Redis | null = null;
+  private loopGen = 0;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.timeoutKey = suffixName(name, 'timeout');
   }
-  async publish(message: V): Promise<void> {
-    await this.redis.xadd(this.name, '*', 'm', this.encodeValue(message));
+  async publish(message: V): Promise<number> {
+    const s = `redis.call('xadd', KEYS[1], '*', 'm', ARGV[1])
+local groups = redis.call('xinfo', 'groups', KEYS[1])
+return #groups`;
+    try {
+      return toNumber(await luaEval(this.redis, s, 1, this.name, this.encodeValue(message)));
+    } catch {
+      // mock fallback: no XINFO in Lua; a single local subscriber is implied
+      await this.redis.xadd(this.name, '*', 'm', this.encodeValue(message));
+      return this.subscribed ? 1 : 0;
+    }
   }
   async size(): Promise<number> {
     return this.redis.xlen(this.name);
@@ -299,91 +337,121 @@ export class RReliableTopic<V = any> extends RedisDataStructure {
       const g: any = await this.redis.xinfo('GROUPS', this.name);
       return Array.isArray(g) ? g.length : 0;
     } catch {
-      return this.loops.size;
+      return this.subscribed ? 1 : 0;
     }
+  }
+  async countListeners(): Promise<number> {
+    return this.listeners.size;
   }
   async addListener(cb: (msg: V) => void | Promise<void>): Promise<string> {
     const id = randomHex(16);
-    const now = await serverNowMs(this.redis);
-    await this.redis.zadd(this.timeoutKey, String(now + 120000), id);
-    try {
-      await this.redis.xgroup('CREATE', this.name, id, '0', 'MKSTREAM');
-    } catch (e: any) {
-      if (!String(e?.message ?? e).includes('BUSYGROUP')) throw e;
+    this.listeners.set(id, cb);
+    if (!this.subscribed) {
+      this.subscribed = true;
+      try {
+        await this.redis.zadd(this.timeoutKey, String(Date.now() + 120000), this.subscriberId);
+        try {
+          await this.redis.xgroup('CREATE', this.name, this.subscriberId, '0', 'MKSTREAM');
+        } catch (e: any) {
+          if (!String(e?.message ?? e).includes('BUSYGROUP')) throw e;
+        }
+        const gen = ++this.loopGen;
+        void this.consumeLoop(gen);
+      } catch (e) {
+        this.subscribed = false;
+        this.listeners.delete(id);
+        throw e;
+      }
     }
-    const state = { stop: false, conn: null as Redis | null };
-    this.loops.set(id, state);
-    void this.consumeLoop(id, cb, state);
-    void this.renewLoop(id, state);
     return id;
   }
-  private async renewLoop(id: string, state: { stop: boolean }): Promise<void> {
-    while (!state.stop) {
-      await sleep(40000);
-      if (state.stop) break;
-      try {
-        const now = await serverNowMs(this.redis);
-        await this.redis.zadd(this.timeoutKey, 'XX', String(now + 120000), id);
-      } catch { /* noop */ }
-    }
+  private closeConn(): void {
+    try {
+      if (this.conn && this.conn !== this.redis) (this.conn as any).disconnect?.();
+    } catch { /* noop */ }
+    this.conn = null;
   }
-  private async consumeLoop(id: string, cb: (msg: V) => void | Promise<void>, state: { stop: boolean; conn: Redis | null }): Promise<void> {
-    while (!state.stop) {
+  private async consumeLoop(gen: number): Promise<void> {
+    while (this.subscribed && gen === this.loopGen) {
       try {
-        // XREADGROUP BLOCK occupies the whole TCP connection; use a
-        // dedicated one so lock watchdogs and normal commands stay live.
-        if (!state.conn) state.conn = (await duplicateRedis(this.redis)) ?? this.redis;
-        if (state.stop) {
-          if (state.conn && state.conn !== this.redis) (state.conn as any).disconnect?.();
-          break;
-        }
-        const conn = state.conn;
-        const res: any = await conn.xreadgroup('GROUP', id, id, 'COUNT', 10, 'BLOCK', 2000, 'STREAMS', this.name, '>');
+        if (!this.conn) this.conn = (await duplicateRedis(this.redis)) ?? this.redis;
+        if (!this.subscribed || gen !== this.loopGen) break;
+        const conn = this.conn;
+        const now = Date.now();
+        // heartbeat + stale-group cleanup + trim (Java renewExpiration + update)
+        try {
+          await this.redis.zadd(this.timeoutKey, String(now + 120000), this.subscriberId);
+          await luaEval(this.redis, RT_MAINTENANCE, 2, this.name, this.timeoutKey,
+            this.subscriberId, String(now));
+        } catch { /* maintenance is best effort */ }
+        const res: any = await conn.xreadgroup(
+          'GROUP', this.subscriberId, 'consumer', 'COUNT', 10, 'BLOCK', 2000, 'STREAMS', this.name, '>',
+        );
         if (!res) continue;
-        const streams = Array.isArray(res[0]?.[1]) ? res : res;
-        for (const stream of streams) {
-          const entries = stream[1] ?? [];
-          for (const [msgId, fields] of entries) {
-            if (state.stop) return;
+        for (const stream of res as any[]) {
+          for (const [msgId, fields] of (stream[1] ?? []) as [string, any][]) {
+            if (!this.subscribed || gen !== this.loopGen) return;
             let payload: string | null = null;
             if (Array.isArray(fields)) {
               for (let i = 0; i + 1 < fields.length; i += 2) if (fields[i] === 'm') payload = fields[i + 1];
-            } else if (fields && typeof fields === 'object') payload = (fields as any)['m'] ?? null;
-            if (payload !== null) {
-              try {
-                await cb(this.decodeValue(payload) as V);
-              } catch { /* listener error: still ack? no — redeliver */ continue; }
-              try {
-                await this.redis.xack(this.name, id, msgId);
-              } catch { /* noop */ }
+            } else if (fields && typeof fields === 'object') {
+              payload = (fields as any)['m'] ?? null;
             }
+            if (payload === null) continue;
+            let msg: V;
+            try {
+              msg = this.decodeValue(payload) as V;
+            } catch {
+              msg = payload as unknown as V;
+            }
+            for (const cb of [...this.listeners.values()]) {
+              try {
+                await cb(msg);
+              } catch { /* listener errors must not block delivery */ }
+            }
+            try {
+              await this.redis.xack(this.name, this.subscriberId, msgId);
+            } catch { /* noop */ }
           }
         }
-      } catch {
-        if (state.stop) break;
-        await sleep(500);
+      } catch (e) {
+        if (!this.subscribed || gen !== this.loopGen) break;
+        if (String((e as any)?.message ?? e).includes('NOGROUP')) {
+          this.subscribed = false;
+          break;
+        }
+        await sleep(1000);
       }
     }
+    if (gen === this.loopGen) this.closeConn();
   }
   async removeListener(id: string): Promise<void> {
-    const s = this.loops.get(id);
-    if (s) s.stop = true;
-    this.loops.delete(id);
+    this.listeners.delete(id);
+    if (this.listeners.size === 0) await this.unsubscribe();
+  }
+  async removeAllListeners(): Promise<void> {
+    this.listeners.clear();
+    await this.unsubscribe();
+  }
+  private async unsubscribe(): Promise<void> {
+    if (!this.subscribed) return;
+    this.subscribed = false;
+    this.loopGen += 1;
+    this.closeConn();
     try {
-      if (s?.conn && s.conn !== this.redis) (s.conn as any).disconnect?.();
+      await this.redis.xgroup('DESTROY', this.name, this.subscriberId);
     } catch { /* noop */ }
     try {
-      await this.redis.xgroup('DESTROY', this.name, id);
+      await this.redis.zrem(this.timeoutKey, this.subscriberId);
     } catch { /* noop */ }
-    await this.redis.zrem(this.timeoutKey, id);
   }
   override async delete(): Promise<boolean> {
-    for (const id of [...this.loops.keys()]) await this.removeListener(id);
+    await this.unsubscribe();
     await this.redis.del(this.name, this.timeoutKey);
     return true;
   }
   override async unlink(): Promise<boolean> {
-    for (const id of [...this.loops.keys()]) await this.removeListener(id);
+    await this.unsubscribe();
     await this.unlinkKeys([this.name, this.timeoutKey]);
     return true;
   }

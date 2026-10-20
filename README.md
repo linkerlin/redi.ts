@@ -68,7 +68,7 @@ const redisson = Redisson.create({ client: redis });
 - 单个值：`RBucket`、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`（文档/路径读写、NX/XX/CAS、字符串/数组/数字操作、merge/keys/type/toggle）
 - 数字：`RAtomicLong`、`Double`（`getAndIncrement`/`Decrement`、`setIfLess`/`Greater`、`getAndDelete`/`compareAndDelete`）；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
-- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除
+- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`；每实例单组、publish 返回订阅者数、自动 XTRIM）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除
 - 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany`/`readGroupMany`（支持每流独立 group）、`addListener`（keyspace xadd/xdel/xgroup-*））
 - 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`；`readAll`/`poll(count)`）
 - 环形缓冲：`RRingBuffer`

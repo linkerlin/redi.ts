@@ -1,3 +1,24 @@
+## 2.17.0 — 2026-10-20
+
+Phase 39: RReliableTopic 4.6.1 semantics. Full suite:
+**255 tests / 42 files**.
+
+- **One subscriber group per client instance** (Java `RedissonReliableTopic`):
+  all local listeners share one XGROUP created at `0`; `subscriberId` is
+  generated once per instance. `countListeners()` reports local listeners.
+- **`publish` returns the subscriber count** (number of groups) with Java's
+  exact Lua: `XADD` then `XINFO GROUPS` and `#groups` — 0 when nobody is
+  subscribed.
+- **Heartbeat + trim**: each poll cycle ZADDs the subscriber's timeout score
+  (`now + 120s`), destroys groups whose timeout expired, and trims the stream
+  to the earliest group's last-delivered id (4.6.1 maintenance Lua port);
+  acknowledged entries leave the stream automatically.
+- **Lifecycle**: removing the last local listener destroys the group and
+  removes the heartbeat; `removeAllListeners`, `delete` and `unlink` do the
+  same. Existing phase 3/17 reliable-topic interop tests stay green.
+- Tests: `test/live-phase39.test.ts` 1/1 (publish counts 0/1/2, shared vs
+  separate groups, trim to empty, per-instance teardown).
+
 ## 2.16.0 — 2026-10-20
 
 Phase 38: lazy iterators + preload bound. Full suite:

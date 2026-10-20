@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.16.0（2026-10-20）阶段 38：RSet/RScoredSortedSet 惰性迭代器与 LocalCachedMap 限量预载。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.17.0（2026-10-20）阶段 39：RReliableTopic 对齐 4.6.1（每实例单组/publish 计数/心跳清理/自动 XTRIM）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -43,7 +43,7 @@
 
 **`RLock` 面**：`lockInterruptibly` ✅ (2.7.0，以 AbortSignal 模拟线程中断：等待中 abort 抛 `AbortError` 且不获取锁)；`RWLock` 读锁 `:rwlock_timeout:<n>` 伴生键 ✅ (2.8.0，逐次获取创建、解锁按剩余键重算 HASH TTL、看门狗同步续期——修复 Java 释放读锁可能误删仍有其他读者的 HASH)；`tryLock` 四重载分解（TS 三参合一）仍为 TS 形态、`*Async` 命名、`newCondition`、`RObservable.addListener` 未做；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock`：复核 4.6.1 jar/源码后确认 **RedissonRedLock 无 drift 扣减**（继承 MultiLock，末尾统一按完整 lease 重设 TTL），TS 现行实现与其一致，原“缺 drift”条目不成立。
 
-**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；`StatusListener`（onSubscribe/onUnsubscribe，`removeListener` 同时处理消息/状态两类句柄）✅ (2.9.0)；`removeListener(handler)` 按回调句柄删除 ✅ (2.11.0)；`Class<M>` 类型门控为 Java 特有（TS codec 负责解码，无运行时类），记录为设计差异；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
+**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；`StatusListener`（onSubscribe/onUnsubscribe，`removeListener` 同时处理消息/状态两类句柄）✅ (2.9.0)；`removeListener(handler)` 按回调句柄删除 ✅ (2.11.0)；`Class<M>` 类型门控为 Java 特有（TS codec 负责解码，无运行时类），记录为设计差异；`RReliableTopic` 已对齐 4.6.1：每实例单组、`publish` 返回组数、心跳 ZSET 清理过期组、按最早组位点自动 XTRIM、`delete()` 同时删 stream+timeout ✅ (2.17.0)；仍缺可靠主题的 `Class<M>` 门控与 `RReliableFanout`（PRO）。
 
 **`RBitSet`**：已补 ✅ (1.5.0)：`BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化读写（signed/unsigned 的 get/set/increment + `getByte/Short/Integer/Long` 快捷）、`or/and/xor/not` 回字节长、Redis 8 `BITOP DIFF/DIFF1/ANDOR/ONE`、`size()`（STRLEN×8）与 `length()`（最高置位 + 1）区分、`setRange`/`clear(from,to)` 为 `to` 排他；批量 `get(...bits)`/`set(long[]|Set,boolean)`/区间 `set(from,to,value)`、`asBitSet()` ✅ (2.12.0)。
 
@@ -116,5 +116,6 @@
 - **阶段 36（已完成 ✅，v2.14.0）**：`RTDigest`（create/merge/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）、`RTopK`（init 参数/add 丢弃项/incrementBy/listWithCount/info）；验证见 `test/live-phase36.test.ts`（3/3，Redis 8 模块能力门控）。
 - **阶段 37（已完成 ✅，v2.15.0）**：`RSearch` 扩展（索引 info/别名/增强 search/aggregate/同义词/词典/config/spellcheck）；验证见 `test/live-phase37.test.ts`（1/1，Redis 8 内置 RediSearch）。
 - **阶段 38（已完成 ✅，v2.16.0）**：`RSet` 惰性 `iterator/distributedIterator/stream`（SSCAN）、`RScoredSortedSet` `iterator/stream/entriesIterator`（ZSCAN）、`RLocalCachedMap.preloadCache(count)`；验证见 `test/redisson.test.ts` + `test/live-phase38.test.ts`（1/1，编码前缀 MATCH + 限量预载）。
+- **阶段 39（已完成 ✅，v2.17.0）**：`RReliableTopic` 对齐 4.6.1——每实例单组（监听器共享）、`publish` 返回组数、心跳 ZSET 清理过期组、按最早组位点自动 XTRIM、最后监听器移除时销毁组；验证见 `test/live-phase39.test.ts`（1/1）与既有 phase3/17 回归。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

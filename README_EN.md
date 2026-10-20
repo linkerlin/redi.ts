@@ -93,6 +93,7 @@ read-write, NX/XX/CAS, string/array/number ops, merge/keys/type/toggle),
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
 (keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;
+one group per instance, publish returns subscriber count, automatic XTRIM;
 management: `getChannelNames`/`countListeners`/`countSubscribers`,
 pattern `getActiveTopics`, `StatusListener` callbacks,
 `removeListener(handler)`),
