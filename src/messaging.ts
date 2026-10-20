@@ -1000,10 +1000,34 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
       await this.redis.rpush(this.name, this.encodeValue(value));
     }
   }
-  async poll(): Promise<V | null> {
+  async poll(): Promise<V | null>;
+  async poll(count: number): Promise<V[]>;
+  async poll(count?: number): Promise<V | null | V[]> {
     await this.migrate();
-    const raw = await this.redis.lpop(this.name);
-    return raw === null ? null : (this.decodeValue(raw) as V);
+    if (count === undefined) {
+      const raw = await this.redis.lpop(this.name);
+      return raw === null ? null : (this.decodeValue(raw) as V);
+    }
+    if (count <= 0) return [];
+    let arr: string[];
+    try {
+      const raw: any = await this.redis.lpop(this.name, count);
+      arr = raw === null || raw === undefined ? [] : Array.isArray(raw) ? raw : [String(raw)];
+    } catch {
+      arr = [];
+      for (let i = 0; i < count; i++) {
+        const v = await this.redis.lpop(this.name);
+        if (v === null) break;
+        arr.push(v);
+      }
+    }
+    return arr.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java `RQueue.readAll()`: destination snapshot after catch-up migration. */
+  async readAll(): Promise<V[]> {
+    await this.migrate();
+    const m = await this.redis.lrange(this.name, 0, -1);
+    return m.map((x) => this.decodeValue(x) as V);
   }
   async peek(): Promise<V | null> {
     await this.migrate();

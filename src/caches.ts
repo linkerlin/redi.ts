@@ -540,15 +540,17 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
   }
-  async put(key: K, value: V, ttlMs = 0): Promise<V | null> {
+  async put(key: K, value: V, ttl: number | Date = 0): Promise<V | null> {
     const field = this.encodeKey(key);
     const old = await this.get(key);
     await this.redis.hset(this.name, field, this.encodeValue(value));
-    if (ttlMs > 0) {
-      try {
-        await this.redis.hpexpire(this.name, ttlMs, 'FIELDS', 1, field);
-      } catch { /* server too old */ }
-    }
+    try {
+      if (ttl instanceof Date) {
+        await (this.redis as any).hpexpireat(this.name, ttl.getTime(), 'FIELDS', 1, field);
+      } else if (ttl > 0) {
+        await this.redis.hpexpire(this.name, ttl, 'FIELDS', 1, field);
+      }
+    } catch { /* server too old */ }
     return old;
   }
 
@@ -573,15 +575,18 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
     return this.fieldExpireInLua;
   }
 
-  async putIfAbsent(key: K, value: V, ttlMs = 0): Promise<V | null> {
-    if (ttlMs < 0) throw new Error("redi.ts: ms can't be negative");
+  async putIfAbsent(key: K, value: V, ttl: number | Date = 0): Promise<V | null> {
+    if (typeof ttl === 'number' && ttl < 0) throw new Error("redi.ts: ms can't be negative");
     const field = this.encodeKey(key);
     if (value === null || value === undefined) return this.get(key);
     const enc = this.encodeValue(value);
-    if (ttlMs > 0 && (await this.canExpireFieldInLua())) {
+    const hasTtl = ttl instanceof Date || ttl > 0;
+    if (hasTtl && (await this.canExpireFieldInLua())) {
       const lua = "local currValue = redis.call('hget', KEYS[1], ARGV[2]); if currValue ~= false then return currValue; end; redis.call('hset', KEYS[1], ARGV[2], ARGV[3]); redis.call(ARGV[4], KEYS[1], ARGV[1], 'fields', 1, ARGV[2]); return nil;";
+      const at = ttl instanceof Date ? String(ttl.getTime()) : String(ttl);
+      const cmd = ttl instanceof Date ? 'HPEXPIREAT' : 'HPEXPIRE';
       try {
-        const r: any = await this.redis.eval(lua, 1, this.name, String(ttlMs), field, enc, 'HPEXPIRE');
+        const r: any = await this.redis.eval(lua, 1, this.name, at, field, enc, cmd);
         return r == null ? null : (this.decodeValue(r) as V);
       } catch { /* fall through to the set-if-absent path */ }
     }
@@ -623,13 +628,16 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
   // Java RedissonMapCacheNative.expireEntryAsync: HPEXPIRE name ms [NX|GT|LT]
   // FIELDS 1 field; per-field reply >= 1 means the new expiry was written.
 
-  private async hpexpireField(key: K, ttlMs: number, param?: 'NX' | 'GT' | 'LT'): Promise<boolean> {
+  private async hpexpireField(key: K, ttl: number | Date, param?: 'NX' | 'GT' | 'LT'): Promise<boolean> {
     const field = this.encodeKey(key);
     try {
-      const args: any[] = [this.name, ttlMs];
+      const at = ttl instanceof Date;
+      const args: any[] = [this.name, at ? (ttl as Date).getTime() : ttl];
       if (param) args.push(param);
       args.push('FIELDS', 1, field);
-      const r: any = await (this.redis as any).hpexpire(...args);
+      const r: any = at
+        ? await (this.redis as any).hpexpireat(...args)
+        : await (this.redis as any).hpexpire(...args);
       const first = Array.isArray(r) ? r[0] : r;
       return toNumber(first) >= 1;
     } catch {
@@ -637,24 +645,24 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
     }
   }
 
-  /** Set the field TTL (HPEXPIRE). */
-  async expireEntry(key: K, ttlMs: number): Promise<boolean> {
-    return this.hpexpireField(key, ttlMs);
+  /** Set the field TTL (HPEXPIRE, or HPEXPIREAT for a Date). */
+  async expireEntry(key: K, ttl: number | Date): Promise<boolean> {
+    return this.hpexpireField(key, ttl);
   }
 
   /** Set the field TTL only when the field has no expiry (HPEXPIRE NX). */
-  async expireEntryIfNotSet(key: K, ttlMs: number): Promise<boolean> {
-    return this.hpexpireField(key, ttlMs, 'NX');
+  async expireEntryIfNotSet(key: K, ttl: number | Date): Promise<boolean> {
+    return this.hpexpireField(key, ttl, 'NX');
   }
 
   /** Set the field TTL only when it is longer than the current one (HPEXPIRE GT). */
-  async expireEntryIfGreater(key: K, ttlMs: number): Promise<boolean> {
-    return this.hpexpireField(key, ttlMs, 'GT');
+  async expireEntryIfGreater(key: K, ttl: number | Date): Promise<boolean> {
+    return this.hpexpireField(key, ttl, 'GT');
   }
 
   /** Set the field TTL only when it is shorter than the current one (HPEXPIRE LT). */
-  async expireEntryIfLess(key: K, ttlMs: number): Promise<boolean> {
-    return this.hpexpireField(key, ttlMs, 'LT');
+  async expireEntryIfLess(key: K, ttl: number | Date): Promise<boolean> {
+    return this.hpexpireField(key, ttl, 'LT');
   }
 
   /** Remove the field TTL (HPERSIST; Java clearExpire). The no-arg call

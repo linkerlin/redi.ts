@@ -1,3 +1,33 @@
+## 2.12.0 — 2026-10-20
+
+Phase 33: final audit + remaining real gaps. Full suite:
+**246 tests / 37 files green in ~82 s**.
+
+- **`RBitSet`**: batch `get(...bits)` (pipelined GETBIT), `set(number[]|Set,
+  value)` and `set(from, to, value)` range overload, `asBitSet()` (pipelined
+  GETBIT so mock and real servers agree on ordering).
+- **`RFunction`**: `kill`, `list([libraryName])` (typed library info),
+  `stats`, `dump` (buffer), `restore` / `restoreAndReplace` /
+  `restoreAfterFlush`; fixed `load()` sending an empty argument when
+  `replace=false`.
+- **`RVectorSet`** (Redis 8): `size`, `dimensions` (VDIM), `getVector` (VEMB),
+  `contains`, `random`/`random(count)` (VRANDMEMBER), `range` (VRANGE;
+  count is positional in 8.6), `getNeighbors` (VLINKS), `getInfo` (VINFO),
+  `getAttributes`/`setAttributes` (VGETATTR/VSETATTR + codec).
+- **`RMapCacheNative`**: absolute field expiry — `put`/`putIfAbsent`/
+  `expireEntry*` accept `Date` and use HPEXPIREAT.
+- **`RDelayedQueue`**: `readAll()` (destination snapshot after catch-up) and
+  `poll(count)` overload.
+- **GAP audit**: removed false positives — `RSet` countUnionApprox/countDiff
+  and zset `ZRANGESTORE` do not exist in 4.6.1; `RDelayedQueue` `move`/
+  `addListener` are not in the 4.6.1 interface; `RLeasedMap` has no
+  open-source implementation (PRO-only); `CommonOptions`/`Class<M>` are design
+  differences (factories take names; codec decodes). `RLocalCachedMap`
+  loader/writer is a documented no-port decision (external-store semantics,
+  no wire impact).
+- Tests: 2 mock + `test/live-phase33.test.ts` 3/3 (script flush/kill,
+  function dump/restore/list/stats, VectorSet deep API, absolute Date expiry).
+
 ## 2.11.0 — 2026-10-20
 
 Phase 32: API polish. Full suite: **241 tests / 36 files green in ~79 s**.

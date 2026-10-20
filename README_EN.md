@@ -104,7 +104,9 @@ poll families, forward/reversed ranges with limits, `getAndRemove`,
 `remove`/`removeRange`, `stream`/`iterator` paging over values, `addListener`
 keyspace zadd/zrem events, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
-move, unlinkByPattern, lazy `getKeysStream`), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
+move, unlinkByPattern, lazy `getKeysStream`), `RScript` (+scriptKill/
+scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch`,
+`RVectorSet` (VEMB/VINFO/VLINKS/VRANDMEMBER/VRANGE/attributes), priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).

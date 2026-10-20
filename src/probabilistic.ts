@@ -550,12 +550,50 @@ export class BitFieldArgs {
 }
 
 export class RBitSet extends RedisDataStructure {
-  async get(bit: number): Promise<boolean> {
-    return ((await this.redis.getbit(this.name, bit)) as number) === 1;
+  async get(bit: number): Promise<boolean>;
+  async get(...bits: number[]): Promise<boolean[]>;
+  async get(...bits: number[]): Promise<boolean | boolean[]> {
+    if (bits.length === 1) return ((await this.redis.getbit(this.name, bits[0])) as number) === 1;
+    const pipe = this.redis.pipeline();
+    for (const b of bits) pipe.getbit(this.name, b);
+    const res = await pipe.exec();
+    return (res ?? []).map(([e, r]) => e === null && Number(r) === 1);
   }
-  async set(bit: number, value = true): Promise<boolean> {
-    const prev = await this.redis.setbit(this.name, bit, value ? 1 : 0);
-    return prev === 1;
+  async set(bit: number, value?: boolean): Promise<boolean>;
+  async set(from: number, to: number, value: boolean): Promise<void>;
+  async set(bits: number[] | Set<number>, value?: boolean): Promise<void>;
+  async set(a: number | number[] | Set<number>, b: boolean | number = true, c?: boolean): Promise<boolean | void> {
+    if (typeof a === 'number' && typeof b === 'number') {
+      await this.setRange(a, b, c ?? true);
+      return;
+    }
+    if (typeof a === 'number') {
+      const prev = await this.redis.setbit(this.name, a, b ? 1 : 0);
+      return prev === 1;
+    }
+    const bits = a instanceof Set ? [...a] : a;
+    if (bits.length === 0) return;
+    const pipe = this.redis.pipeline();
+    for (const bit of bits) pipe.setbit(this.name, bit, b ? 1 : 0);
+    await pipe.exec();
+  }
+  /** Java `asBitSet()`: indices of all set bits (TS Set<number> analogue).
+   *  Uses pipelined GETBIT so mock and real servers agree on bit ordering. */
+  async asBitSet(): Promise<Set<number>> {
+    const bits = (await this.redis.strlen(this.name)) * 8;
+    const out = new Set<number>();
+    const chunk = 1024;
+    for (let start = 0; start < bits; start += chunk) {
+      const end = Math.min(start + chunk, bits);
+      const pipe = this.redis.pipeline();
+      for (let i = start; i < end; i++) pipe.getbit(this.name, i);
+      const res = await pipe.exec();
+      for (let i = 0; i < (res ?? []).length; i++) {
+        const row = res![i];
+        if (row[0] === null && Number(row[1]) === 1) out.add(start + i);
+      }
+    }
+    return out;
   }
   /** Java `set(long fromIndex, long toIndex, boolean)`: SETBIT loop, `to` exclusive. */
   async setRange(from: number, to: number, value = true): Promise<void> {

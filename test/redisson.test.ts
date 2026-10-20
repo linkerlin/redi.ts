@@ -1600,6 +1600,35 @@ describe('phase 31: keyspace listeners + multi-stream group read (mock)', () => 
   });
 });
 
+describe('phase 33: bitset batch + delayed queue reads (mock)', () => {
+  it('RBitSet batch/range/asBitSet', async () => {
+    const r = make();
+    const b = r.getBitSet('p33:bits');
+    await b.set([1, 3, 8]);
+    expect(await b.get(1)).toBe(true);
+    expect(await b.get(1, 2, 3)).toEqual([true, false, true]);
+    expect([...(await b.asBitSet())].sort((x, y) => x - y)).toEqual([1, 3, 8]);
+    await b.set(4, 7, true); // setRange: [4, 7)
+    expect(await b.get(4, 5, 6, 7)).toEqual([true, true, true, false]);
+    await b.set(new Set([2]), true);
+    expect(await b.get(2)).toBe(true);
+    await b.clear();
+    expect(await b.size()).toBe(0);
+    await r.shutdown();
+  });
+
+  it('RDelayedQueue readAll/poll(count)', async () => {
+    const r = make();
+    const dq = r.getDelayedQueue<string>('p33:dq');
+    await dq.offer('a', 5000);
+    await dq.offer('b', 5000);
+    expect(await dq.readAll()).toEqual(['a', 'b']);
+    expect(await dq.poll(2)).toEqual(['a', 'b']);
+    expect(await dq.poll()).toBeNull();
+    await r.shutdown();
+  });
+});
+
 describe('phase 32: API polish (mock)', () => {
   it('RKeys lazy key streams', async () => {
     const r = make();

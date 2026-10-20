@@ -181,6 +181,14 @@ export class RScript {
     const r: any = await this.redis.script('EXISTS', ...shas);
     return (r as number[]).map((x) => x === 1);
   }
+  /** Java `scriptKill()`: SCRIPT KILL (errors when no script is running). */
+  async scriptKill(): Promise<void> {
+    await (this.redis as any).script('KILL');
+  }
+  /** Java `scriptFlush()`: SCRIPT FLUSH. */
+  async scriptFlush(): Promise<void> {
+    await (this.redis as any).script('FLUSH');
+  }
   private cast(raw: any, t: ScriptReturnType): any {
     switch (t) {
       case 'BOOLEAN':
@@ -201,19 +209,87 @@ export class RScript {
 
 // -- RFunction ---------------------------------------------------------------------
 
+export interface FunctionLibraryInfo {
+  name: string;
+  engine?: string;
+  functions: string[];
+  code?: string;
+}
+
+function flatRecord(flat: any): Record<string, any> {
+  const out: Record<string, any> = {};
+  if (Array.isArray(flat)) for (let i = 0; i + 1 < flat.length; i += 2) out[String(flat[i])] = flat[i + 1];
+  return out;
+}
+
 export class RFunction {
   constructor(private redis: Redis) {}
   private async call(...args: string[]): Promise<any> {
     return (this.redis as any).call(...args);
   }
   async load(code: string, replace = false): Promise<string> {
-    return this.call('FUNCTION', 'LOAD', replace ? 'REPLACE' : '', code) as Promise<string>;
+    return replace
+      ? (this.call('FUNCTION', 'LOAD', 'REPLACE', code) as Promise<string>)
+      : (this.call('FUNCTION', 'LOAD', code) as Promise<string>);
   }
   async delete(lib: string): Promise<void> {
     await this.call('FUNCTION', 'DELETE', lib);
   }
   async flush(): Promise<void> {
     await this.call('FUNCTION', 'FLUSH');
+  }
+  /** Java `kill()`: FUNCTION KILL (only while a function is running). */
+  async kill(): Promise<void> {
+    await this.call('FUNCTION', 'KILL');
+  }
+  /** Java `list([libraryName])`: FUNCTION LIST → typed library info. */
+  async list(lib?: string): Promise<FunctionLibraryInfo[]> {
+    const args: string[] = ['FUNCTION', 'LIST'];
+    if (lib) args.push('LIBRARYNAME', lib);
+    const raw: any = await this.call(...args);
+    const out: FunctionLibraryInfo[] = [];
+    for (const item of (raw ?? []) as any[]) {
+      const rec = flatRecord(item);
+      const fns: string[] = [];
+      for (const f of (rec.functions ?? []) as any[]) {
+        const fr = flatRecord(f);
+        if (fr.name !== undefined) fns.push(String(fr.name));
+      }
+      out.push({
+        name: String(rec.library_name ?? rec.name ?? ''),
+        engine: rec.engine === undefined ? undefined : String(rec.engine),
+        functions: fns,
+        code: rec.library_code === undefined ? undefined : String(rec.library_code),
+      });
+    }
+    return out;
+  }
+  /** Java `stats()`: FUNCTION STATS as a flat field/value record. */
+  async stats(): Promise<Record<string, any>> {
+    return flatRecord(await this.call('FUNCTION', 'STATS'));
+  }
+  /** Java `dump()`: FUNCTION DUMP payload as bytes. */
+  async dump(): Promise<Buffer> {
+    try {
+      return Buffer.from(await (this.redis as any).callBuffer('FUNCTION', 'DUMP'));
+    } catch {
+      return Buffer.from(String(await this.call('FUNCTION', 'DUMP')), 'latin1');
+    }
+  }
+  /** Java `restore(byte[])`: FUNCTION RESTORE. */
+  async restore(payload: Buffer | string): Promise<void> {
+    const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, 'latin1');
+    await (this.redis as any).call('FUNCTION', 'RESTORE', buf);
+  }
+  /** Java `restoreAndReplace(byte[])`: FUNCTION RESTORE … REPLACE. */
+  async restoreAndReplace(payload: Buffer | string): Promise<void> {
+    const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, 'latin1');
+    await (this.redis as any).call('FUNCTION', 'RESTORE', buf, 'REPLACE');
+  }
+  /** Java `restoreAfterFlush(byte[])`: FUNCTION RESTORE … FLUSH. */
+  async restoreAfterFlush(payload: Buffer | string): Promise<void> {
+    const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, 'latin1');
+    await (this.redis as any).call('FUNCTION', 'RESTORE', buf, 'FLUSH');
   }
   async callFn(name: string, keys: string[] = [], args: string[] = []): Promise<any> {
     return this.call('FCALL', name, String(keys.length), ...keys, ...args);
@@ -308,8 +384,67 @@ export class RVectorSet extends RedisDataStructure {
   async card(): Promise<number> {
     return toNumber(await this.redis.call('VCARD', this.name));
   }
+  /** Java `size()`: VCARD. */
+  async size(): Promise<number> {
+    return this.card();
+  }
+  /** Java `dimensions()`: VDIM. */
+  async dimensions(): Promise<number> {
+    return toNumber(await this.redis.call('VDIM', this.name));
+  }
   async remove(element: string): Promise<boolean> {
     return toNumber(await this.redis.call('VREM', this.name, element)) === 1;
+  }
+  /** Java `getVector(element)`: VEMB → flat float array. */
+  async getVector(element: string): Promise<number[]> {
+    const r: any = await this.redis.call('VEMB', this.name, element);
+    return (r ?? []).map((x: any) => Number(x));
+  }
+  /** Java `contains(element)`: VEMB returns nil for absent members. */
+  async contains(element: string): Promise<boolean> {
+    const r: any = await this.redis.call('VEMB', this.name, element);
+    return r !== null && r !== undefined;
+  }
+  /** Java `random()` / `random(int)`: VRANDMEMBER. */
+  async random(): Promise<string | null>;
+  async random(count: number): Promise<string[]>;
+  async random(count?: number): Promise<string | null | string[]> {
+    if (count === undefined) {
+      const r: any = await this.redis.call('VRANDMEMBER', this.name);
+      return r === null || r === undefined ? null : String(r);
+    }
+    return ((await this.redis.call('VRANDMEMBER', this.name, String(count))) as string[]) ?? [];
+  }
+  /** Java `range(start, end[, count])`: VRANGE over lexicographic element names. */
+  async range(start: string, end: string, count?: number): Promise<string[]> {
+    const args: string[] = ['VRANGE', this.name, start, end];
+    if (count !== undefined) args.push(String(count));
+    return ((await (this.redis as any).call(...args)) as string[]) ?? [];
+  }
+  /** Java `getNeighbors(element)`: VLINKS (member names only). */
+  async getNeighbors(element: string): Promise<string[]> {
+    return ((await this.redis.call('VLINKS', this.name, element)) as string[]) ?? [];
+  }
+  /** Java `getInfo()`: VINFO flat field/value pairs. */
+  async getInfo(): Promise<Record<string, any>> {
+    const flat: any = await this.redis.call('VINFO', this.name);
+    const out: Record<string, any> = {};
+    if (Array.isArray(flat)) for (let i = 0; i + 1 < flat.length; i += 2) out[String(flat[i])] = flat[i + 1];
+    return out;
+  }
+  /** Java `getAttributes(element)`: VGETATTR + codec decode. */
+  async getAttributes(element: string): Promise<any | null> {
+    const r: any = await this.redis.call('VGETATTR', this.name, element);
+    if (r === null || r === undefined) return null;
+    try {
+      return this.codec.decode(String(r));
+    } catch {
+      return String(r);
+    }
+  }
+  /** Java `setAttributes(element, value)`: VSETATTR with codec-encoded JSON. */
+  async setAttributes(element: string, value: unknown): Promise<boolean> {
+    return toNumber(await this.redis.call('VSETATTR', this.name, element, this.encodeValue(value))) === 1;
   }
 }
 
