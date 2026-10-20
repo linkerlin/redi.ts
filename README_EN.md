@@ -119,7 +119,9 @@ info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (index
-info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck),
+info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck,
+`hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/`profileAggregate`,
+aggregation cursors, `alter`),
 `RVectorSet` (VEMB/VINFO/VLINKS/VRANDMEMBER/VRANGE/attributes), priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …

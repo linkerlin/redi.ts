@@ -1,3 +1,26 @@
+## 2.22.0 — 2026-10-20
+
+Phase 44: RSearch 4.6.1 hybrid/profile/cursor/alter. Full suite:
+**265 tests / 47 files**.
+
+- **`hybridSearch(index, params)`**: FT.HYBRID with SEARCH + VSIM (KNN with
+  `K`/`EF_RUNTIME`/`YIELD_DISTANCE_AS`/`SHARD_K_RATIO`, or RANGE with
+  `RADIUS`/`EPSILON`), RRF/LINEAR combine, `load`, `groupBy`/`reduce`, `apply`,
+  `filter`, `sortBy`/`noSort`, `limit`, `params` (Buffer-safe) and `timeoutMs`.
+  Returns `{ total, results, warnings, executionTime }`.
+- **`profileSearch` / `profileAggregate`**: FT.PROFILE ... QUERY with optional
+  `LIMITED`; returns the inner result plus the flat profile map
+  (`Shards`/`Coordinator`).
+- **Cursors**: `aggregate(..., { withCursor })` now returns the cursor id, and
+  `readCursor(index, id[, count])` / `delCursor` wrap FT.CURSOR READ/DEL.
+- **`alter(index, schema, skipInitialScan?)`**: FT.ALTER ... SCHEMA ADD with
+  the same raw schema tokens as `createIndex`.
+- Redis 8.6 rejects zero-argument `COMBINE RRF/LINEAR` (Java 4.6.1 sends
+  `RRF 0`); TS omits COMBINE when no options are set, or materialises the
+  documented defaults when only a score alias is requested.
+- Tests: `test/live-phase44.test.ts` 1/1 (hybrid KNN/LINEAR + RRF/RANGE,
+  profiles, cursors, alter; capability-gated).
+
 ## 2.21.0 — 2026-10-20
 
 Phase 43: RJsonBucket 4.6.1 multi-match surface. Full suite:

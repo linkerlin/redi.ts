@@ -309,9 +309,11 @@ export interface SearchParams {
   sortAsc?: boolean;
   filter?: string;
   inKeys?: string[];
-  params?: Record<string, string>;
+  params?: Record<string, string | number | Buffer>;
   dialect?: number;
   timeoutMs?: number;
+  /** FT.PROFILE only: add the LIMITED flag. */
+  limited?: boolean;
 }
 
 export interface AggregateParams {
@@ -324,16 +326,82 @@ export interface AggregateParams {
   /** Raw SORTBY tokens, e.g. ['2', '@total', 'DESC']. */
   sortBy?: string[];
   limit?: [number, number];
-  params?: Record<string, string>;
+  params?: Record<string, string | number | Buffer>;
   dialect?: number;
   /** Appended verbatim for advanced options. */
   rawArgs?: string[];
+  /** WITHCURSOR, optionally `[count]` or `[count, maxIdleMs]`. */
+  withCursor?: boolean | [number] | [number, number];
+  /** FT.PROFILE only: add the LIMITED flag. */
+  limited?: boolean;
+}
+
+export interface HybridVectorParams {
+  field: string;
+  /** Parameter name, e.g. `$q`. */
+  param: string;
+  mode?: 'KNN' | 'RANGE';
+  /** KNN only. */
+  k?: number;
+  efRuntime?: number;
+  yieldDistanceAs?: string;
+  shardKRatio?: number;
+  /** RANGE only. */
+  radius?: number;
+  epsilon?: number;
+  scoreAlias?: string;
+  filter?: string;
+}
+
+export interface HybridCombineParams {
+  type: 'RRF' | 'LINEAR';
+  constant?: number;
+  window?: number;
+  alpha?: number;
+  beta?: number;
+  scoreAlias?: string;
+}
+
+export interface HybridGroupBy {
+  fields: string[];
+  /** Raw REDUCE token groups, e.g. [['COUNT', '0', 'AS', 'cnt']]. */
+  reduce?: (string | number)[][];
+}
+
+export interface HybridParams {
+  query: string;
+  vectorSimilarity: HybridVectorParams;
+  scorer?: string;
+  queryScoreAlias?: string;
+  combine?: HybridCombineParams;
+  limit?: [number, number];
+  sortBy?: { field: string; order?: 'ASC' | 'DESC' };
+  noSort?: boolean;
+  load?: string[];
+  groupBy?: HybridGroupBy[];
+  apply?: { value: string; as: string }[];
+  filter?: string;
+  params?: Record<string, string | number | Buffer>;
+  timeoutMs?: number;
+}
+
+export interface HybridSearchResult {
+  total: number;
+  results: Record<string, string>[];
+  warnings: string[];
+  executionTime: number;
+}
+
+export interface CursorParams {
+  total: number;
+  rows: Record<string, any>[];
+  cursor?: number;
 }
 
 export class RSearch {
   constructor(private redis: Redis) {}
-  private async call(...args: (string | number)[]): Promise<any> {
-    return (this.redis as any).call(...args.map(String));
+  private async call(...args: (string | number | Buffer)[]): Promise<any> {
+    return (this.redis as any).call(...args);
   }
   async createIndex(name: string, schema: string[], options: { on?: string; prefixes?: string[] } = {}): Promise<void> {
     const args: string[] = ['FT.CREATE', name, 'ON', options.on ?? 'HASH'];
@@ -423,8 +491,8 @@ export class RSearch {
     }
     return out;
   }
-  async search(name: string, query: string, params: SearchParams = {}): Promise<{ total: number; docs: any[] }> {
-    const args: string[] = ['FT.SEARCH', name, query];
+  private buildSearchArgs(name: string, query: string, params: SearchParams): (string | number | Buffer)[] {
+    const args: (string | number | Buffer)[] = ['FT.SEARCH', name, query];
     if (params.noContent) args.push('NOCONTENT');
     if (params.inKeys?.length) args.push('INKEYS', String(params.inKeys.length), ...params.inKeys);
     if (params.returnFields?.length) args.push('RETURN', String(params.returnFields.length), ...params.returnFields);
@@ -439,7 +507,10 @@ export class RSearch {
     }
     if (params.dialect !== undefined) args.push('DIALECT', String(params.dialect));
     if (params.timeoutMs !== undefined) args.push('TIMEOUT', String(params.timeoutMs));
-    const r: any = await this.call(...args);
+    return args;
+  }
+
+  private parseSearchResult(r: any): { total: number; docs: any[] } {
     if (r && typeof r === 'object' && !Array.isArray(r)) {
       // RESP3
       return { total: Number((r as any).total_results ?? 0), docs: (r as any).results ?? [] };
@@ -460,9 +531,9 @@ export class RSearch {
     }
     return { total, docs };
   }
-  /** Java `aggregate(index, query, options)`: FT.AGGREGATE → rows. */
-  async aggregate(name: string, query: string, params: AggregateParams = {}): Promise<{ total: number; rows: Record<string, any>[] }> {
-    const args: (string | number)[] = ['FT.AGGREGATE', name, query];
+
+  private buildAggregateArgs(name: string, query: string, params: AggregateParams): (string | number | Buffer)[] {
+    const args: (string | number | Buffer)[] = ['FT.AGGREGATE', name, query];
     if (params.load?.length) args.push('LOAD', params.load.length, ...params.load);
     if (params.groupBy?.length) {
       args.push('GROUPBY', params.groupBy.length, ...params.groupBy);
@@ -471,23 +542,208 @@ export class RSearch {
     if (params.apply?.length) args.push('APPLY', ...params.apply);
     if (params.sortBy?.length) args.push('SORTBY', ...params.sortBy);
     if (params.limit) args.push('LIMIT', params.limit[0], params.limit[1]);
+    if (params.withCursor) {
+      args.push('WITHCURSOR');
+      if (Array.isArray(params.withCursor)) {
+        args.push('COUNT', String(params.withCursor[0]));
+        if (params.withCursor.length > 1) args.push('MAXIDLE', String(params.withCursor[1]));
+      }
+    }
     if (params.params) {
       const entries = Object.entries(params.params);
       args.push('PARAMS', entries.length * 2, ...entries.flat());
     }
     if (params.dialect !== undefined) args.push('DIALECT', params.dialect);
     if (params.rawArgs?.length) args.push(...params.rawArgs);
-    const r: any = await this.call(...args);
+    return args;
+  }
+
+  private kvRow(row: any): Record<string, any> | null {
+    if (row && typeof row === 'object' && !Array.isArray(row)) return row as Record<string, any>;
+    if (!Array.isArray(row)) return null;
+    const rec: Record<string, any> = {};
+    for (let i = 0; i + 1 < row.length; i += 2) rec[String(row[i])] = row[i + 1];
+    return rec;
+  }
+
+  private parseAggregateResult(r: any): { total: number; rows: Record<string, any>[] } {
+    if (r && typeof r === 'object' && !Array.isArray(r)) {
+      const total = Number((r as any).total_results ?? 0);
+      const rows: Record<string, any>[] = [];
+      for (const item of ((r as any).results ?? []) as any[]) {
+        const rec = this.kvRow(item);
+        if (rec) rows.push(rec);
+      }
+      return { total, rows };
+    }
     const arr = (r ?? []) as any[];
     const total = arr.length > 0 ? Number(arr[0]) : 0;
     const rows: Record<string, any>[] = [];
     for (const row of (arr.slice(1) ?? []) as any[]) {
-      if (!Array.isArray(row)) continue;
-      const rec: Record<string, any> = {};
-      for (let i = 0; i + 1 < row.length; i += 2) rec[String(row[i])] = row[i + 1];
-      rows.push(rec);
+      const rec = this.kvRow(row);
+      if (rec) rows.push(rec);
     }
     return { total, rows };
+  }
+
+  private pairMap(raw: any): Record<string, any> {
+    const out: Record<string, any> = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) return { ...(raw as Record<string, any>) };
+    if (!Array.isArray(raw)) return out;
+    for (let i = 0; i + 1 < raw.length; i += 2) out[String(raw[i])] = raw[i + 1];
+    return out;
+  }
+
+  async search(name: string, query: string, params: SearchParams = {}): Promise<{ total: number; docs: any[] }> {
+    return this.parseSearchResult(await this.call(...this.buildSearchArgs(name, query, params)));
+  }
+
+  /** Java `profileSearch(index, query, options)`: FT.PROFILE ... SEARCH. */
+  async profileSearch(name: string, query: string, params: SearchParams = {}): Promise<{ result: { total: number; docs: any[] }; info: Record<string, any> }> {
+    const inner = this.buildSearchArgs(name, query, params).slice(2);
+    const args: (string | number | Buffer)[] = ['FT.PROFILE', name, 'SEARCH'];
+    if (params.limited) args.push('LIMITED');
+    args.push('QUERY', ...inner);
+    const raw: any = await this.call(...args);
+    const outer = Array.isArray(raw) ? raw : [];
+    return { result: this.parseSearchResult(outer[0]), info: this.pairMap(outer[1]) };
+  }
+
+  /** Java `aggregate(index, query, options)`: FT.AGGREGATE → rows (plus cursor when requested). */
+  async aggregate(name: string, query: string, params: AggregateParams = {}): Promise<{ total: number; rows: Record<string, any>[]; cursor?: number }> {
+    const raw: any = await this.call(...this.buildAggregateArgs(name, query, params));
+    if (params.withCursor && Array.isArray(raw) && raw.length === 2 && Array.isArray(raw[0]) && !Array.isArray(raw[1])) {
+      const parsed = this.parseAggregateResult(raw[0]);
+      return { ...parsed, cursor: toNumber(raw[1]) };
+    }
+    return this.parseAggregateResult(raw);
+  }
+
+  /** Java `profileAggregate(index, query, options)`: FT.PROFILE ... AGGREGATE. */
+  async profileAggregate(name: string, query: string, params: AggregateParams = {}): Promise<{ result: { total: number; rows: Record<string, any>[] }; info: Record<string, any> }> {
+    const inner = this.buildAggregateArgs(name, query, params).slice(2);
+    const args: (string | number | Buffer)[] = ['FT.PROFILE', name, 'AGGREGATE'];
+    if (params.limited) args.push('LIMITED');
+    args.push('QUERY', ...inner);
+    const raw: any = await this.call(...args);
+    const outer = Array.isArray(raw) ? raw : [];
+    return { result: this.parseAggregateResult(outer[0]), info: this.pairMap(outer[1]) };
+  }
+
+  /** Java `readCursor(index, cursorId[, count])`: FT.CURSOR READ. */
+  async readCursor(index: string, cursorId: number, count?: number): Promise<CursorParams> {
+    const args: (string | number)[] = ['FT.CURSOR', 'READ', index, cursorId];
+    if (count !== undefined) args.push('COUNT', count);
+    const raw: any = await this.call(...args);
+    const outer = Array.isArray(raw) ? raw : [];
+    const parsed = this.parseAggregateResult(outer[0]);
+    return { ...parsed, cursor: outer.length > 1 ? toNumber(outer[1]) : 0 };
+  }
+
+  /** Java `delCursor(index, cursorId)`: FT.CURSOR DEL. */
+  async delCursor(index: string, cursorId: number): Promise<void> {
+    await this.call('FT.CURSOR', 'DEL', index, cursorId);
+  }
+
+  /** Java `alter(index, skipInitialScan, fields...)`: FT.ALTER ... SCHEMA ADD. */
+  async alter(index: string, schema: string[], skipInitialScan = false): Promise<void> {
+    const args: string[] = ['FT.ALTER', index];
+    if (skipInitialScan) args.push('SKIPINITIALSCAN');
+    args.push('SCHEMA', 'ADD', ...schema);
+    await this.call(...args);
+  }
+
+  /** Java `hybridSearch(index, args)`: FT.HYBRID (Redis 8.2+). */
+  async hybridSearch(index: string, params: HybridParams): Promise<HybridSearchResult> {
+    const args: (string | number | Buffer)[] = ['FT.HYBRID', index, 'SEARCH', params.query];
+    if (params.scorer) args.push('SCORER', params.scorer);
+    if (params.queryScoreAlias) args.push('YIELD_SCORE_AS', params.queryScoreAlias);
+
+    const vs = params.vectorSimilarity;
+    if (!vs) throw new Error('vectorSimilarity is required for hybrid search');
+    args.push('VSIM', vs.field, vs.param);
+    if ((vs.mode ?? 'KNN') === 'KNN') {
+      if (vs.k === undefined) throw new Error('vectorSimilarity.k is required for KNN');
+      const knn: (string | number)[] = ['K', vs.k];
+      if (vs.efRuntime !== undefined) knn.push('EF_RUNTIME', vs.efRuntime);
+      if (vs.yieldDistanceAs) knn.push('YIELD_DISTANCE_AS', vs.yieldDistanceAs);
+      if (vs.shardKRatio !== undefined) knn.push('SHARD_K_RATIO', vs.shardKRatio);
+      args.push('KNN', String(knn.length), ...knn);
+    } else {
+      if (vs.radius === undefined) throw new Error('vectorSimilarity.radius is required for RANGE');
+      const range: (string | number)[] = ['RADIUS', vs.radius];
+      if (vs.epsilon !== undefined) range.push('EPSILON', vs.epsilon);
+      args.push('RANGE', String(range.length), ...range);
+    }
+    if (vs.scoreAlias) args.push('YIELD_SCORE_AS', vs.scoreAlias);
+    if (vs.filter) args.push('FILTER', vs.filter);
+
+    if (params.combine) {
+      const c = params.combine;
+      const cArgs: (string | number)[] = [];
+      if (c.type === 'RRF') {
+        if (c.constant !== undefined) cArgs.push('CONSTANT', c.constant);
+        if (c.window !== undefined) cArgs.push('WINDOW', c.window);
+      } else {
+        if (c.alpha !== undefined) cArgs.push('ALPHA', c.alpha);
+        if (c.beta !== undefined) cArgs.push('BETA', c.beta);
+        if (c.window !== undefined) cArgs.push('WINDOW', c.window);
+      }
+      if (cArgs.length === 0 && c.scoreAlias !== undefined) {
+        // Redis rejects zero-argument RRF/LINEAR (Java 4.6.1 sends RRF 0);
+        // materialise the documented defaults so YIELD_SCORE_AS stays legal.
+        if (c.type === 'RRF') cArgs.push('CONSTANT', 60);
+        else cArgs.push('ALPHA', 0.5, 'BETA', 0.5);
+      }
+      if (cArgs.length > 0) {
+        args.push('COMBINE', c.type, String(cArgs.length), ...cArgs);
+        if (c.scoreAlias) args.push('YIELD_SCORE_AS', c.scoreAlias);
+      }
+    }
+
+    if (params.limit) args.push('LIMIT', String(params.limit[0]), String(params.limit[1]));
+    if (params.sortBy) {
+      if (params.sortBy.order) args.push('SORTBY', '2', params.sortBy.field, params.sortBy.order);
+      else args.push('SORTBY', '1', params.sortBy.field);
+    }
+    if (params.noSort) args.push('NOSORT');
+    if (params.load?.length) args.push('LOAD', String(params.load.length), ...params.load);
+    if (params.groupBy?.length) {
+      for (const group of params.groupBy) {
+        args.push('GROUPBY', String(group.fields.length), ...group.fields);
+        for (const reduce of group.reduce ?? []) args.push('REDUCE', ...reduce);
+      }
+    }
+    for (const expr of params.apply ?? []) args.push('APPLY', expr.value, 'AS', expr.as);
+    if (params.filter) args.push('FILTER', params.filter);
+    if (params.params) {
+      const entries = Object.entries(params.params);
+      args.push('PARAMS', String(entries.length * 2), ...entries.flat());
+    }
+    if (params.timeoutMs !== undefined) args.push('TIMEOUT', String(params.timeoutMs));
+
+    const raw: any = await this.call(...args);
+    let total = 0;
+    let results: Record<string, string>[] = [];
+    let warnings: string[] = [];
+    let executionTime = 0;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      total = Number((raw as any).total_results ?? 0);
+      results = ((raw as any).results ?? []).map((row: any) => this.kvRow(row) ?? {});
+      warnings = ((raw as any).warnings ?? []).map(String);
+      executionTime = Number((raw as any).execution_time ?? 0);
+    } else {
+      const flat = (raw ?? []) as any[];
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        const key = String(flat[i]);
+        const value = flat[i + 1];
+        if (key === 'total_results') total = toNumber(value);
+        else if (key === 'results') results = ((value ?? []) as any[]).map((row: any) => this.kvRow(row) ?? {});
+        else if (key === 'warnings') warnings = ((value ?? []) as any[]).map(String);
+        else if (key === 'execution_time') executionTime = Number(value);
+      }
+    }
+    return { total, results, warnings, executionTime };
   }
 }
 

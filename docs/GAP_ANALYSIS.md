@@ -59,7 +59,7 @@
 
 **`RBuckets`**：`setIfAllKeysExist/setIfAllKeysAbsent` ✅ (2.2.0，`MSETEX … NX|XX [PX ms]`，Redis 8+；无该命令时显式报错而非降级)。
 
-**`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；仍缺 `hybridSearch`、`profileSearch/profileAggregate`、游标读取、`alter` 索引、`IndexOptions/FieldIndex` 结构化建索引。
+**`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；`hybridSearch`（KNN/RANGE + RRF/LINEAR）、`profileSearch/profileAggregate`、聚合游标 `readCursor/delCursor`、`alter` ✅ (2.22.0)；仍缺 `IndexOptions/FieldIndex` 结构化建索引（TS 用原始 schema token）。注：本机 Redis 8.6 不支持 `YIELD_DISTANCE_AS`，且 FT.HYBRID RANGE 过滤偏宽；参数透传与 Java 4.6.1 一致。
 
 **`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；`RJsonBuckets.set/get/getWithPath`（MSET/MGET）✅ (2.18.0)；`*Multi` 多匹配族与多路径 `get(codec, paths...)` ✅ (2.21.0；并修正两参 `arrayIndex` 的全数组搜索)；仍缺 `FPHAType`（本机 RedisJSON 不支持 `JSON.SET … FPHA`，版本相关）。
 
