@@ -7,6 +7,7 @@ export * from './atomic.js';
 export * from './locks.js';
 export * from './caches.js';
 export * from './messaging.js';
+export * from './listeners.js';
 export * from './probabilistic.js';
 export * from './infra.js';
 export * from './batch.js';

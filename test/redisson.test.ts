@@ -1578,3 +1578,24 @@ describe('phase 30: mapcache compute + status listeners (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 31: keyspace listeners + multi-stream group read (mock)', () => {
+  it('stream/time-series listener lifecycle and empty readGroupMany', async () => {
+    const r = make();
+    const st = r.getStream('p31:s');
+    const id = await st.addListener({ onAdd: () => undefined, onRemove: () => undefined });
+    expect(id).toBeGreaterThan(0);
+    await st.removeListener(id);
+    await st.addListener({ onAdd: () => undefined });
+    await st.removeAllListeners();
+    expect((await st.readGroupMany('g', 'c', {})).size).toBe(0);
+
+    const ts = r.getTimeSeries<number>('p31:ts');
+    const tid = await ts.addListener({ onAdd: () => undefined, onRemove: () => undefined });
+    expect(tid).toBeGreaterThan(0);
+    await ts.removeListener(tid);
+    await ts.addListener({ onRemove: () => undefined });
+    await ts.removeAllListeners();
+    await r.shutdown();
+  });
+});

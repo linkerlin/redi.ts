@@ -1,3 +1,27 @@
+## 2.10.0 — 2026-10-20
+
+Phase 31: keyspace ObjectListener + multi-stream group read. Full suite:
+**237 tests / 35 files green in ~81 s**.
+
+- **`RStream.addListener(ObjectListener)`** — Java's keyspace-notification
+  surface: subscribes `__keyevent@*:xadd|xdel|xgroup-create|xgroup-destroy|
+  xgroup-createconsumer|xgroup-delconsumer` over a duplicate connection,
+  filters events by this stream name and invokes `onAdd`/`onRemove`/
+  `onCreateGroup`/`onRemoveGroup`/`onCreateConsumer`/`onRemoveConsumer`.
+  `removeListener(id)` / `removeAllListeners()` unsubscribes cleanly.
+- **`RTimeSeries.addListener(ObjectListener)`** — `zadd`/`zrem` keyevents on
+  the series key (Java uses ScoredSortedSet listeners for its ZSET backing).
+- **`RStream.readGroupMany(group, consumer, streams, count)`** — one
+  `XREADGROUP GROUP … COUNT … STREAMS k1 k2 … id1 id2 …` returning
+  `Map<stream, StreamEntry[]>`.
+- Server dependency (same as Java): keyspace notifications require
+  `notify-keyspace-events` with K+E (e.g. `KEA`). The live test saves/restores
+  the setting and skips with a log when `CONFIG SET` is refused; mock only
+  verifies listener lifecycle (no events are emitted).
+- Tests: 1 mock + `test/live-phase31.test.ts` 2/2 (all six stream events,
+  removed-listener silence, TimeSeries add/remove events, multi-stream
+  XREADGROUP incl. empty second read).
+
 ## 2.9.0 — 2026-10-20
 
 Phase 30: map-cache compute + topic status listeners. Full suite:

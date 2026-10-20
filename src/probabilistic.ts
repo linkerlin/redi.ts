@@ -19,6 +19,7 @@ import {
   toNumber,
   unpackTimeSeriesMember,
 } from './util.js';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 import { randomBytes } from 'node:crypto';
 
 // Per-process fallback tag for PER_CLIENT windows built without a client id
@@ -858,10 +859,31 @@ return removed`;
 export class RTimeSeries<V = any> extends RedisDataStructure {
   private ttlKey: string;
   private seqKey: string;
+  private keyspaceHub: KeyspaceListenerHub | null = null;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.ttlKey = prefixName('redisson__ts_ttl', name);
     this.seqKey = prefixName('redisson__ts_seq', name);
+  }
+  private hub(): KeyspaceListenerHub {
+    if (this.keyspaceHub === null) {
+      this.keyspaceHub = new KeyspaceListenerHub(this.redis, this.name, {
+        onAdd: 'zadd',
+        onRemove: 'zrem',
+      });
+    }
+    return this.keyspaceHub;
+  }
+  /** Java `addListener(ObjectListener)` (ScoredSortedSet add/remove keyspace
+   *  events for this series; requires server `notify-keyspace-events`). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.hub().add(listener);
+  }
+  async removeListener(id: number): Promise<void> {
+    return this.hub().remove(id);
+  }
+  async removeAllListeners(): Promise<void> {
+    return this.hub().removeAll();
   }
   async add(timestamp: number, value: V, ttlMs = 0, label = ''): Promise<void> {
     const now = await serverNowMs(this.redis);

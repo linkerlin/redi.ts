@@ -8,6 +8,7 @@ import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import { duplicateRedis, luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber, unpackDelayedMember, withDedicatedRedis } from './util.js';
 import { randomBytes } from 'node:crypto';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 export type MessageListener<V = any> = (message: V, channel?: string) => void;
 
@@ -444,6 +445,32 @@ export type StreamNackMode = 'SILENT' | 'FAIL' | 'FATAL';
 export type StreamAckRefPolicy = 'KEEPREF' | 'DELREF' | 'ACKED';
 
 export class RStream extends RedisDataStructure {
+  private keyspaceHub: KeyspaceListenerHub | null = null;
+  private hub(): KeyspaceListenerHub {
+    if (this.keyspaceHub === null) {
+      this.keyspaceHub = new KeyspaceListenerHub(this.redis, this.name, {
+        onAdd: 'xadd',
+        onRemove: 'xdel',
+        onCreateGroup: 'xgroup-create',
+        onRemoveGroup: 'xgroup-destroy',
+        onCreateConsumer: 'xgroup-createconsumer',
+        onRemoveConsumer: 'xgroup-delconsumer',
+      });
+    }
+    return this.keyspaceHub;
+  }
+  /** Java `addListener(ObjectListener)`: keyspace notifications
+   *  (`__keyevent@*:xadd|xdel|xgroup-*`), filtered to this stream. Requires
+   *  server `notify-keyspace-events` (K+E, e.g. "KEA"). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.hub().add(listener);
+  }
+  async removeListener(id: number): Promise<void> {
+    return this.hub().remove(id);
+  }
+  async removeAllListeners(): Promise<void> {
+    return this.hub().removeAll();
+  }
   async add(fields: Record<string, any>, id = '*', maxLen?: number): Promise<string> {
     // Legacy path always creates the stream, so the id is never null.
     return (await this.addWithOptions(fields, { id, ...(maxLen !== undefined ? { maxLen } : {}) })) as string;
@@ -659,6 +686,18 @@ export class RStream extends RedisDataStructure {
     const out = new Map<string, StreamEntry[]>();
     if (names.length === 0) return out;
     const res: any = await (this.redis as any).xread('COUNT', count, 'STREAMS', ...names, ...names.map((n) => streams[n]));
+    for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
+      out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
+    }
+    return out;
+  }
+  /** Java `readGroup(StreamMultiReadGroupArgs)`: one XREADGROUP across streams
+   *  (same group/consumer for all, `streams` maps name → last id). */
+  async readGroupMany(group: string, consumer: string, streams: Record<string, string>, count = 10): Promise<Map<string, StreamEntry[]>> {
+    const names = Object.keys(streams);
+    const out = new Map<string, StreamEntry[]>();
+    if (names.length === 0) return out;
+    const res: any = await (this.redis as any).xreadgroup('GROUP', group, consumer, 'COUNT', count, 'STREAMS', ...names, ...names.map((n) => streams[n]));
     for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
       out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
     }
