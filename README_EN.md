@@ -75,7 +75,7 @@ key synchronizers through
 names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
-`compute`/`computeIfAbsent`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
+`compute`/`computeIfAbsent`, absolute `Date` expiry)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
@@ -98,7 +98,8 @@ pattern `getActiveTopics`, `StatusListener` callbacks,
 (per-stream groups supported), `addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
-(native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
+(native bit order; `BITFIELD`, batch `get`/`set`/`asBitSet`, Redis 8 `BITOP`
+DIFF/DIFF1/ANDOR/ONE),
 `RTimeSeries` (`BBc0Lc0Lc0`; `addAll`, `getEntry`/`getValue`, first/last and
 poll families, forward/reversed ranges with limits, `getAndRemove`,
 `remove`/`removeRange`, `stream`/`iterator` paging over values, `addListener`
@@ -114,7 +115,7 @@ See [COMPATIBILITY.md](COMPATIBILITY.md).
 Honest non-goals (same as redi.go): `RSortedSet` (LIST+Comparator),
 `RTransaction` (snapshot rollback), `LiveObject`, reactive/Rx, `RRemoteService`/
 `RExecutorService` wire protocol, PRO-only (`RReliableQueue`,
-`RLocalCachedMapCache`, `RReliablePubSubTopic`, `RBitVectorStore`).
+`RLocalCachedMapCache`, `RReliablePubSubTopic`, `RBitVectorStore`, `RLeasedMap`).
 
 ## Codec
 
@@ -127,7 +128,7 @@ wrappers, so bare JSON from redi.py and raw strings also read fine.
 ## Tests
 
 ```sh
-npm test             # 188 tests: wire vectors, mock functional, live python
+npm test             # 246 tests: wire vectors, mock functional, live python
                      # interop, live bidirectional suites vs Redisson 4.6.1
 npm run build        # dual output: dist/cjs + dist/esm
 npm run pack-smoke   # npm pack → temp consumer: CJS and ESM both resolve

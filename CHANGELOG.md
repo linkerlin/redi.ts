@@ -1,3 +1,20 @@
+## 2.12.1 — 2026-10-20
+
+Phase 34: stabilization & documentation audit (no behavior changes).
+
+- **Flake audit**: three consecutive full-suite runs, all green —
+  **246/246 tests · 37 files** at 82.15 s, 71.40 s and 71.62 s (including the
+  live Java/Redis/Cluster suites). No retries or threshold changes were
+  needed; previous phases' 60–90 s spread is load variance, not flakiness.
+- **Docs consistency**: README_EN test-count comment (188 → 246); PRO-only
+  lists now include `RLeasedMap` (README_EN/COMPATIBILITY/AGENTS); MapCache
+  native absolute `Date` expiry and RBitSet batch/`asBitSet` surfaced in the
+  feature lists; RSearch/RedisJSON module dependency documented as
+  capability-gated (missing module → command error/test skip, never silent).
+- **Final boundary list**: design differences (CommonOptions/Class<M>/
+  LocalCachedMap loader-writer) and PRO-only structures are now recorded in
+  GAP §4 and the compatibility matrix; no remaining §3 roadmap items.
+
 ## 2.12.0 — 2026-10-20
 
 Phase 33: final audit + remaining real gaps. Full suite:
