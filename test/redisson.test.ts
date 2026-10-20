@@ -1599,3 +1599,46 @@ describe('phase 31: keyspace listeners + multi-stream group read (mock)', () => 
     await r.shutdown();
   });
 });
+
+describe('phase 32: API polish (mock)', () => {
+  it('RKeys lazy key streams', async () => {
+    const r = make();
+    await r.redis.mset('p32:s:a', '1', 'p32:s:b', '1', 'p32:other', '1');
+    const keys: string[] = [];
+    for await (const k of r.getKeys().getKeysStream('p32:s:*')) keys.push(k);
+    expect(keys.sort()).toEqual(['p32:s:a', 'p32:s:b']);
+    const all: string[] = [];
+    for await (const k of r.getKeys().getKeysStreamByPattern('p32:*')) all.push(k);
+    expect(all.sort()).toEqual(['p32:other', 'p32:s:a', 'p32:s:b']);
+    await r.shutdown();
+  });
+
+  it('topic removeListener(callback) and per-group readGroupMany overload', async () => {
+    const r = make();
+    const t = r.getTopic<string>('p32:t');
+    const cb = () => undefined;
+    await t.addListener(cb);
+    expect(await t.countListeners()).toBe(1);
+    await t.removeListener(cb);
+    expect(await t.countListeners()).toBe(0);
+    await t.removeListener(() => undefined); // unknown callback: no-op
+
+    const sh = r.getShardedTopic<string>('p32:sh');
+    const scb = () => undefined;
+    const sid = await sh.addListener(scb);
+    expect(await sh.countListeners()).toBe(sid === 0 ? 0 : 1);
+    await sh.removeListener(scb);
+    expect(await sh.countListeners()).toBe(0);
+
+    const p = r.getPatternTopic<string>('p32:*');
+    const pcb = () => undefined;
+    await p.addListener(pcb);
+    await p.removeListener(pcb);
+    await p.removeAllListeners();
+
+    const st = r.getStream('p32:stream');
+    expect((await st.readGroupMany({}, 10)).size).toBe(0);
+    expect((await st.readGroupMany('g', 'c', {}, 10)).size).toBe(0);
+    await r.shutdown();
+  });
+});

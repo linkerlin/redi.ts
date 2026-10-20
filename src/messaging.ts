@@ -56,7 +56,14 @@ export class RTopic<V = any> extends RedisDataStructure {
     this.subs.set(id, { conn, cb, handler });
     return id;
   }
-  async removeListener(id: number): Promise<void> {
+  async removeListener(idOrCb: number | MessageListener<V>): Promise<void> {
+    if (typeof idOrCb !== 'number') {
+      for (const [id, s] of [...this.subs.entries()]) {
+        if (s.cb === idOrCb) await this.removeListener(id);
+      }
+      return;
+    }
+    const id = idOrCb;
     const status = this.statusSubs.get(id);
     if (status) {
       this.statusSubs.delete(id);
@@ -103,7 +110,7 @@ export class RTopic<V = any> extends RedisDataStructure {
 }
 
 export class RPatternTopic<V = any> extends RedisDataStructure {
-  private subs = new Map<number, { conn: Redis; handler: (pat: string, ch: string, payload: string) => void }>();
+  private subs = new Map<number, { conn: Redis; cb: (channel: string, message: V) => void; handler: (pat: string, ch: string, payload: string) => void }>();
   private nextId = 1;
   constructor(redis: Redis, pattern: string, codec: Codec = new JsonCodec()) {
     super(redis, pattern, codec);
@@ -115,7 +122,7 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
     const id = this.nextId++;
     const conn = await duplicateRedis(this.redis);
     if (!conn) {
-      this.subs.set(id, { conn: this.redis, handler: () => undefined });
+      this.subs.set(id, { conn: this.redis, cb, handler: () => undefined });
       return id;
     }
     const handler = (_pat: string, ch: string, payload: string) => {
@@ -133,10 +140,17 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
       } catch { /* noop */ }
       throw e;
     }
-    this.subs.set(id, { conn, handler });
+    this.subs.set(id, { conn, cb, handler });
     return id;
   }
-  async removeListener(id: number): Promise<void> {
+  async removeListener(idOrCb: number | ((channel: string, message: V) => void)): Promise<void> {
+    if (typeof idOrCb !== 'number') {
+      for (const [id, s] of [...this.subs.entries()]) {
+        if (s.cb === idOrCb) await this.removeListener(id);
+      }
+      return;
+    }
+    const id = idOrCb;
     const s = this.subs.get(id);
     if (!s) return;
     this.subs.delete(id);
@@ -165,7 +179,7 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
 }
 
 export class RShardedTopic<V = any> extends RedisDataStructure {
-  private subs = new Map<number, { conn: Redis; handler: (ch: string, payload: string) => void; mode: 'sharded' | 'plain' }>();
+  private subs = new Map<number, { conn: Redis; cb: MessageListener<V>; handler: (ch: string, payload: string) => void; mode: 'sharded' | 'plain' }>();
   private statusSubs = new Map<number, StatusListener>();
   private nextId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
@@ -207,10 +221,17 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
         throw e;
       }
     }
-    this.subs.set(id, { conn, handler, mode });
+    this.subs.set(id, { conn, cb, handler, mode });
     return id;
   }
-  async removeListener(id: number): Promise<void> {
+  async removeListener(idOrCb: number | MessageListener<V>): Promise<void> {
+    if (typeof idOrCb !== 'number') {
+      for (const [id, s] of [...this.subs.entries()]) {
+        if (s.cb === idOrCb) await this.removeListener(id);
+      }
+      return;
+    }
+    const id = idOrCb;
     const status = this.statusSubs.get(id);
     if (status) {
       this.statusSubs.delete(id);
@@ -443,6 +464,14 @@ export interface StreamReadGroupOptions {
 
 export type StreamNackMode = 'SILENT' | 'FAIL' | 'FATAL';
 export type StreamAckRefPolicy = 'KEEPREF' | 'DELREF' | 'ACKED';
+
+/** Per-stream group spec for `RStream.readGroupMany`. */
+export interface StreamGroupReadSpec {
+  group: string;
+  consumer: string;
+  /** Last-seen id; defaults to `>` (new messages). */
+  id?: string;
+}
 
 export class RStream extends RedisDataStructure {
   private keyspaceHub: KeyspaceListenerHub | null = null;
@@ -692,14 +721,49 @@ export class RStream extends RedisDataStructure {
     return out;
   }
   /** Java `readGroup(StreamMultiReadGroupArgs)`: one XREADGROUP across streams
-   *  (same group/consumer for all, `streams` maps name → last id). */
-  async readGroupMany(group: string, consumer: string, streams: Record<string, string>, count = 10): Promise<Map<string, StreamEntry[]>> {
-    const names = Object.keys(streams);
+   *  sharing the same group/consumer (`streams` maps name → last id). */
+  async readGroupMany(group: string, consumer: string, streams: Record<string, string>, count?: number): Promise<Map<string, StreamEntry[]>>;
+  /** Per-stream group/consumer variant (Java allows a different group per
+   *  stream); streams are bucketed by group+consumer and read in one
+   *  XREADGROUP per bucket. */
+  async readGroupMany(specs: Record<string, StreamGroupReadSpec>, count?: number): Promise<Map<string, StreamEntry[]>>;
+  async readGroupMany(
+    a: string | Record<string, StreamGroupReadSpec>,
+    b?: string | number,
+    c?: Record<string, string>,
+    d = 10,
+  ): Promise<Map<string, StreamEntry[]>> {
+    let specs: Record<string, StreamGroupReadSpec>;
+    let count: number;
+    if (typeof a === 'string') {
+      count = d;
+      specs = {};
+      for (const [name, id] of Object.entries(c ?? {})) {
+        specs[name] = { group: a, consumer: String(b), id };
+      }
+    } else {
+      count = typeof b === 'number' ? b : 10;
+      specs = a;
+    }
+    const buckets = new Map<string, { group: string; consumer: string; names: string[]; ids: string[] }>();
+    for (const [name, s] of Object.entries(specs)) {
+      const key = `${s.group}\u0000${s.consumer}`;
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = { group: s.group, consumer: s.consumer, names: [], ids: [] };
+        buckets.set(key, bucket);
+      }
+      bucket.names.push(name);
+      bucket.ids.push(s.id ?? '>');
+    }
     const out = new Map<string, StreamEntry[]>();
-    if (names.length === 0) return out;
-    const res: any = await (this.redis as any).xreadgroup('GROUP', group, consumer, 'COUNT', count, 'STREAMS', ...names, ...names.map((n) => streams[n]));
-    for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
-      out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
+    for (const bucket of buckets.values()) {
+      const res: any = await (this.redis as any).xreadgroup(
+        'GROUP', bucket.group, bucket.consumer, 'COUNT', count, 'STREAMS', ...bucket.names, ...bucket.ids,
+      );
+      for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
+        out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
+      }
     }
     return out;
   }

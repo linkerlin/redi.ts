@@ -91,10 +91,11 @@ multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
 (keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;
 management: `getChannelNames`/`countListeners`/`countSubscribers`,
-pattern `getActiveTopics`, `StatusListener` callbacks),
+pattern `getActiveTopics`, `StatusListener` callbacks,
+`removeListener(handler)`),
 `RStream` (JSON field names; groups/claim/pending/nack, `fastClaim`/
-`fastAutoClaim` JUSTID, `readMany`/`readGroupMany` multi-stream reads,
-`addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
+`fastAutoClaim` JUSTID, `readMany`/`readGroupMany` multi-stream reads
+(per-stream groups supported), `addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, Redis 8 `BITOP` DIFF/DIFF1/ANDOR/ONE),
@@ -103,7 +104,7 @@ poll families, forward/reversed ranges with limits, `getAndRemove`,
 `remove`/`removeRange`, `stream`/`iterator` paging over values, `addListener`
 keyspace zadd/zrem events, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
-move, unlinkByPattern), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
+move, unlinkByPattern, lazy `getKeysStream`), `RScript`/`RFunction`/`RSearch`/`RVectorSet`, priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).

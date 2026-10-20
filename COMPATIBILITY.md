@@ -59,9 +59,9 @@
 | RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids; `delete()/clear()` reads the HASH first and removes every child collection | WIRE_OK + live phase 16 (Java reads empty after delete ✅) |
 | RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE`; `delete()/clear()`/`unlink()` also removes the TTL ZSET and (Native) child collections; opt-in `enablePeriodicEviction(intervalMs)` / `evictExpired()` sweeps child + HASH field + TTL member (default lazy) | WIRE_OK / NATIVE_OK + live phase 16 (zero residue ✅) + live phase 22 (周期清扫 ✅) |
 | RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试; near-cache honours `timeToLiveMs`/`maxIdleMs`/`maxSize` + `evictionPolicy` LRU/LFU (entries track expiry, last access and hit count; local reads await subscription ack); `getCachedMap()` snapshot; Java binary protocol not ported — disable near-cache for mixed deploys | PARTIAL + live phase 16 (TTL/idle ✅) + mock phase 22 (LRU/LFU + view ✅) |
-| RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件）; handlers attached before subscribe; Sharded saves conn and supports removeListener/removeAllListeners; management: `getChannelNames`, `countListeners` (local), `countSubscribers` (`PUBSUB NUMSUB`; sharded `SHARDNUMSUB` with fallbacks), Pattern `getPatternNames`/`getActiveTopics` (`PUBSUB CHANNELS`), `StatusListener` (onSubscribe/onUnsubscribe; removeListener handles both listener kinds) | WIRE_OK / NATIVE_OK + live phase 4/5/17（Topic/Sharded/Pattern 双向 + lifecycle ✅） + live phase 26（counts/active topics ✅） + live phase 30（status callbacks ✅） |
+| RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件）; handlers attached before subscribe; Sharded saves conn and supports removeListener/removeAllListeners; management: `getChannelNames`, `countListeners` (local), `countSubscribers` (`PUBSUB NUMSUB`; sharded `SHARDNUMSUB` with fallbacks), Pattern `getPatternNames`/`getActiveTopics` (`PUBSUB CHANNELS`), `StatusListener` (onSubscribe/onUnsubscribe; removeListener handles both listener kinds), `removeListener(handler)` by callback identity | WIRE_OK / NATIVE_OK + live phase 4/5/17（Topic/Sharded/Pattern 双向 + lifecycle ✅） + live phase 26（counts/active topics ✅） + live phase 30（status callbacks ✅） + live phase 32（handler removal ✅） |
 | RReliableTopic | STREAM field **`m`** + per-subscriber group + `{name}:timeout`; XREADGROUP BLOCK on a dedicated connection; `unlink()` clears stream+timeout | WIRE_OK + live phase 3/17 (双向投递） |
-| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel; `fastClaim`/`fastAutoClaim` (XCLAIM/XAUTOCLAIM JUSTID → ids), `readMany`/`readGroupMany` (one XREAD/XREADGROUP over several streams) and `addListener(ObjectListener)` via `__keyevent@*:xadd|xdel|xgroup-*` (requires `notify-keyspace-events` K+E); blocking `readGroupWith({blockMs})` uses a dedicated connection | WIRE_OK + live bidirectional ✅ + live phase 13/14/17 ✅ + live phase 26（JUSTID/多流读 ✅） + live phase 31（keyspace 六事件/多流 group 读 ✅; keyspace 未配置时无事件） |
+| RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel; `fastClaim`/`fastAutoClaim` (XCLAIM/XAUTOCLAIM JUSTID → ids), `readMany`/`readGroupMany` (one XREAD/XREADGROUP over several streams; per-stream groups supported) and `addListener(ObjectListener)` via `__keyevent@*:xadd|xdel|xgroup-*` (requires `notify-keyspace-events` K+E); blocking `readGroupWith({blockMs})` uses a dedicated connection | WIRE_OK + live bidirectional ✅ + live phase 13/14/17 ✅ + live phase 26（JUSTID/多流读 ✅） + live phase 31（keyspace 六事件/多流 group 读 ✅; keyspace 未配置时无事件） + live phase 32（每流独立 group ✅） |
 | RDelayedQueue | ZSET `redisson_delay_queue_timeout:{name}` + LIST `redisson_delay_queue:{name}` (`Bc0Lc0`) + channel（offer id 走 Buffer 保真；`size()` = staging LLEN，与 Java 一致；`targetSize()` = 目标队列；`delete()` 只删 staging+timeout，保留目标队列；消费侧迁移由 DelayedQueue 包装类调度：`start()` 起 Java `QueueTransferTask` 同款后台迁移（channel 订阅走 `duplicate()` 连接 + deadline 定时器 + 5s 错误重试 + 迁移 Lua 返回下一表头 deadline），`stop()` 释放、`destroy()` = 摘除任务不删数据；未 `start()` 时 `poll()`/`peek()` 同步补迁移——直接 poll 目标队列仍不会迁移） | WIRE_OK + live phase 3 (双向迁移） + live phase 16 (size/delete ✅) + live phase 21 (后台迁移端到端 ✅) + live cluster (集群下迁移器 ✅) |
 | RRingBuffer | LIST + `redisson_rb:{name}` capacity; `delete()` clears LIST+capacity, `clear()` clears LIST only (Java 4.6.1 parity) | WIRE_OK + live phase 16 (capacity re-init ✅) |
 | RGeo | GEOADD, members JSON-encoded; `GeoSearchArgs` 全族（`from(lon,lat)`/`from(member)`、`radius`/`box`、`order`、`count`/`countAny`）、`search`/`searchWithDistance`/`searchWithPosition`、`storeSearchTo`/`storeSortedSearchTo`、`addIfExists`（单成员 Lua geopos→geoadd；变参 GEOADD XX 只计新增故恒 0）。命令选择对齐 4.6.1 jar：半径→`GEORADIUS_RO`/`GEORADIUSBYMEMBER_RO`，Box→`GEOSEARCH`，存储→`GEORADIUS ... STOREDIST`/`GEOSEARCHSTORE` | WIRE_OK + live bidirectional ✅ + live phase 20 ✅ |
@@ -71,7 +71,7 @@
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128; `unlink()` clears both | WIRE_OK + live bidirectional ✅ |
 | BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
 | RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads); successful acquire renews `keepAliveTime` on config/value/permits inside the Lua (and companions inherit a config TTL when keepAlive is 0); `unlink()` clears value/permits | WIRE_OK + live shared-window ✅ + live phase 22 (TS/Java 双向续期 ✅) |
-| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 13 typed facades — bucket/map/list/set/queue/deque/atomicLong/atomicDouble/bitset/geo/stream/mapCacheNative/scoredSortedSet, reads resolve on execute); RKeys: `PEXPIRE`/`PEXPIREAT` single + multi-key, `PERSIST`/`PTTL`, `MOVE`, `SCAN`+`UNLINK`, `getSlot` computed client-side (CRC16-XMODEM, hash-tag aware; Java delegates to `CLUSTER KEYSLOT`) | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） + live phase 22（batch geo/bitset/HPEXPIRE ✅） + live phase 23（keys ops / slots vs 集群节点 / MOVE db9 ✅） |
+| RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 13 typed facades — bucket/map/list/set/queue/deque/atomicLong/atomicDouble/bitset/geo/stream/mapCacheNative/scoredSortedSet, reads resolve on execute); RKeys: `PEXPIRE`/`PEXPIREAT` single + multi-key, `PERSIST`/`PTTL`, `MOVE`, `SCAN`+`UNLINK`, `getSlot` computed client-side (CRC16-XMODEM, hash-tag aware; Java delegates to `CLUSTER KEYSLOT`), lazy `getKeysStream(pattern?, count?)` | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅；RSearch/JSON 需模块，本地无） + live phase 12（batch Lua ops + 跨语言读 ✅） + live phase 22（batch geo/bitset/HPEXPIRE ✅） + live phase 23（keys ops / slots vs 集群节点 / MOVE db9 ✅） + live phase 32（lazy key stream ✅） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
 | RSortedSet / RTransaction / RRemoteService / RExecutorService / LiveObject / reactive | — | REFUSE_AS_FAKE |
 | PRO-only (ReliableQueue/LocalCachedMapCache/ReliablePubSubTopic/BitVectorStore) | — | PRO (throw) |
@@ -79,13 +79,13 @@
 
 ## Verification
 
-- `npm test`: 237 tests / 35 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 241 tests / 36 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
   map views/streaming, phase-28 interruptible lock/map-cache remainder,
-  phase-29 rwlock_timeout, phase-30 map-cache compute/status listeners and
-  phase-31 keyspace listeners/multi-stream group reads), `interop`
+  phase-29 rwlock_timeout, phase-30 map-cache compute/status listeners,
+  phase-31 keyspace listeners/multi-stream group reads and phase-32 API polish), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -135,6 +135,8 @@
   status listener subscribe-unsubscribe callbacks, 2/2 PASS),
   `live-phase31` (six stream keyspace events + removed-listener silence /
   TimeSeries zadd+zrem events / multi-stream XREADGROUP, 2/2 PASS),
+  `live-phase32` (lazy key stream / removeListener(handler) silence /
+  per-stream group XREADGROUP, 2/2 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

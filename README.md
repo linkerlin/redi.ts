@@ -68,8 +68,8 @@ const redisson = Redisson.create({ client: redis });
 - 单个值：`RBucket`、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`
 - 数字：`RAtomicLong`、`Double`（`getAndIncrement`/`Decrement`、`setIfLess`/`Greater`、`getAndDelete`/`compareAndDelete`）；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
-- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）
-- 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany`/`readGroupMany` 多流 XREAD、`addListener`（keyspace xadd/xdel/xgroup-*））
+- 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除
+- 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany`/`readGroupMany`（支持每流独立 group）、`addListener`（keyspace xadd/xdel/xgroup-*））
 - 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`）
 - 环形缓冲：`RRingBuffer`
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
@@ -77,7 +77,7 @@ const redisson = Redisson.create({ client: redis });
 - 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
 - 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`、`stream/iterator` 分页取值、`addListener`（keyspace zadd/zrem），TTL 惰性过滤）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
-- 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern）、`RScript`、`RFunction`、`RSearch`、`RVectorSet`
+- 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern、`getKeysStream` 惰性扫描）、`RScript`、`RFunction`、`RSearch`、`RVectorSet`
 - 优先级队列（`GO_ONLY`，ZSET 加分数）、`RTransferQueue`（`GO_ONLY`）、`RBatch`（13 类类型化门面），……
 
 细账在 [COMPATIBILITY.md](COMPATIBILITY.md)。

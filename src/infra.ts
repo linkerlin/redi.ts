@@ -30,6 +30,18 @@ export class RKeys {
     } while (cursor !== '0');
     return out;
   }
+  /** Java `getKeysStream()` / `getKeysStreamByPattern(pattern)`: lazy SCAN. */
+  async *getKeysStream(pattern = '*', count = 100): AsyncGenerator<string> {
+    let cursor = '0';
+    do {
+      const [next, keys] = (await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', String(count))) as [string, string[]];
+      for (const k of keys) yield k;
+      cursor = next;
+    } while (cursor !== '0');
+  }
+  async *getKeysStreamByPattern(pattern: string, count = 100): AsyncGenerator<string> {
+    yield* this.getKeysStream(pattern, count);
+  }
   async delete(...keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
     return this.redis.del(...keys);

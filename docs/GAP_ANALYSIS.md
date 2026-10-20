@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.10.0（2026-10-20）更新阶段 31 收口项（RStream/RTimeSeries ObjectListener keyspace 监听、readGroupMany）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.11.0（2026-10-20）更新阶段 32 收口项（RKeys 惰性 key stream、按 handler 删除监听、每流独立 group 多流读；CommonOptions/Class<M> 记为设计差异）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -31,7 +31,7 @@
 
 **`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；`addAllCounted/removeAllCounted/containsEach` ✅ (2.5.0)；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`iterator/distributedIterator/stream` 视图。
 
-**`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`/`readGroupMany`（多流 XREAD/XREADGROUP）✅ (2.5.0/2.10.0)；`addListener(ObjectListener)` ✅ (2.10.0，keyspace `xadd|xdel|xgroup-*`，需服务端 `notify-keyspace-events` K+E；未配置时订阅静默)。
+**`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`/`readGroupMany`（多流 XREAD/XREADGROUP）✅ (2.5.0/2.10.0)；`addListener(ObjectListener)` ✅ (2.10.0，keyspace `xadd|xdel|xgroup-*`，需服务端 `notify-keyspace-events` K+E；未配置时订阅静默)；`readGroupMany` 每流独立 group/consumer ✅ (2.11.0，按 group+consumer 分桶各发一条 XREADGROUP)。
 
 **`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace` ✅ (2.6.0)；仍缺 `putAllWithTTL`（在 `RMapCache.putAll`）、`remove` 联合返回的类型收窄（TS 以重载返回 `V|null|boolean`）。
 
@@ -43,7 +43,7 @@
 
 **`RLock` 面**：`lockInterruptibly` ✅ (2.7.0，以 AbortSignal 模拟线程中断：等待中 abort 抛 `AbortError` 且不获取锁)；`RWLock` 读锁 `:rwlock_timeout:<n>` 伴生键 ✅ (2.8.0，逐次获取创建、解锁按剩余键重算 HASH TTL、看门狗同步续期——修复 Java 释放读锁可能误删仍有其他读者的 HASH)；`tryLock` 四重载分解（TS 三参合一）仍为 TS 形态、`*Async` 命名、`newCondition`、`RObservable.addListener` 未做；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock`：复核 4.6.1 jar/源码后确认 **RedissonRedLock 无 drift 扣减**（继承 MultiLock，末尾统一按完整 lease 重设 TTL），TS 现行实现与其一致，原“缺 drift”条目不成立。
 
-**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；`StatusListener`（onSubscribe/onUnsubscribe，`removeListener` 同时处理消息/状态两类句柄）✅ (2.9.0)；仍缺 `Class<M>` 类型门控、按实例删除；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
+**`RTopic` 系管理面**：`getChannelNames/getPatternNames/getActiveTopics`、`countListeners`（本地监听器数）与 `countSubscribers`（`PUBSUB NUMSUB`；分片 `SHARDNUMSUB` 带回退）✅ (2.5.0)；`StatusListener`（onSubscribe/onUnsubscribe，`removeListener` 同时处理消息/状态两类句柄）✅ (2.9.0)；`removeListener(handler)` 按回调句柄删除 ✅ (2.11.0)；`Class<M>` 类型门控为 Java 特有（TS codec 负责解码，无运行时类），记录为设计差异；`RReliableTopic.publish` 应回订阅者数（TS `void`）、无过期组清理/XTRIM（流无限增长）、`delete()` 多删了流、每监听器一组 vs Java 每实例一组。
 
 **`RBitSet`**：已补 ✅ (1.5.0)：`BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化读写（signed/unsigned 的 get/set/increment + `getByte/Short/Integer/Long` 快捷）、`or/and/xor/not` 回字节长、Redis 8 `BITOP DIFF/DIFF1/ANDOR/ONE`、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`setRange`/`clear(from,to)` 为 `to` 排他；仍缺 `get(long...)`/`set(long[], boolean)` 批读批写、`set(BitSet)`/`toBitSet()`。
 
@@ -51,7 +51,7 @@
 
 **`RTimeSeries`**：`addAll`、`getEntry/getValue/getAndRemove(Entry)`、`first/last`（值/Entry/Timestamp/count 变体）、`pollFirst/Last`（值/Entry/count）、`range/rangeReversed/entryRange/entryRangeReversed`（limit）、`remove/removeRange` ✅ (2.4.0，读侧按 TTL ZSET 惰性过滤；label 形状兼容 n=2/3/4)；`stream/iterator` 分页取值 ✅ (2.6.0)；`addListener` ✅ (2.10.0，ScoredSortedSet zadd/zrem keyspace，需 K+E)。
 
-**`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`getKeysStream*`、`time`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`。
+**`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`getKeysStream/getKeysStreamByPattern` 惰性 SCAN 生成器 ✅ (2.11.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`（`time` 在 4.6.1 接口中不存在，原 GAP 条目为误报）。
 
 **`RScript`**：丢 `mode`（集群读写路由）、缺 `STRING/MAPVALUELIST` 精确 cast、`scriptKill/scriptFlush`。
 
@@ -85,7 +85,7 @@
 
 ## §4 明确不做（保持）
 
-`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO 四件套。另建议记名（4.6.1 无，本属版本外）：`RCountMin`、`RTimeSeriesNative`、`RReliablePubSubTopic`、`RLocalCachedMapCache`。
+`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO 四件套。另建议记名（4.6.1 无，本属版本外）：`RCountMin`、`RTimeSeriesNative`、`RReliablePubSubTopic`、`RLocalCachedMapCache`。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）。
 
 ## §5 路线图
 
@@ -107,5 +107,6 @@
 - **阶段 29（已完成 ✅，v2.8.0）**：`RReadWriteLock` 读锁 `:rwlock_timeout:<n>` 伴生键协议（逐次获取 SET+PX、解锁删除并重算 HASH TTL、看门狗续期），修复 Java 释放读锁可能误删仍有其他读者的 HASH；验证见 `test/redisson.test.ts` + `test/live-phase29.test.ts`（1/1，Java 持有读锁 + TS 读锁混部存活）。
 - **阶段 30（已完成 ✅，v2.9.0）**：`RMapCache.compute/computeIfAbsent`（per-key 分布式锁 + TTL + null 删除语义；并发 compute 串行化）与 `RTopic/RShardedTopic` `StatusListener`（订阅/退订回调，removeListener/removeAllListeners 统一管理）；验证见 `test/redisson.test.ts` + `test/live-phase30.test.ts`（2/2，含 Java `mc-get` 读回与实时状态回调）。
 - **阶段 31（已完成 ✅，v2.10.0）**：`RStream/RTimeSeries.addListener(ObjectListener)`（keyspace 通知：stream 六事件、timeseries zadd/zrem；依赖 `notify-keyspace-events` K+E）与 `RStream.readGroupMany`（单条 XREADGROUP 多流读）；验证见 `test/redisson.test.ts` + `test/live-phase31.test.ts`（2/2，六事件/退订静默/多流 group 读）。
+- **阶段 32（已完成 ✅，v2.11.0）**：`RKeys.getKeysStream/getKeysStreamByPattern` 惰性 SCAN、Topic `removeListener(handler)` 按回调删除、`RStream.readGroupMany` 每流独立 group/consumer（按 group+consumer 分桶）；CommonOptions/Class<M> 记录为设计差异；验证见 `test/redisson.test.ts` + `test/live-phase32.test.ts`（2/2）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

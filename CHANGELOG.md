@@ -1,3 +1,23 @@
+## 2.11.0 — 2026-10-20
+
+Phase 32: API polish. Full suite: **241 tests / 36 files green in ~79 s**.
+
+- **`RKeys.getKeysStream(pattern?, count?)` / `getKeysStreamByPattern`** —
+  lazy `AsyncGenerator<string>` over SCAN (no full key materialization).
+- **`RTopic` / `RShardedTopic` / `RPatternTopic` `removeListener(handler)`** —
+  Java's `removeListener(MessageListener)` overload: removes the registered
+  entries whose callback is the given function (ids still supported).
+- **`RStream.readGroupMany` per-stream groups** — new overload
+  `readGroupMany({ stream: { group, consumer, id? } }, count?)`: streams are
+  bucketed by group+consumer and read with one XREADGROUP per bucket, matching
+  Java's per-stream `StreamMultiReadGroupArgs` semantics.
+- Design notes recorded in GAP/COMPATIBILITY: `CommonOptions` is not ported
+  (TS factories take names directly; ioredis owns invocation options);
+  `Class<M>` type gating is unnecessary (codec decodes; TS has no runtime
+  classes).
+- Tests: 2 mock + `test/live-phase32.test.ts` 2/2 (lazy key stream,
+  removed-handler silence, per-stream group reads incl. empty second pass).
+
 ## 2.10.0 — 2026-10-20
 
 Phase 31: keyspace ObjectListener + multi-stream group read. Full suite:
