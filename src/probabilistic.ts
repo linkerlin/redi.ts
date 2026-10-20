@@ -36,6 +36,13 @@ function formatFloat(n: number): string {
   return String(n);
 }
 
+/** Flat RESP field/value array → record (e.g. CF.INFO / TOPK.INFO). */
+function flatRecord(flat: any): Record<string, any> {
+  const out: Record<string, any> = {};
+  if (Array.isArray(flat)) for (let i = 0; i + 1 < flat.length; i += 2) out[String(flat[i])] = flat[i + 1];
+  return out;
+}
+
 // -- BloomFilter -----------------------------------------------------------------
 
 export class RBloomFilter extends RedisDataStructure {
@@ -1538,14 +1545,37 @@ export class RCuckooFilter extends RedisDataStructure {
   async reserve(capacity: number): Promise<void> {
     await tryDo(this.redis, 'CF.RESERVE', this.name, capacity);
   }
+  /** Java `init(long)`: CF.RESERVE. */
+  async init(capacity: number): Promise<void> {
+    return this.reserve(capacity);
+  }
   async add(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'CF.ADD', this.name, element)) === 1;
+  }
+  /** Java `addIfAbsent(V)`: CF.ADDNX. */
+  async addIfAbsent(element: string): Promise<boolean> {
+    return toNumber(await tryDo(this.redis, 'CF.ADDNX', this.name, element)) === 1;
   }
   async exists(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'CF.EXISTS', this.name, element)) === 1;
   }
+  /** Java `exists(Collection)`: CF.MEXISTS → the subset that exists. */
+  async existsMany(elements: string[]): Promise<string[]> {
+    if (elements.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'CF.MEXISTS', this.name, ...elements);
+    const arr = (r ?? []) as any[];
+    return elements.filter((_, i) => toNumber(arr[i]) === 1);
+  }
   async remove(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'CF.DEL', this.name, element)) === 1;
+  }
+  /** Java `count(V)`: CF.COUNT. */
+  async count(element: string): Promise<number> {
+    return toNumber(await tryDo(this.redis, 'CF.COUNT', this.name, element));
+  }
+  /** Java `getInfo()`: CF.INFO flat field/value record. */
+  async getInfo(): Promise<Record<string, any>> {
+    return flatRecord(await tryDo(this.redis, 'CF.INFO', this.name));
   }
 }
 
@@ -1553,27 +1583,110 @@ export class RTopK extends RedisDataStructure {
   async reserve(k: number): Promise<void> {
     await tryDo(this.redis, 'TOPK.RESERVE', this.name, k);
   }
-  async add(...elements: string[]): Promise<void> {
-    if (elements.length === 0) return;
-    await tryDo(this.redis, 'TOPK.ADD', this.name, ...elements);
+  /** Java `init(int)` / `init(TopKInitArgs)`: TOPK.RESERVE with optional
+   *  width/depth/decay. */
+  async init(k: number, width?: number, depth?: number, decay?: number): Promise<void> {
+    if (width === undefined) return this.reserve(k);
+    const args: (string | number)[] = [this.name, k, width];
+    if (depth !== undefined) args.push(depth);
+    if (decay !== undefined) args.push(String(decay));
+    await tryDo(this.redis, 'TOPK.RESERVE', ...args);
+  }
+  /** Java `add(V...)`: returns the evicted item per input (`null` when none). */
+  async add(...elements: string[]): Promise<(string | null)[]> {
+    if (elements.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TOPK.ADD', this.name, ...elements);
+    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : String(x)));
+  }
+  /** Java `incrementBy(V, int)`: TOPK.INCRBY → evicted item or null. */
+  async incrementBy(element: string, increment: number): Promise<string | null> {
+    const r: any = await tryDo(this.redis, 'TOPK.INCRBY', this.name, element, increment);
+    const v = Array.isArray(r) ? r[0] : r;
+    return v === null || v === undefined ? null : String(v);
+  }
+  async contains(element: string): Promise<boolean> {
+    const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, element);
+    return toNumber(Array.isArray(r) ? r[0] : r) === 1;
+  }
+  async count(element: string): Promise<number> {
+    const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, element);
+    return toNumber(Array.isArray(r) ? r[0] : r);
   }
   async list(): Promise<string[]> {
     return (await tryDo(this.redis, 'TOPK.LIST', this.name)) as string[];
   }
+  /** Java `listWithCount()`: TOPK.LIST ... WITHCOUNT → item→count. */
+  async listWithCount(): Promise<Map<string, number>> {
+    const r: any = await tryDo(this.redis, 'TOPK.LIST', this.name, 'WITHCOUNT');
+    const out = new Map<string, number>();
+    const arr = (r ?? []) as any[];
+    for (let i = 0; i + 1 < arr.length; i += 2) out.set(String(arr[i]), Number(arr[i + 1]));
+    return out;
+  }
+  async getInfo(): Promise<Record<string, any>> {
+    return flatRecord(await tryDo(this.redis, 'TOPK.INFO', this.name));
+  }
 }
 
 export class RTDigest extends RedisDataStructure {
-  async create(): Promise<void> {
-    await tryDo(this.redis, 'TDIGEST.CREATE', this.name);
+  /** Java `create([int compression])`: TDIGEST.CREATE [COMPRESSION n]. */
+  async create(compression?: number): Promise<void> {
+    const args: (string | number)[] = [this.name];
+    if (compression !== undefined) args.push('COMPRESSION', compression);
+    await tryDo(this.redis, 'TDIGEST.CREATE', ...args);
   }
   async add(...values: number[]): Promise<void> {
     if (values.length === 0) return;
     await tryDo(this.redis, 'TDIGEST.ADD', this.name, ...values.map(String));
   }
+  /** Java `mergeWith(String...)`: TDIGEST.MERGE dest numkeys src... */
+  async mergeWith(...names: string[]): Promise<void> {
+    await tryDo(this.redis, 'TDIGEST.MERGE', this.name, names.length, ...names);
+  }
   async quantile(...qs: number[]): Promise<number[]> {
     if (qs.length === 0) return [];
     const r: any = await tryDo(this.redis, 'TDIGEST.QUANTILE', this.name, ...qs.map(String));
     return (r as any[]).map(Number);
+  }
+  async getMin(): Promise<number> {
+    return Number(await tryDo(this.redis, 'TDIGEST.MIN', this.name));
+  }
+  async getMax(): Promise<number> {
+    return Number(await tryDo(this.redis, 'TDIGEST.MAX', this.name));
+  }
+  async cumulativeProbability(...values: number[]): Promise<number[]> {
+    if (values.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TDIGEST.CDF', this.name, ...values.map(String));
+    return (r as any[]).map(Number);
+  }
+  async trimmedMean(low = 0, high = 1): Promise<number> {
+    return Number(await tryDo(this.redis, 'TDIGEST.TRIMMED_MEAN', this.name, String(low), String(high)));
+  }
+  async rank(...values: number[]): Promise<number[]> {
+    if (values.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TDIGEST.RANK', this.name, ...values.map(String));
+    return (r as any[]).map(Number);
+  }
+  async revRank(...values: number[]): Promise<number[]> {
+    if (values.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TDIGEST.REVRANK', this.name, ...values.map(String));
+    return (r as any[]).map(Number);
+  }
+  async byRank(...ranks: number[]): Promise<number[]> {
+    if (ranks.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TDIGEST.BYRANK', this.name, ...ranks.map(String));
+    return (r as any[]).map(Number);
+  }
+  async byRevRank(...ranks: number[]): Promise<number[]> {
+    if (ranks.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TDIGEST.BYREVRANK', this.name, ...ranks.map(String));
+    return (r as any[]).map(Number);
+  }
+  async getInfo(): Promise<Record<string, any>> {
+    return flatRecord(await tryDo(this.redis, 'TDIGEST.INFO', this.name));
+  }
+  async reset(): Promise<void> {
+    await tryDo(this.redis, 'TDIGEST.RESET', this.name);
   }
 }
 

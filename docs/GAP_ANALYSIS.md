@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.13.0（2026-10-20）阶段 35：RJsonBucket 文档/路径/数组/字符串/数字全族（Redis 8 内置 JSON 模块），Java `JacksonCodec` 双向验证；阶段 34 的三次全量稳定基线保持。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.14.0（2026-10-20）阶段 36：TDigest/CuckooFilter/TopK 深层 API（Redis 8 模块）与 live 实测。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -63,7 +63,7 @@
 
 **`RVectorSet`**：`size/dimensions/getVector/contains/random/range/getNeighbors/getInfo/getAttributes/setAttributes` ✅ (2.12.0，Redis 8 VEMB/VDIM/VRANDMEMBER/VRANGE/VLINKS/VINFO/VGETATTR/VSETATTR)；仍缺 `add(VectorAddArgs)` 高级版、`getRawVector`、`getSimilarEntriesWithAttributes`、iterator/stream。
 
-**概率三件套**：`RTDigest`（缺 merge/min/max/rank/info 等 10+）、`RCuckooFilter`（缺 init 参数/`addIfAbsent`/批量）、`RTopK`（`add` 丢 dropped 项）。
+**概率三件套**：`RTDigest`（create(compression)/mergeWith/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）✅ (2.14.0)、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）✅ (2.14.0)、`RTopK`（init 参数/add 丢弃项/incrementBy/contains/count/list/listWithCount/info）✅ (2.14.0)；仍缺 `TDigestMergeArgs`、`CuckooFilterAddArgs`/`TopKInitArgs` 的高级参数对象与批量元素重载。
 
 **`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；仍缺 `IncrementArgs`（增量配置）与 `addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
@@ -111,5 +111,6 @@
 - **阶段 33（已完成 ✅，v2.12.0）**：最终审计——RScript `scriptKill/scriptFlush`、RFunction `kill/list/stats/dump/restore(+变体)`（修复 load 空参数）、RVectorSet 深层命令、RBitSet 批量/`asBitSet`、RMapCacheNative 绝对 `Date`（HPEXPIREAT）、RDelayedQueue `readAll/poll(count)`；同时剔除误报并归档设计差异；验证见 `test/redisson.test.ts` + `test/live-phase33.test.ts`（3/3）。
 - **阶段 34（已完成 ✅，v2.12.1）**：稳定化收尾——连续三次全量 246 项全绿（82.15s / 71.40s / 71.62s，无重试/阈值调整）、README/COMPATIBILITY/GAP 一致性校对、RSearch/RedisJSON 模块能力门控说明、PRO/设计差异清单定稿。
 - **阶段 35（已完成 ✅，v2.13.0）**：`RJsonBucket` 全族（文档/路径读写、NX/XX/CAS、getAndSet/Delete、字符串/数组/数字操作、merge/keys/type/toggle/clear；默认纯 JSON + 可选 Codec），新增 Java `json-set/json-get` 探针做双向验证；验证见 `test/live-phase35.test.ts`（1/1，Redis 8.6 内置 JSON 模块）。
+- **阶段 36（已完成 ✅，v2.14.0）**：`RTDigest`（create/merge/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）、`RTopK`（init 参数/add 丢弃项/incrementBy/listWithCount/info）；验证见 `test/live-phase36.test.ts`（3/3，Redis 8 模块能力门控）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

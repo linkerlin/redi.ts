@@ -69,7 +69,7 @@
 | RBitSet | native MSB-first numbering, no reversal; `BITFIELD` 全族（`BitFieldArgs`/`BitOffset.bit/index`/`overflow`，OVERFLOW FAIL 回 `null`）、类型化 get/set/increment（signed/unsigned + Byte/Short/Integer/Long 快捷）、批量 `get(...bits)`/`set(long[]\|Set, boolean)`/区间 `set(from,to)`/`asBitSet()`、`size()`（STRLEN×8）与 `length()`（最高置位 + 1，4.6.1 bitpos Lua 等价）区分、`or/and/xor/not` 回字节长、Redis 8 `diff`/`diffInverse`/`andOr`/`setExclusive`（`BITOP DIFF/DIFF1/ANDOR/ONE`）、`setRange`/`clear(from,to)` 为 `to` 排他 | WIRE_OK + live phase 20 ✅（BITFIELD/BITOP 双向 + Redis 8.6 语义实测） + mock phase 33（批量/视图） |
 | RTimeSeries | ZSET packed `BBc0Lc0Lc0` + `redisson__ts_ttl:{name}` + `redisson__ts_seq:{name}` (4.6.1 首字节 `2/3` 无 label 前缀；读侧按 n==4 新形状标志位、n==2 无 label、其余整段兼容；成员须走 Buffer 传输，UTF-8 会破坏随机 id 字节）；`addAll`（单 Lua、序列号+双 ZSET）、`getEntry`/`getValue`、`first/last` 与 `pollFirst/Last` 全族、`range/rangeReversed` 与 `entryRange/entryRangeReversed`（limit）、`getAndRemove(Entry)`、`remove/removeRange`，读侧按 TTL ZSET 惰性过滤；`stream/iterator` 按页产出值；`addListener(ObjectListener)` via `__keyevent@*:zadd|zrem`（需 `notify-keyspace-events` K+E）；`unlink()` clears ttl/seq | WIRE_OK + live phase 3 + live phase 6（label 双向） + live phase 25（全族/Java 往返 ✅） + live phase 27（stream/iterator ✅） + live phase 31（keyspace add/remove ✅） |
 | RBloomFilter | bitmap + `{name}:config` HASH, HighwayHash-128; `unlink()` clears both | WIRE_OK + live bidirectional ✅ |
-| BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native | NATIVE_OK |
+| BF/CF/TOPK/TDIGEST/GCRA | `BF.*`/`CF.*`/`TOPK.*`/`TDIGEST.*`/`GCRA` native; CF: init/add/remove/addIfAbsent/exists/existsMany (MEXISTS)/count/info; TOPK: init(k,width,depth,decay), add→dropped items, incrementBy, contains/count/list/listWithCount/info; TDIGEST: create(compression)/add/mergeWith/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset | NATIVE_OK + live phase 36（TDigest / Cuckoo / TopK ✅） |
 | RRateLimiter | HASH config + `{name}:value` + ZSET `{name}:permits` (`Bc0I`, hex-text members) OVERALL/PER_CLIENT; instance caches config after first load (`getConfig` always fresh-reads); successful acquire renews `keepAliveTime` on config/value/permits inside the Lua (and companions inherit a config TTL when keepAlive is 0); `unlink()` clears value/permits | WIRE_OK + live shared-window ✅ + live phase 22 (TS/Java 双向续期 ✅) |
 | RKeys / RScript / RFunction / RSearch / RJsonBucket / RVectorSet / RBatch / RMaps / RArray / RCircularBuffer | native commands / pipeline (RBatch: 13 typed facades — bucket/map/list/set/queue/deque/atomicLong/atomicDouble/bitset/geo/stream/mapCacheNative/scoredSortedSet, reads resolve on execute); RKeys: `PEXPIRE`/`PEXPIREAT` single + multi-key, `PERSIST`/`PTTL`, `MOVE`, `SCAN`+`UNLINK`, `getSlot` computed client-side (CRC16-XMODEM, hash-tag aware; Java delegates to `CLUSTER KEYSLOT`), lazy `getKeysStream(pattern?, count?)`; RScript: eval/evalSha/load/exists/`scriptKill`/`scriptFlush`; RFunction: load/delete/flush/`kill`/`list`/`stats`/`dump`/`restore(+Replace/AfterFlush)` + FCALL(_RO); RJsonBucket (Redis 8 JSON): document/path set/get/delete, NX/XX, atomic CAS/getAndSet/getAndDelete, string/array/number ops, merge/keys/type/toggle/clear (plain JSON by default; optional Codec); RVectorSet: VADD/VSIM/VCARD/VDIM/VEMB/VLINKS/VINFO/VRANDMEMBER/VRANGE/VGETATTR/VSETATTR; RSearch（RediSearch）需服务端模块，缺失时命令原样报错/能力门控跳过 | NATIVE_OK + live phase 5/6（Keys/Script/Buckets/Vector/Function/Batch ✅） + live phase 12（batch Lua ops + 跨语言读 ✅） + live phase 22（batch geo/bitset/HPEXPIRE ✅） + live phase 23（keys ops / slots vs 集群节点 / MOVE db9 ✅） + live phase 32（lazy key stream ✅） + live phase 33（SCRIPT/FUNCTION/VectorSet ✅） + live phase 35（RJsonBucket + Java 双向 ✅） |
 | RPriority* / RTransferQueue | ZSET+score / queue migration (**GO_ONLY**, not Java Comparator/RemoteService) | GO_ONLY |
@@ -79,14 +79,15 @@
 
 ## Verification
 
-- `npm test`: 247 tests / 38 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 250 tests / 39 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
   map views/streaming, phase-28 interruptible lock/map-cache remainder,
   phase-29 rwlock_timeout, phase-30 map-cache compute/status listeners,
-  phase-31 keyspace listeners/multi-stream group reads, phase-32 API polish
-  and phase-33 bitset batch/delayed-queue reads, phase-35 RJsonBucket), `interop`
+  phase-31 keyspace listeners/multi-stream group reads, phase-32 API polish,
+  phase-33 bitset batch/delayed-queue reads, phase-35 RJsonBucket and phase-36
+  probabilistic deep APIs), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -142,6 +143,8 @@
   VectorSet deep API, RMapCacheNative Date/HPEXPIREAT, 3/3 PASS),
   `live-phase35` (RJsonBucket document/path/NX-XX/CAS/string-array-number ops
   + Java JacksonCodec round-trip, 1/1 PASS),
+  `live-phase36` (TDigest min/max/cdf/rank/merge/info/reset, CuckooFilter
+  addIfAbsent/existsMany/count/info, TopK dropped items/listWithCount, 3/3 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

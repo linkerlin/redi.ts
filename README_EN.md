@@ -105,6 +105,9 @@ DIFF/DIFF1/ANDOR/ONE),
 poll families, forward/reversed ranges with limits, `getAndRemove`,
 `remove`/`removeRange`, `stream`/`iterator` paging over values, `addListener`
 keyspace zadd/zrem events, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
+`RCuckooFilter` (addIfAbsent/existsMany/count/info), `RTopK` (dropped
+items/incrementBy/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge/
+info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch`,

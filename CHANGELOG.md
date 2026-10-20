@@ -1,3 +1,22 @@
+## 2.14.0 — 2026-10-20
+
+Phase 36: probabilistic deep APIs. Full suite: **250 tests / 39 files**.
+
+- **`RTDigest`**: `create(compression?)` (COMPRESSION), `mergeWith(...names)`
+  (TDIGEST.MERGE), `getMin`/`getMax`, `cumulativeProbability` (CDF),
+  `trimmedMean`, `rank`/`revRank`, `byRank`/`byRevRank`, `getInfo` (flat
+  Compression/Capacity/weights records) and `reset`.
+- **`RCuckooFilter`**: `init(capacity)` alias (CF.RESERVE), `addIfAbsent`
+  (CF.ADDNX), `existsMany` (CF.MEXISTS → present subset), `count` (CF.COUNT)
+  and `getInfo` (CF.INFO), on top of add/exists/remove.
+- **`RTopK`**: `init(k[, width, depth, decay])`, `add(...)` now returns the
+  evicted item per input (null when none), `incrementBy` (TOPK.INCRBY, array
+  unwrap), `contains`/`count`, `listWithCount` (WITHCOUNT → Map) and `getInfo`.
+- Redis 8 modules supply all commands; live tests capability-gate on
+  `COMMAND INFO` and skip with a log when unavailable.
+- Tests: `test/live-phase36.test.ts` 3/3 (TDigest statistics+merge+reset,
+  CuckooFilter counts/info, TopK dropped items/listWithCount).
+
 ## 2.13.0 — 2026-10-20
 
 Phase 35: RJsonBucket (Redis 8 built-in JSON module). Full suite:

@@ -77,6 +77,7 @@ const redisson = Redisson.create({ client: redis });
 - 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、批量 `get/set`/`asBitSet`、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
 - 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`、`stream/iterator` 分页取值、`addListener`（keyspace zadd/zrem），TTL 惰性过滤）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
+- 概率结构：`RCuckooFilter`（addIfAbsent/existsMany/count/info）、`RTopK`（丢弃项/incrementBy/listWithCount）、`RTDigest`（min/max/cdf/rank/byRank/merge/info/reset，Redis 8 模块）
 - 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、unlinkByPattern、`getKeysStream` 惰性扫描）、`RScript`（含 `scriptKill`/`scriptFlush`）、`RFunction`（list/stats/dump/restore/kill）、`RSearch`、`RVectorSet`（VEMB/VINFO/VLINKS/VRANDMEMBER/VRANGE/属性）
 - 优先级队列（`GO_ONLY`，ZSET 加分数）、`RTransferQueue`（`GO_ONLY`）、`RBatch`（13 类类型化门面），……
 
