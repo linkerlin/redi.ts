@@ -14,6 +14,7 @@ import {
   multimapInternalId,
   packMapCacheValue,
   prefixName,
+  randomHex,
   serverNowMs,
   sleep,
   suffixName,
@@ -268,6 +269,45 @@ export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
   async getMaxSize(): Promise<number> {
     const raw = await this.redis.hget(this.optionsKey, 'max-size');
     return raw === null ? 0 : Number(raw);
+  }
+
+  /** Java `computeIfAbsent(K, Duration, Function)`: per-key lock, read, map, put. */
+  async computeIfAbsent(key: K, ttlMs: number, mappingFunction: (key: K) => V | null): Promise<V | null> {
+    const tid = `compute:${randomHex(8)}`;
+    const lock = this.getLock(key);
+    await lock.lock(undefined, tid);
+    try {
+      const old = await this.get(key);
+      if (old !== null) return old;
+      const next = mappingFunction(key);
+      if (next === null || next === undefined) return null;
+      const existing = await this.putIfAbsent(key, next, ttlMs);
+      return existing === null ? next : existing;
+    } finally {
+      try { await lock.unlock(tid); } catch { /* noop */ }
+    }
+  }
+
+  /** Java `compute(K, Duration, BiFunction)`: per-key lock, read, apply,
+   *  write (or remove when the function returns null). The lock uses a unique
+   *  per-call thread id so concurrent computes in one Node process serialize
+   *  (Java serializes by actual thread). */
+  async compute(key: K, ttlMs: number, remappingFunction: (key: K, oldValue: V | null) => V | null): Promise<V | null> {
+    const tid = `compute:${randomHex(8)}`;
+    const lock = this.getLock(key);
+    await lock.lock(undefined, tid);
+    try {
+      const old = await this.get(key);
+      const next = remappingFunction(key, old);
+      if (next === null || next === undefined) {
+        if (old !== null) await this.remove(key);
+        return null;
+      }
+      await this.fastPut(key, next, ttlMs);
+      return next;
+    } finally {
+      try { await lock.unlock(tid); } catch { /* noop */ }
+    }
   }
 
   /** Redisson RMapCache.expireEntry: set TTL / maxIdle on an existing entry.

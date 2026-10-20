@@ -11,8 +11,15 @@ import { randomBytes } from 'node:crypto';
 
 export type MessageListener<V = any> = (message: V, channel?: string) => void;
 
+/** Java `StatusListener`: subscription lifecycle callbacks (local). */
+export interface StatusListener {
+  onSubscribe(channel: string): void;
+  onUnsubscribe(channel: string): void;
+}
+
 export class RTopic<V = any> extends RedisDataStructure {
   private subs = new Map<number, { conn: Redis; cb: MessageListener<V>; handler: (ch: string, payload: string) => void }>();
+  private statusSubs = new Map<number, StatusListener>();
   private nextId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -49,6 +56,12 @@ export class RTopic<V = any> extends RedisDataStructure {
     return id;
   }
   async removeListener(id: number): Promise<void> {
+    const status = this.statusSubs.get(id);
+    if (status) {
+      this.statusSubs.delete(id);
+      try { status.onUnsubscribe(this.name); } catch { /* noop */ }
+      return;
+    }
     const s = this.subs.get(id);
     if (!s) return;
     this.subs.delete(id);
@@ -73,10 +86,18 @@ export class RTopic<V = any> extends RedisDataStructure {
   }
   /** Java `countListeners()`: listeners registered on this instance. */
   async countListeners(): Promise<number> {
-    return this.subs.size;
+    return this.subs.size + this.statusSubs.size;
+  }
+  /** Java `addListener(StatusListener)`: local subscribe/unsubscribe callbacks.
+   *  Registration reports the current subscription immediately. */
+  async addStatusListener(listener: StatusListener): Promise<number> {
+    const id = this.nextId++;
+    this.statusSubs.set(id, listener);
+    try { listener.onSubscribe(this.name); } catch { /* noop */ }
+    return id;
   }
   async removeAllListeners(): Promise<void> {
-    for (const id of [...this.subs.keys()]) await this.removeListener(id);
+    for (const id of [...this.statusSubs.keys(), ...this.subs.keys()]) await this.removeListener(id);
   }
 }
 
@@ -144,6 +165,7 @@ export class RPatternTopic<V = any> extends RedisDataStructure {
 
 export class RShardedTopic<V = any> extends RedisDataStructure {
   private subs = new Map<number, { conn: Redis; handler: (ch: string, payload: string) => void; mode: 'sharded' | 'plain' }>();
+  private statusSubs = new Map<number, StatusListener>();
   private nextId = 1;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -188,6 +210,12 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
     return id;
   }
   async removeListener(id: number): Promise<void> {
+    const status = this.statusSubs.get(id);
+    if (status) {
+      this.statusSubs.delete(id);
+      try { status.onUnsubscribe(this.name); } catch { /* noop */ }
+      return;
+    }
     const s = this.subs.get(id);
     if (!s) return;
     this.subs.delete(id);
@@ -200,7 +228,7 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
     } catch { /* noop */ }
   }
   async removeAllListeners(): Promise<void> {
-    for (const id of [...this.subs.keys()]) await this.removeListener(id);
+    for (const id of [...this.statusSubs.keys(), ...this.subs.keys()]) await this.removeListener(id);
   }
   /** Java `getChannelNames()` (sharded topic uses the same channel name). */
   async getChannelNames(): Promise<string[]> {
@@ -208,7 +236,14 @@ export class RShardedTopic<V = any> extends RedisDataStructure {
   }
   /** Java `countListeners()`: listeners registered on this instance. */
   async countListeners(): Promise<number> {
-    return this.subs.size;
+    return this.subs.size + this.statusSubs.size;
+  }
+  /** Java `addListener(StatusListener)`. */
+  async addStatusListener(listener: StatusListener): Promise<number> {
+    const id = this.nextId++;
+    this.statusSubs.set(id, listener);
+    try { listener.onSubscribe(this.name); } catch { /* noop */ }
+    return id;
   }
   /** Java `countSubscribers()`: PUBSUB SHARDNUMSUB, falling back to NUMSUB. */
   async countSubscribers(): Promise<number> {

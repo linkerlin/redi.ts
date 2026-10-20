@@ -74,9 +74,9 @@ key synchronizers through
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
 names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
-`MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`)/
-`LocalCachedMap` (LRU/LFU under `maxSize`, `getCachedMap()`
-view), `RSet`/`SetCache`,
+`MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
+`compute`/`computeIfAbsent`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
+`getCachedMap()` view), `RSet`/`SetCache`,
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
 ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
@@ -91,7 +91,7 @@ multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
 (keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;
 management: `getChannelNames`/`countListeners`/`countSubscribers`,
-pattern `getActiveTopics`),
+pattern `getActiveTopics`, `StatusListener` callbacks),
 `RStream` (JSON field names; groups/claim/pending/nack, `fastClaim`/
 `fastAutoClaim` JUSTID, `readMany` multi-stream XREAD), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,

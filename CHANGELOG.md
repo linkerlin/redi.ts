@@ -1,3 +1,23 @@
+## 2.9.0 — 2026-10-20
+
+Phase 30: map-cache compute + topic status listeners. Full suite:
+**234 tests / 34 files green in ~88 s**.
+
+- **`RMapCache.compute(key, ttlMs, fn)`** — per-key distributed lock
+  (`getLock(key)` with a unique per-call thread id so concurrent computes in
+  one Node process serialize), read, apply, then `fastPut(..., ttl)` or remove
+  when the function returns `null` (Java `BiFunction` semantics).
+- **`RMapCache.computeIfAbsent(key, ttlMs, fn)`** — same locking, returns the
+  existing value when present, otherwise `putIfAbsent` and returns the winner.
+  Results are Java-readable (`mc-get` cross-check) and carry per-entry TTL.
+- **`RTopic`/`RShardedTopic` StatusListener** — `addStatusListener({onSubscribe,
+  onUnsubscribe})`: fires `onSubscribe(channel)` on registration and
+  `onUnsubscribe(channel)` on removal; `removeListener(id)` removes either
+  message or status listeners, `countListeners()` counts both,
+  `removeAllListeners()` clears both.
+- Tests: 2 mock + `test/live-phase30.test.ts` 2/2 (concurrent compute
+  serialization + Java `mc-get`; status callbacks live).
+
 ## 2.8.0 — 2026-10-20
 
 Phase 29: `rwlock_timeout` protocol (read-lock interop fix). Full suite:

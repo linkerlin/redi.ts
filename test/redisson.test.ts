@@ -1535,3 +1535,46 @@ describe('phase 29: rwlock_timeout protocol (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 30: mapcache compute + status listeners (mock)', () => {
+  it('compute/computeIfAbsent serialize per key and honour TTL/removal', async () => {
+    const r = make();
+    const mc = r.getMapCache<string, number>('p30:mc');
+    expect(await mc.compute('k', 60000, (_k, old) => (old ?? 0) + 1)).toBe(1);
+    expect(await mc.compute('k', 60000, (_k, old) => (old ?? 0) + 1)).toBe(2);
+    expect(await mc.compute('k', 60000, () => null)).toBeNull();
+    expect(await mc.get('k')).toBeNull();
+
+    await Promise.all([1, 2, 3, 4, 5].map(() => mc.compute('c', 60000, (_k, old) => (old ?? 0) + 1)));
+    expect(await mc.get('c')).toBe(5);
+
+    expect(await mc.computeIfAbsent('a', 60000, () => 7)).toBe(7);
+    expect(await mc.computeIfAbsent('a', 60000, () => 9)).toBe(7);
+    expect(await mc.computeIfAbsent('b', 60000, () => null)).toBeNull();
+    expect(await mc.get('b')).toBeNull();
+    await r.shutdown();
+  });
+
+  it('RTopic status listeners fire on add/remove/removeAll', async () => {
+    const r = make();
+    const t = r.getTopic<string>('p30:t');
+    const events: string[] = [];
+    const status = {
+      onSubscribe: (ch: string) => events.push(`sub:${ch}`),
+      onUnsubscribe: (ch: string) => events.push(`unsub:${ch}`),
+    };
+    const sid = await t.addStatusListener(status);
+    expect(events).toEqual(['sub:p30:t']);
+    expect(await t.countListeners()).toBe(1);
+    await t.removeListener(sid);
+    expect(events).toEqual(['sub:p30:t', 'unsub:p30:t']);
+    expect(await t.countListeners()).toBe(0);
+
+    await t.addStatusListener(status);
+    await t.addListener(() => undefined);
+    expect(await t.countListeners()).toBe(2);
+    await t.removeAllListeners();
+    expect(await t.countListeners()).toBe(0);
+    await r.shutdown();
+  });
+});
