@@ -499,15 +499,29 @@ export class RJsonBucket<V = any> {
     return this.codec ? this.codec.encode(value) : JSON.stringify(value);
   }
   private dec(raw: any): any {
+    return this.decWith(raw, this.codec);
+  }
+  private decWith(raw: any, codec?: Codec | null): any {
     if (raw === null || raw === undefined) return null;
-    if (this.codec) {
-      try { return this.codec.decode(typeof raw === 'string' ? raw : JSON.stringify(raw)); } catch { /* fall through */ }
+    if (codec) {
+      try { return codec.decode(typeof raw === 'string' ? raw : JSON.stringify(raw)); } catch { /* fall through */ }
     }
     try {
       return JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw));
     } catch {
       return raw;
     }
+  }
+  /** Normalize a RedisJSON reply into an array (scalar → singleton). */
+  private list(raw: any): any[] {
+    if (raw === null || raw === undefined) return [];
+    return Array.isArray(raw) ? raw : [raw];
+  }
+  private numList(raw: any): number[] {
+    return this.list(raw).map((x) => toNumber(x));
+  }
+  private decodeList(raw: any, codec?: Codec | null): any[] {
+    return this.list(raw).map((x) => this.decWith(x, codec ?? this.codec));
   }
   private unwrap(raw: any): any {
     return Array.isArray(raw) ? raw[0] : raw;
@@ -523,11 +537,20 @@ export class RJsonBucket<V = any> {
     await this.redis.call('JSON.SET', ...args);
   }
   /** JSON.GET: without a path returns the document; with one, the RedisJSON
-   *  match array (paths starting with `$`). */
-  async get(path?: string): Promise<V | null> {
-    const raw: any = path === undefined
+   *  match array (paths starting with `$`). The `(codec, paths...)` overload
+   *  mirrors Java's multi-path read and decodes with the supplied codec. */
+  async get(path?: string): Promise<V | null>;
+  async get(codec: Codec | null, ...paths: string[]): Promise<any>;
+  async get(a?: string | Codec | null, ...paths: string[]): Promise<any> {
+    if (typeof a !== 'string' && a !== undefined) {
+      const codec = a;
+      const args: string[] = [this.name, ...paths];
+      const raw: any = await this.redis.call('JSON.GET', ...args);
+      return this.decWith(raw, codec);
+    }
+    const raw: any = a === undefined
       ? await this.redis.call('JSON.GET', this.name)
-      : await this.redis.call('JSON.GET', this.name, path);
+      : await this.redis.call('JSON.GET', this.name, a);
     return this.dec(raw) as V | null;
   }
   async delete(path = '$'): Promise<number> {
@@ -613,32 +636,80 @@ return cur`;
   async stringSize(path = '$'): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.STRLEN', this.name, path)));
   }
+  /** Java `stringSizeMulti(path)`: all JSON.STRLEN matches as a list. */
+  async stringSizeMulti(path: string): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.STRLEN', this.name, path));
+  }
   async stringAppend(path: string, value: unknown): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.STRAPPEND', this.name, path, this.enc(value))));
+  }
+  /** Java `stringAppendMulti(path, value)`. */
+  async stringAppendMulti(path: string, value: unknown): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.STRAPPEND', this.name, path, this.enc(value)));
   }
   async arrayAppend(path: string, ...values: unknown[]): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.ARRAPPEND', this.name, path, ...values.map((v) => this.enc(v)))));
   }
-  async arrayIndex(path: string, value: unknown, start = 0, stop = 0): Promise<number> {
-    return toNumber(this.unwrap(await this.redis.call('JSON.ARRINDEX', this.name, path, this.enc(value), String(start), String(stop))));
+  /** Java `arrayAppendMulti(path, values...)`. */
+  async arrayAppendMulti(path: string, ...values: unknown[]): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.ARRAPPEND', this.name, path, ...values.map((v) => this.enc(v))));
+  }
+  async arrayIndex(path: string, value: unknown): Promise<number>;
+  async arrayIndex(path: string, value: unknown, start: number, stop: number): Promise<number>;
+  async arrayIndex(path: string, value: unknown, start?: number, stop?: number): Promise<number> {
+    const args: (string | number)[] = [this.name, path, this.enc(value)];
+    if (start !== undefined) args.push(String(start), String(stop));
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRINDEX', ...args as any)));
+  }
+  /** Java `arrayIndexMulti(path, value[, start, stop])`: all matches. */
+  async arrayIndexMulti(path: string, value: unknown): Promise<number[]>;
+  async arrayIndexMulti(path: string, value: unknown, start: number, stop: number): Promise<number[]>;
+  async arrayIndexMulti(path: string, value: unknown, start?: number, stop?: number): Promise<number[]> {
+    const args: (string | number)[] = [this.name, path, this.enc(value)];
+    if (start !== undefined) args.push(String(start), String(stop));
+    return this.numList(await this.redis.call('JSON.ARRINDEX', ...args as any));
   }
   async arrayInsert(path: string, index: number, ...values: unknown[]): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.ARRINSERT', this.name, path, String(index), ...values.map((v) => this.enc(v)))));
   }
+  /** Java `arrayInsertMulti(path, index, values...)`. */
+  async arrayInsertMulti(path: string, index: number, ...values: unknown[]): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.ARRINSERT', this.name, path, String(index), ...values.map((v) => this.enc(v))));
+  }
   async arraySize(path = '$'): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.ARRLEN', this.name, path)));
+  }
+  /** Java `arraySizeMulti(path)`. */
+  async arraySizeMulti(path: string): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.ARRLEN', this.name, path));
   }
   async arrayPop(path: string, index = -1): Promise<any> {
     return this.dec(this.unwrap(await this.redis.call('JSON.ARRPOP', this.name, path, String(index))));
   }
+  /** Java `arrayPopMulti(codec, path, index)`: all popped values. */
+  async arrayPopMulti<T = any>(codec: Codec | null, path: string, index: number): Promise<T[]> {
+    return this.decodeList(await this.redis.call('JSON.ARRPOP', this.name, path, String(index)), codec) as T[];
+  }
   async arrayPollFirst(path: string): Promise<any> {
     return this.arrayPop(path, 0);
+  }
+  /** Java `arrayPollFirstMulti(codec, path)`. */
+  async arrayPollFirstMulti<T = any>(codec: Codec | null, path: string): Promise<T[]> {
+    return this.decodeList(await this.redis.call('JSON.ARRPOP', this.name, path, '0'), codec) as T[];
   }
   async arrayPollLast(path: string): Promise<any> {
     return this.arrayPop(path, -1);
   }
+  /** Java `arrayPollLastMulti(codec, path)`. */
+  async arrayPollLastMulti<T = any>(codec: Codec | null, path: string): Promise<T[]> {
+    return this.decodeList(await this.redis.call('JSON.ARRPOP', this.name, path), codec) as T[];
+  }
   async arrayTrim(path: string, start: number, stop: number): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.ARRTRIM', this.name, path, String(start), String(stop))));
+  }
+  /** Java `arrayTrimMulti(path, start, stop)`. */
+  async arrayTrimMulti(path: string, start: number, stop: number): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.ARRTRIM', this.name, path, String(start), String(stop)));
   }
   async clear(path?: string): Promise<number> {
     return toNumber(path === undefined
@@ -650,19 +721,41 @@ return cur`;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     return Number(this.unwrap(parsed));
   }
+  /** Java `incrementAndGetMulti(path, delta)`: all matched numbers. */
+  async incrementAndGetMulti(path: string, delta: number): Promise<number[]> {
+    const raw: any = await this.redis.call('JSON.NUMINCRBY', this.name, path, String(delta));
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return this.numList(parsed);
+  }
   async merge(path: string, value: unknown): Promise<void> {
     await this.redis.call('JSON.MERGE', this.name, path, this.enc(value));
   }
   async countKeys(path = '$'): Promise<number> {
     return toNumber(this.unwrap(await this.redis.call('JSON.OBJLEN', this.name, path)));
   }
+  /** Java `countKeysMulti(path)`: object sizes for every match. */
+  async countKeysMulti(path: string): Promise<number[]> {
+    return this.numList(await this.redis.call('JSON.OBJLEN', this.name, path));
+  }
   async getKeys(path = '$'): Promise<string[]> {
     const raw: any = await this.redis.call('JSON.OBJKEYS', this.name, path);
     const first = Array.isArray(raw) && Array.isArray(raw[0]) ? raw[0] : raw;
     return (first ?? []) as string[];
   }
+  /** Java `getKeysMulti(path)`: key lists for every match; a legacy
+   *  single-object path is wrapped as one list so the shape stays nested. */
+  async getKeysMulti(path: string): Promise<string[][]> {
+    const raw: any = await this.redis.call('JSON.OBJKEYS', this.name, path);
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    return raw.some((x: any) => Array.isArray(x)) ? (raw as string[][]) : [raw as string[]];
+  }
   async toggle(path: string): Promise<boolean> {
     return toNumber(this.unwrap(await this.redis.call('JSON.TOGGLE', this.name, path))) === 1;
+  }
+  /** Java `toggleMulti(path)`: null entries stay null (non-boolean matches). */
+  async toggleMulti(path: string): Promise<(boolean | null)[]> {
+    return this.list(await this.redis.call('JSON.TOGGLE', this.name, path))
+      .map((x) => (x === null || x === undefined ? null : toNumber(x) === 1));
   }
   async getType(path = '$'): Promise<string> {
     return String(this.unwrap(await this.redis.call('JSON.TYPE', this.name, path)));

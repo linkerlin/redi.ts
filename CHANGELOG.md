@@ -1,3 +1,23 @@
+## 2.21.0 — 2026-10-20
+
+Phase 43: RJsonBucket 4.6.1 multi-match surface. Full suite:
+**264 tests / 46 files**.
+
+- **`RJsonBucket`**: all `*Multi` variants — `stringSizeMulti`,
+  `stringAppendMulti`, `arrayAppendMulti`, `arrayIndexMulti` (with and without
+  `[start, stop)`), `arrayInsertMulti`, `arraySizeMulti`, `arrayPopMulti`,
+  `arrayPollFirstMulti`, `arrayPollLastMulti`, `arrayTrimMulti`,
+  `incrementAndGetMulti`, `countKeysMulti`, `getKeysMulti` (nested key lists)
+  and `toggleMulti` (nulls preserved for non-boolean matches).
+- **Multi-path read**: `get(codec, ...paths)` mirrors Java's
+  `JSON.GET key path...` and decodes with a per-call codec (RESP2 behaviour:
+  no paths returns the document).
+- **Fix**: the two-argument `arrayIndex(path, value)` now omits start/stop so
+  Redis searches the whole array; previously it sent `0,0` and only checked
+  the first element. The four-argument overload still sends `[start, stop)`.
+- Tests: `test/live-phase43.test.ts` 1/1 (JSON capability-gated; all Multi
+  variants + multi-path get + arrayIndex boundaries).
+
 ## 2.20.0 — 2026-10-20
 
 Phase 42: RMapCacheNative fast-write family. Full suite:

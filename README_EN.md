@@ -90,7 +90,8 @@ ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 score/rank),
 `RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
 multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket` (document/path
-read-write, NX/XX/CAS, string/array/number ops, merge/keys/type/toggle)/
+read-write, NX/XX/CAS, string/array/number ops, `*Multi` match lists,
+multi-path `get(codec, paths...)`, merge/keys/type/toggle)/
 `RJsonBuckets` (MSET/MGET batches),
 `RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,
 `getAndDelete`, `compareAndDelete`), `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
