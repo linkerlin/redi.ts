@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.18.0（2026-10-20）阶段 40：RJsonBuckets MSET/MGET 与 RMapCacheNative 全字段条件批量/批量过期；FPHA 本机 RedisJSON 不支持，记录为版本相关缺口。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.19.0（2026-10-20）阶段 41：RQueue/RDeque 4.6.1 剩余面（poll(count)/indexOf/RPOPLPUSH/变参 add/*IfExists/LMOVE）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -39,7 +39,7 @@
 
 **`RMapCacheNative`**（现有 4 个 vs ~38）：`putIfAbsent(key, value, ttl|Date)`、`putIfAllKeysExist/Absent`（全字段条件 Lua + 逐字段 TTL）、`expireEntry(IfNotSet/IfGreater/IfLess)`（毫秒/Date）、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量、`clearExpire` + `remainTimeToLive`（`-2` 缺失）✅ (1.4.0/2.12.0/2.18.0)；仍缺 `fastPut`/`fastPutIfAbsent`/`fastPutIfExist` 的 Duration/Instant 重载、结构化 `PutArgs` 对象、`compute*`。注：Java 4.6.1 对 HPERSIST `-2` 回 `null`，TS 统一 `false`（boolean 契约）。
 
-**`RBlockingQueue/Deque`**：`pollFromAny`/`pollFromAnyWithName`（BLPOP）、`pollFirstFromAny`/`pollLastFromAny`（BLMPOP + COUNT）、`pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo`（BLMOVE）、deque `move`/`moveWithTimeout`（LMOVE/BLMOVE）✅ (2.1.0)；亚秒超时/`timeoutMs<=0` 语义、`take` 独立连接、`drainTo` 原子化均已在 v1.2.0/v1.3.0 修正 ✅。仍缺 Java 4.6.1 的 `pollLastFromAnyWithName(Duration, names...)` 与 `subscribeOnElements/unsubscribe` 元素订阅。
+**`RBlockingQueue/Deque`**：`pollFromAny`/`pollFromAnyWithName`（BLPOP）、`pollFirstFromAny`/`pollLastFromAny`（BLMPOP + COUNT）、`pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo`（BLMOVE）、deque `move`/`moveWithTimeout`（LMOVE/BLMOVE）✅ (2.1.0)；基类 `RQueue/RDeque` 的 `poll(count)`/`indexOf`/RPOPLPUSH/变参 add/`*IfExists`/`pollFirst|Last(count)`/`move` ✅ (2.19.0)；亚秒超时/`timeoutMs<=0` 语义、`take` 独立连接、`drainTo` 原子化均已在 v1.2.0/v1.3.0 修正 ✅。仍缺 Java 4.6.1 的 `pollLastFromAnyWithName(Duration, names...)` 与 `subscribeOnElements/unsubscribe` 元素订阅。
 
 **`RLock` 面**：`lockInterruptibly` ✅ (2.7.0，以 AbortSignal 模拟线程中断：等待中 abort 抛 `AbortError` 且不获取锁)；`RWLock` 读锁 `:rwlock_timeout:<n>` 伴生键 ✅ (2.8.0，逐次获取创建、解锁按剩余键重算 HASH TTL、看门狗同步续期——修复 Java 释放读锁可能误删仍有其他读者的 HASH)；`tryLock` 四重载分解（TS 三参合一）仍为 TS 形态、`*Async` 命名、`newCondition`、`RObservable.addListener` 未做；`RWLock`/`FairLock` view 的 `forceUnlock/isLocked/isHeldByThread/getHoldCount` ✅ (1.4.0)，唤醒常量对齐 Java `LockPubSub` ✅；仍缺 `CommonOptions`；`FencedLock` 的 `tryLockAndGetToken`（非阻塞/等待）✅ (2.1.0，live 与 Java token 序列互通）；仍存语义差异：TS `lockAndGetToken` 是 try-only，Java 默认阻塞（需阻塞时请用 `lockWaitAndGetToken`）；`RNonReentrantLock` 默认放行 vs Java 抛；`MultiLock` 接受 `LockLike`（`RFairLock`/RW 视图可混装）✅ (1.4.0)，仍缺批锁变体、返回类型非 `RLock`；`RedLock`：复核 4.6.1 jar/源码后确认 **RedissonRedLock 无 drift 扣减**（继承 MultiLock，末尾统一按完整 lease 重设 TTL），TS 现行实现与其一致，原“缺 drift”条目不成立。
 
@@ -118,5 +118,6 @@
 - **阶段 38（已完成 ✅，v2.16.0）**：`RSet` 惰性 `iterator/distributedIterator/stream`（SSCAN）、`RScoredSortedSet` `iterator/stream/entriesIterator`（ZSCAN）、`RLocalCachedMap.preloadCache(count)`；验证见 `test/redisson.test.ts` + `test/live-phase38.test.ts`（1/1，编码前缀 MATCH + 限量预载）。
 - **阶段 39（已完成 ✅，v2.17.0）**：`RReliableTopic` 对齐 4.6.1——每实例单组（监听器共享）、`publish` 返回组数、心跳 ZSET 清理过期组、按最早组位点自动 XTRIM、最后监听器移除时销毁组；验证见 `test/live-phase39.test.ts`（1/1）与既有 phase3/17 回归。
 - **阶段 40（已完成 ✅，v2.18.0）**：`RJsonBuckets.set/get/getWithPath`（MSET/MGET）与 `RMapCacheNative.putIfAllKeysExist/Absent`、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量；FPHA 因本机 RedisJSON 不支持而记录为版本相关缺口；验证见 `test/redisson.test.ts` + `test/live-phase40.test.ts`（2/2）。
+- **阶段 41（已完成 ✅，v2.19.0）**：`RQueue.poll(count)/indexOf/pollLastAndOfferFirstTo`、`RDeque` 变参 `addFirst/addLast`、`addFirstIfExists/addLastIfExists`、`pollFirst/pollLast(count)`、`move`（LMOVE），有界队列 `poll(count)` 保持容量记账；验证见 `test/redisson.test.ts` + `test/live-phase41.test.ts`（1/1）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

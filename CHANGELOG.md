@@ -1,3 +1,21 @@
+## 2.19.0 — 2026-10-20
+
+Phase 41: RQueue/RDeque 4.6.1 surface. Full suite:
+**261 tests / 44 files**.
+
+- **`RQueue`**: `poll(count)` overload (LPOP with count, fallback loop),
+  `indexOf(value)` (encoded comparison) and `pollLastAndOfferFirstTo(dest)`
+  (non-blocking RPOPLPUSH; the blocking queue/deque overloads with a timeout
+  remain available).
+- **`RDeque`**: variadic `addFirst(...)` / `addLast(...)` returning the new
+  length, `addFirstIfExists` / `addLastIfExists` (LPUSHX/RPUSHX with
+  fallback), `pollFirst(count)` / `pollLast(count)` and `move(dest, from, to)`
+  (LMOVE).
+- **`RBoundedBlockingQueue`**: `poll(count)` overload preserving capacity
+  accounting (loops through the semaphore-aware single poll).
+- Tests: 2 mock + `test/live-phase41.test.ts` 1/1 (RPOPLPUSH, variadic
+  writes, LPUSHX/RPUSHX on absent lists, LMOVE, count polls).
+
 ## 2.18.0 — 2026-10-20
 
 Phase 40: JSON bucket batches + native map-cache conditionals. Full suite:

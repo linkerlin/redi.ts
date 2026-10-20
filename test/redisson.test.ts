@@ -1733,3 +1733,42 @@ describe('phase 40: native map-cache batch conditionals (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 41: queue/deque 4.6.1 surface (mock)', () => {
+  it('RQueue poll(count)/indexOf/pollLastAndOfferFirstTo', async () => {
+    const r = make();
+    const q = r.getQueue<string>('p41:q');
+    await q.add('a');
+    await q.add('b');
+    await q.add('c');
+    expect(await q.indexOf('b')).toBe(1);
+    expect(await q.indexOf('missing')).toBe(-1);
+    expect(await q.pollLastAndOfferFirstTo('p41:dest')).toBe('c');
+    expect(await r.getQueue<string>('p41:dest').readAll()).toEqual(['c']);
+    expect(await q.poll(2)).toEqual(['a', 'b']);
+    expect(await q.poll()).toBeNull();
+    await r.shutdown();
+  });
+
+  it('RDeque variadic add, *IfExists, poll(count), move', async () => {
+    const r = make();
+    const d = r.getDeque<string>('p41:d');
+    expect(await d.addFirst('a', 'b')).toBe(2); // [b, a]
+    expect(await d.addLast('c', 'd')).toBe(4); // [b, a, c, d]
+    expect(await d.pollLast(2)).toEqual(['d', 'c']);
+    expect(await d.pollFirst(1)).toEqual(['b']);
+    expect(await d.readAll()).toEqual(['a']);
+    expect(await d.addFirstIfExists('x')).toBe(2);
+    expect(await d.addLastIfExists('y')).toBe(3);
+    expect(await d.readAll()).toEqual(['x', 'a', 'y']);
+    const missing = r.getDeque<string>('p41:missing');
+    expect(await missing.addFirstIfExists('z')).toBe(0);
+    expect(await missing.addLastIfExists('z')).toBe(0);
+    expect(await missing.size()).toBe(0);
+
+    expect(await d.move('p41:d2', 'LEFT', 'RIGHT')).toBe('x');
+    expect(await d.readAll()).toEqual(['a', 'y']);
+    expect(await r.getDeque<string>('p41:d2').readAll()).toEqual(['x']);
+    await r.shutdown();
+  });
+});

@@ -602,9 +602,37 @@ export class RQueue<V = any> extends RedisDataStructure {
   async add(value: V): Promise<boolean> {
     return this.offer(value);
   }
-  async poll(): Promise<V | null> {
-    const raw = await this.redis.lpop(this.name);
+  async poll(): Promise<V | null>;
+  async poll(count: number): Promise<V[]>;
+  async poll(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const raw = await this.redis.lpop(this.name);
+      return raw === null ? null : (this.decodeValue(raw) as V);
+    }
+    if (count <= 0) return [];
+    let arr: string[];
+    try {
+      const raw: any = await this.redis.lpop(this.name, count);
+      arr = raw === null || raw === undefined ? [] : Array.isArray(raw) ? raw : [String(raw)];
+    } catch {
+      arr = [];
+      for (let i = 0; i < count; i++) {
+        const v = await this.redis.lpop(this.name);
+        if (v === null) break;
+        arr.push(v);
+      }
+    }
+    return arr.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java `RQueue.pollLastAndOfferFirstTo(dest)`: RPOPLPUSH. */
+  async pollLastAndOfferFirstTo(dest: string): Promise<V | null> {
+    const raw = await this.redis.rpoplpush(this.name, dest);
     return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `RQueue.indexOf(V)`: first matching index (encoded comparison). */
+  async indexOf(value: V): Promise<number> {
+    const all = await this.redis.lrange(this.name, 0, -1);
+    return all.indexOf(this.encodeValue(value));
   }
   async peek(): Promise<V | null> {
     const raw = await this.redis.lindex(this.name, 0);
@@ -630,11 +658,37 @@ export class RQueue<V = any> extends RedisDataStructure {
 }
 
 export class RDeque<V = any> extends RQueue<V> {
-  async addFirst(value: V): Promise<void> {
-    await this.redis.lpush(this.name, this.encodeValue(value));
+  /** Java `addFirst(V...)`: LPUSH, returns the new length. */
+  async addFirst(...values: V[]): Promise<number> {
+    if (values.length === 0) return this.size();
+    return this.redis.lpush(this.name, ...values.map((v) => this.encodeValue(v)));
   }
-  async addLast(value: V): Promise<void> {
-    await this.redis.rpush(this.name, this.encodeValue(value));
+  /** Java `addLast(V...)`: RPUSH, returns the new length. */
+  async addLast(...values: V[]): Promise<number> {
+    if (values.length === 0) return this.size();
+    return this.redis.rpush(this.name, ...values.map((v) => this.encodeValue(v)));
+  }
+  /** Java `addFirstIfExists(V...)`: LPUSHX (no-op when the list is absent). */
+  async addFirstIfExists(...values: V[]): Promise<number> {
+    if (values.length === 0) return 0;
+    const enc = values.map((v) => this.encodeValue(v));
+    try {
+      return toNumber(await (this.redis as any).lpushx(this.name, ...enc));
+    } catch {
+      if ((await this.redis.exists(this.name)) === 0) return 0;
+      return this.redis.lpush(this.name, ...enc);
+    }
+  }
+  /** Java `addLastIfExists(V...)`: RPUSHX. */
+  async addLastIfExists(...values: V[]): Promise<number> {
+    if (values.length === 0) return 0;
+    const enc = values.map((v) => this.encodeValue(v));
+    try {
+      return toNumber(await (this.redis as any).rpushx(this.name, ...enc));
+    } catch {
+      if ((await this.redis.exists(this.name)) === 0) return 0;
+      return this.redis.rpush(this.name, ...enc);
+    }
   }
   async removeFirst(): Promise<V | null> {
     return this.poll();
@@ -650,11 +704,35 @@ export class RDeque<V = any> extends RQueue<V> {
     const raw = await this.redis.lindex(this.name, -1);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
-  async pollFirst(): Promise<V | null> {
-    return this.poll();
+  async pollFirst(): Promise<V | null>;
+  async pollFirst(count: number): Promise<V[]>;
+  async pollFirst(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) return this.poll();
+    return this.poll(count);
   }
-  async pollLast(): Promise<V | null> {
-    return this.removeLast();
+  async pollLast(): Promise<V | null>;
+  async pollLast(count: number): Promise<V[]>;
+  async pollLast(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) return this.removeLast();
+    if (count <= 0) return [];
+    let arr: string[];
+    try {
+      const raw: any = await this.redis.rpop(this.name, count);
+      arr = raw === null || raw === undefined ? [] : Array.isArray(raw) ? raw : [String(raw)];
+    } catch {
+      arr = [];
+      for (let i = 0; i < count; i++) {
+        const v = await this.redis.rpop(this.name);
+        if (v === null) break;
+        arr.push(v);
+      }
+    }
+    return arr.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java `move(DequeMoveArgs)`: atomic LMOVE into `dest`. */
+  async move(dest: string, from: 'LEFT' | 'RIGHT' = 'LEFT', to: 'LEFT' | 'RIGHT' = 'LEFT'): Promise<V | null> {
+    const raw = await (this.redis as any).lmove(this.name, dest, from, to);
+    return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
   }
 }
 
@@ -1040,9 +1118,13 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
     if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
     return out;
   }
-  /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT
-   *  from this queue to `dest`. `timeoutMs === null` blocks forever. */
-  async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null> {
+  /** Java `pollLastAndOfferFirstTo(dest)`: non-blocking RPOPLPUSH. */
+  override async pollLastAndOfferFirstTo(dest: string): Promise<V | null>;
+  /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT.
+   *  `timeoutMs === null` blocks forever. */
+  override async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null>;
+  override async pollLastAndOfferFirstTo(dest: string, timeoutMs?: number | null): Promise<V | null> {
+    if (timeoutMs === undefined) return super.pollLastAndOfferFirstTo(dest);
     const raw = await blockingListMove(this.redis, this.name, dest, 'RIGHT', 'LEFT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
@@ -1099,8 +1181,12 @@ export class RBlockingDeque<V = any> extends RDeque<V> {
     if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
     return out;
   }
+  /** Java `pollLastAndOfferFirstTo(dest)`: non-blocking RPOPLPUSH. */
+  override async pollLastAndOfferFirstTo(dest: string): Promise<V | null>;
   /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT. */
-  async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null> {
+  override async pollLastAndOfferFirstTo(dest: string, timeoutMs: number | null): Promise<V | null>;
+  override async pollLastAndOfferFirstTo(dest: string, timeoutMs?: number | null): Promise<V | null> {
+    if (timeoutMs === undefined) return super.pollLastAndOfferFirstTo(dest);
     const raw = await blockingListMove(this.redis, this.name, dest, 'RIGHT', 'LEFT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
@@ -1238,9 +1324,21 @@ export class RBoundedBlockingQueue<V = any> extends RBlockingQueue<V> {
     await this.waitCapacity(this.encodeValue(value), null);
   }
 
-  override async poll(): Promise<V | null> {
-    const raw = await luaEval(this.redis, BQ_POLL, 3, this.name, this.capacityKey, this.channel, '1');
-    return raw === null || raw === undefined || raw === false ? null : (this.decodeValue(raw) as V);
+  override async poll(): Promise<V | null>;
+  override async poll(count: number): Promise<V[]>;
+  override async poll(count?: number): Promise<V | null | V[]> {
+    if (count === undefined) {
+      const raw = await luaEval(this.redis, BQ_POLL, 3, this.name, this.capacityKey, this.channel, '1');
+      return raw === null || raw === undefined || raw === false ? null : (this.decodeValue(raw) as V);
+    }
+    if (count <= 0) return [];
+    const out: V[] = [];
+    for (let i = 0; i < count; i++) {
+      const v = await this.poll();
+      if (v === null) break;
+      out.push(v);
+    }
+    return out;
   }
 
   override async take(): Promise<V> {
