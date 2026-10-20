@@ -110,7 +110,8 @@ items/incrementBy/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge/
 info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, lazy `getKeysStream`), `RScript` (+scriptKill/
-scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch`,
+scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (index
+info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck),
 `RVectorSet` (VEMB/VINFO/VLINKS/VRANDMEMBER/VRANGE/attributes), priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …

@@ -301,6 +301,35 @@ export class RFunction {
 
 // -- RSearch (RediSearch subset; native protocol, auto interop) ---------------------
 
+export interface SearchParams {
+  limit?: [number, number];
+  returnFields?: string[];
+  noContent?: boolean;
+  sortBy?: string;
+  sortAsc?: boolean;
+  filter?: string;
+  inKeys?: string[];
+  params?: Record<string, string>;
+  dialect?: number;
+  timeoutMs?: number;
+}
+
+export interface AggregateParams {
+  load?: string[];
+  groupBy?: string[];
+  /** Raw REDUCE tokens, e.g. ['SUM', '1', '@price', 'AS', 'total']. */
+  reduce?: string[];
+  /** Raw APPLY tokens, e.g. ['@price * 2', 'AS', 'double']. */
+  apply?: string[];
+  /** Raw SORTBY tokens, e.g. ['2', '@total', 'DESC']. */
+  sortBy?: string[];
+  limit?: [number, number];
+  params?: Record<string, string>;
+  dialect?: number;
+  /** Appended verbatim for advanced options. */
+  rawArgs?: string[];
+}
+
 export class RSearch {
   constructor(private redis: Redis) {}
   private async call(...args: (string | number)[]): Promise<any> {
@@ -315,11 +344,101 @@ export class RSearch {
   async dropIndex(name: string, deleteDocs = false): Promise<void> {
     await this.call('FT.DROPINDEX', name, ...(deleteDocs ? ['DD'] : []));
   }
-  async search(name: string, query: string, params: { limit?: [number, number]; returnFields?: string[]; noContent?: boolean } = {}): Promise<{ total: number; docs: any[] }> {
+  /** Java `dropIndexAndDocuments`. */
+  async dropIndexAndDocuments(name: string): Promise<void> {
+    return this.dropIndex(name, true);
+  }
+  /** Java `getIndexes()`: FT._LIST. */
+  async getIndexes(): Promise<string[]> {
+    return ((await this.call('FT._LIST')) as string[]) ?? [];
+  }
+  /** Java `hasIndex(String)`. */
+  async hasIndex(name: string): Promise<boolean> {
+    return (await this.getIndexes()).includes(name);
+  }
+  /** Java `info(String)`: FT.INFO flat field/value record. */
+  async info(name: string): Promise<Record<string, any>> {
+    const flat: any = await this.call('FT.INFO', name);
+    const out: Record<string, any> = {};
+    if (Array.isArray(flat)) for (let i = 0; i + 1 < flat.length; i += 2) out[String(flat[i])] = flat[i + 1];
+    return out;
+  }
+  /** Java `addAlias(String alias, String index)`. */
+  async addAlias(alias: string, index: string): Promise<void> {
+    await this.call('FT.ALIASADD', alias, index);
+  }
+  async delAlias(alias: string): Promise<void> {
+    await this.call('FT.ALIASDEL', alias);
+  }
+  async updateAlias(alias: string, index: string): Promise<void> {
+    await this.call('FT.ALIASUPDATE', alias, index);
+  }
+  /** Java `getConfig(String)`: FT.CONFIG GET → key/value map. */
+  async getConfig(key: string): Promise<Record<string, string>> {
+    const r: any = await this.call('FT.CONFIG', 'GET', key);
+    const out: Record<string, string> = {};
+    for (const row of (r ?? []) as any[]) {
+      if (Array.isArray(row) && row.length >= 2) out[String(row[0])] = String(row[1]);
+    }
+    return out;
+  }
+  async setConfig(key: string, value: string): Promise<void> {
+    await this.call('FT.CONFIG', 'SET', key, value);
+  }
+  /** Java `updateSynonyms(index, groupId, terms...)`: FT.SYNUPDATE. */
+  async updateSynonyms(index: string, groupId: string, ...terms: string[]): Promise<void> {
+    await this.call('FT.SYNUPDATE', index, groupId, ...terms);
+  }
+  /** Java `dumpSynonyms()`: FT.SYNDUMP → term → group ids. */
+  async dumpSynonyms(index: string): Promise<Map<string, string[]>> {
+    const r: any = await this.call('FT.SYNDUMP', index);
+    const out = new Map<string, string[]>();
+    for (let i = 0; i + 1 < ((r ?? []) as any[]).length; i += 2) out.set(String(r[i]), ((r[i + 1] ?? []) as any[]).map(String));
+    return out;
+  }
+  /** Java `addDict(name, terms...)`: FT.DICTADD. */
+  async addDict(name: string, ...terms: string[]): Promise<number> {
+    return toNumber(await this.call('FT.DICTADD', name, ...terms));
+  }
+  async delDict(name: string, ...terms: string[]): Promise<number> {
+    return toNumber(await this.call('FT.DICTDEL', name, ...terms));
+  }
+  async dumpDict(name: string): Promise<string[]> {
+    return ((await this.call('FT.DICTDUMP', name)) as string[]) ?? [];
+  }
+  /** Java `spellcheck(index, query, options?)`: FT.SPELLCHECK → suggestion map. */
+  async spellcheck(index: string, query: string, opts: { distance?: number; includeTerm?: boolean } = {}): Promise<Map<string, Map<string, number>>> {
+    const args: (string | number)[] = ['FT.SPELLCHECK', index, query];
+    if (opts.distance !== undefined) args.push('DISTANCE', opts.distance);
+    if (opts.includeTerm) args.push('TERMS', 'INCLUDE');
+    const r: any = await this.call(...args);
+    const out = new Map<string, Map<string, number>>();
+    for (const row of (r ?? []) as any[]) {
+      const term = String(row[0]);
+      const suggestions = new Map<string, number>();
+      for (const s of (row[1] ?? []) as any[]) {
+        if (Array.isArray(s) && s.length >= 2) suggestions.set(String(s[0]), Number(s[1]));
+      }
+      out.set(term, suggestions);
+    }
+    return out;
+  }
+  async search(name: string, query: string, params: SearchParams = {}): Promise<{ total: number; docs: any[] }> {
     const args: string[] = ['FT.SEARCH', name, query];
     if (params.noContent) args.push('NOCONTENT');
+    if (params.inKeys?.length) args.push('INKEYS', String(params.inKeys.length), ...params.inKeys);
     if (params.returnFields?.length) args.push('RETURN', String(params.returnFields.length), ...params.returnFields);
+    if (params.filter) args.push('FILTER', params.filter);
+    if (params.sortBy) {
+      args.push('SORTBY', params.sortBy, params.sortAsc === false ? 'DESC' : 'ASC');
+    }
     if (params.limit) args.push('LIMIT', String(params.limit[0]), String(params.limit[1]));
+    if (params.params) {
+      const entries = Object.entries(params.params);
+      args.push('PARAMS', String(entries.length * 2), ...entries.flat());
+    }
+    if (params.dialect !== undefined) args.push('DIALECT', String(params.dialect));
+    if (params.timeoutMs !== undefined) args.push('TIMEOUT', String(params.timeoutMs));
     const r: any = await this.call(...args);
     if (r && typeof r === 'object' && !Array.isArray(r)) {
       // RESP3
@@ -340,6 +459,35 @@ export class RSearch {
       } else docs.push({ id });
     }
     return { total, docs };
+  }
+  /** Java `aggregate(index, query, options)`: FT.AGGREGATE → rows. */
+  async aggregate(name: string, query: string, params: AggregateParams = {}): Promise<{ total: number; rows: Record<string, any>[] }> {
+    const args: (string | number)[] = ['FT.AGGREGATE', name, query];
+    if (params.load?.length) args.push('LOAD', params.load.length, ...params.load);
+    if (params.groupBy?.length) {
+      args.push('GROUPBY', params.groupBy.length, ...params.groupBy);
+      if (params.reduce?.length) args.push('REDUCE', ...params.reduce);
+    }
+    if (params.apply?.length) args.push('APPLY', ...params.apply);
+    if (params.sortBy?.length) args.push('SORTBY', ...params.sortBy);
+    if (params.limit) args.push('LIMIT', params.limit[0], params.limit[1]);
+    if (params.params) {
+      const entries = Object.entries(params.params);
+      args.push('PARAMS', entries.length * 2, ...entries.flat());
+    }
+    if (params.dialect !== undefined) args.push('DIALECT', params.dialect);
+    if (params.rawArgs?.length) args.push(...params.rawArgs);
+    const r: any = await this.call(...args);
+    const arr = (r ?? []) as any[];
+    const total = arr.length > 0 ? Number(arr[0]) : 0;
+    const rows: Record<string, any>[] = [];
+    for (const row of (arr.slice(1) ?? []) as any[]) {
+      if (!Array.isArray(row)) continue;
+      const rec: Record<string, any> = {};
+      for (let i = 0; i + 1 < row.length; i += 2) rec[String(row[i])] = row[i + 1];
+      rows.push(rec);
+    }
+    return { total, rows };
   }
 }
 

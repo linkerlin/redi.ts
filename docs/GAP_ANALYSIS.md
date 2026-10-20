@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.14.0（2026-10-20）阶段 36：TDigest/CuckooFilter/TopK 深层 API（Redis 8 模块）与 live 实测。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.15.0（2026-10-20）阶段 37：RSearch 扩展（索引元信息/别名/增强查询/聚合/同义词/词典/配置）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -59,6 +59,8 @@
 
 **`RBuckets`**：`setIfAllKeysExist/setIfAllKeysAbsent` ✅ (2.2.0，`MSETEX … NX|XX [PX ms]`，Redis 8+；无该命令时显式报错而非降级)。
 
+**`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；仍缺 `hybridSearch`、`profileSearch/profileAggregate`、游标读取、`alter` 索引、`IndexOptions/FieldIndex` 结构化建索引。
+
 **`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；仍缺 `FPHAType` 参数、`*Multi` 多路径变体、`RJsonBuckets` 的 MSET/MGET 批量。
 
 **`RVectorSet`**：`size/dimensions/getVector/contains/random/range/getNeighbors/getInfo/getAttributes/setAttributes` ✅ (2.12.0，Redis 8 VEMB/VDIM/VRANDMEMBER/VRANGE/VLINKS/VINFO/VGETATTR/VSETATTR)；仍缺 `add(VectorAddArgs)` 高级版、`getRawVector`、`getSimilarEntriesWithAttributes`、iterator/stream。
@@ -112,5 +114,6 @@
 - **阶段 34（已完成 ✅，v2.12.1）**：稳定化收尾——连续三次全量 246 项全绿（82.15s / 71.40s / 71.62s，无重试/阈值调整）、README/COMPATIBILITY/GAP 一致性校对、RSearch/RedisJSON 模块能力门控说明、PRO/设计差异清单定稿。
 - **阶段 35（已完成 ✅，v2.13.0）**：`RJsonBucket` 全族（文档/路径读写、NX/XX/CAS、getAndSet/Delete、字符串/数组/数字操作、merge/keys/type/toggle/clear；默认纯 JSON + 可选 Codec），新增 Java `json-set/json-get` 探针做双向验证；验证见 `test/live-phase35.test.ts`（1/1，Redis 8.6 内置 JSON 模块）。
 - **阶段 36（已完成 ✅，v2.14.0）**：`RTDigest`（create/merge/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）、`RTopK`（init 参数/add 丢弃项/incrementBy/listWithCount/info）；验证见 `test/live-phase36.test.ts`（3/3，Redis 8 模块能力门控）。
+- **阶段 37（已完成 ✅，v2.15.0）**：`RSearch` 扩展（索引 info/别名/增强 search/aggregate/同义词/词典/config/spellcheck）；验证见 `test/live-phase37.test.ts`（1/1，Redis 8 内置 RediSearch）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

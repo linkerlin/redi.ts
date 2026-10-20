@@ -1,3 +1,27 @@
+## 2.15.0 — 2026-10-20
+
+Phase 37: RSearch expansion (RediSearch in Redis 8). Full suite:
+**251 tests / 40 files**.
+
+- **Index metadata**: `getIndexes` (FT._LIST), `hasIndex`, `info` (FT.INFO
+  flat record), `dropIndexAndDocuments` (DROPINDEX DD).
+- **Aliases**: `addAlias` / `delAlias` / `updateAlias`
+  (FT.ALIASADD/ALIASDEL/ALIASUPDATE).
+- **Enhanced search**: `sortBy`/`sortAsc`, `returnFields`, `inKeys`, raw
+  `FILTER`, query `params` + `dialect`, `timeoutMs`, `noContent`, `limit`
+  (same RESP2/RESP3 result parsing as before).
+- **Aggregation**: `aggregate(index, query, {load, groupBy, reduce, apply,
+  sortBy, limit, params, dialect, rawArgs})` → `{ total, rows }`
+  (FT.AGGREGATE).
+- **Synonyms / dictionaries**: `updateSynonyms` (FT.SYNUPDATE),
+  `dumpSynonyms` (SYNDUMP → term→groups), `addDict`/`delDict`/`dumpDict`.
+- **Config / spellcheck**: `getConfig`/`setConfig` (FT.CONFIG) and
+  `spellcheck` (FT.SPELLCHECK → term→suggestions·score).
+- Redis 8 ships the search module; the live test capability-gates on
+  `COMMAND INFO FT.CREATE` and skips with a log otherwise.
+- Tests: `test/live-phase37.test.ts` 1/1 (index/search/sort/params/alias/
+  aggregate/synonyms/dicts/config/drop-with-docs).
+
 ## 2.14.0 — 2026-10-20
 
 Phase 36: probabilistic deep APIs. Full suite: **250 tests / 39 files**.
