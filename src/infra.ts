@@ -670,9 +670,42 @@ return cur`;
 }
 
 export class RJsonBuckets {
-  constructor(private redis: Redis) {}
-  bucket<V>(name: string): RJsonBucket<V> {
-    return new RJsonBucket<V>(this.redis, name);
+  constructor(private redis: Redis, private codec?: Codec) {}
+  bucket<V = any>(name: string): RJsonBucket<V> {
+    return new RJsonBucket<V>(this.redis, name, this.codec);
+  }
+  /** Java `set(Map)` / `set(codec, path, Map)`: JSON.MSET (path defaults to `.`). */
+  async set(mapping: Record<string, unknown> | Map<string, unknown>, path = '.'): Promise<void> {
+    const entries = mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping);
+    if (entries.length === 0) return;
+    const args: unknown[] = [];
+    for (const [key, value] of entries) {
+      args.push(key, path, this.codec ? this.codec.encode(value) : JSON.stringify(value));
+    }
+    await (this.redis as any).call('JSON.MSET', ...args);
+  }
+  /** Java `get(String...)` / `get(codec, path, String...)`: JSON.MGET.
+   *  Missing keys (null replies) are omitted from the result map. */
+  async get<V = any>(...keys: string[]): Promise<Map<string, V>> {
+    return this.getWithPath<V>('.', ...keys);
+  }
+  async getWithPath<V = any>(path: string, ...keys: string[]): Promise<Map<string, V>> {
+    const out = new Map<string, V>();
+    if (keys.length === 0) return out;
+    const raw: any = await (this.redis as any).call('JSON.MGET', ...keys, path);
+    const arr = Array.isArray(raw) ? raw : [raw];
+    keys.forEach((k, i) => {
+      const v = arr[i];
+      if (v === null || v === undefined) return;
+      let decoded: any;
+      try {
+        decoded = this.codec ? this.codec.decode(typeof v === 'string' ? v : JSON.stringify(v)) : JSON.parse(typeof v === 'string' ? v : JSON.stringify(v));
+      } catch {
+        decoded = v;
+      }
+      out.set(k, decoded as V);
+    });
+    return out;
   }
 }
 

@@ -1713,3 +1713,23 @@ describe('phase 38: lazy iterators + preload count (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 40: native map-cache batch conditionals (mock)', () => {
+  it('putIfAllKeysExist/Absent and batch expiry fallback', async () => {
+    const r = make();
+    const mc = r.getMapCacheNative<string, string>('p40:mcn');
+    await mc.put('a', '1');
+    expect(await mc.putIfAllKeysExist({ b: '2' })).toBe(false);
+    expect(await mc.get('b')).toBeNull();
+    expect(await mc.putIfAllKeysAbsent({ b: '2', c: '3' })).toBe(true);
+    expect(await mc.get('b')).toBe('2');
+    expect(await mc.putIfAllKeysAbsent({ b: '9' })).toBe(false);
+    expect(await mc.get('b')).toBe('2');
+    expect(await mc.putIfAllKeysExist({ a: '9', b: '8' })).toBe(true);
+    expect(await mc.get('a')).toBe('9');
+    expect(await mc.putIfAllKeysExist({})).toBe(false);
+    // mock has no HPEXPIRE family: batch expiry reports 0 updated fields
+    expect(await mc.expireEntries(['a', 'b', 'ghost'], 5000)).toBe(0);
+    await r.shutdown();
+  });
+});

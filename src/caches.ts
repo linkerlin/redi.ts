@@ -11,6 +11,7 @@ import {
   decodeMapCacheEvent,
   duplicateRedis,
   encodeMapCacheEvent,
+  luaEval,
   multimapInternalId,
   packMapCacheValue,
   prefixName,
@@ -663,6 +664,81 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
   /** Set the field TTL only when it is shorter than the current one (HPEXPIRE LT). */
   async expireEntryIfLess(key: K, ttl: number | Date): Promise<boolean> {
     return this.hpexpireField(key, ttl, 'LT');
+  }
+
+  /** Java `putIfAllKeysExist(PutArgs)` / `putIfAllKeysAbsent(PutArgs)`:
+   *  atomic HSET of every field (+ per-field expiry) only when the condition
+   *  holds for all of them. */
+  async putIfAllKeysExist(mapping: Record<string, V> | Map<K, V>, ttl: number | Date = 0): Promise<boolean> {
+    return this.putAllConditional('XX', mapping, ttl);
+  }
+  async putIfAllKeysAbsent(mapping: Record<string, V> | Map<K, V>, ttl: number | Date = 0): Promise<boolean> {
+    return this.putAllConditional('NX', mapping, ttl);
+  }
+  private async putAllConditional(mode: 'XX' | 'NX', mapping: Record<string, V> | Map<K, V>, ttl: number | Date): Promise<boolean> {
+    const entries = mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping) as [K, V][];
+    if (entries.length === 0) return false;
+    const fields = entries.map(([k]) => this.encodeKey(k));
+    const values = entries.map(([, v]) => this.encodeValue(v));
+    const ttlMode = ttl instanceof Date ? '2' : (typeof ttl === 'number' && ttl > 0 ? '1' : '0');
+    const ttlArg = ttl instanceof Date ? String(ttl.getTime()) : String(typeof ttl === 'number' ? ttl : 0);
+    const lua = `local mode = ARGV[1]
+local n = tonumber(ARGV[2])
+for i = 0, n - 1 do
+    local exists = redis.call('hexists', KEYS[1], ARGV[5 + i * 2])
+    if mode == 'XX' and exists == 0 then return 0 end
+    if mode == 'NX' and exists == 1 then return 0 end
+end
+for i = 0, n - 1 do
+    local field = ARGV[5 + i * 2]
+    redis.call('hset', KEYS[1], field, ARGV[6 + i * 2])
+    if ARGV[3] == '1' then
+        redis.call('hpexpire', KEYS[1], ARGV[4], 'FIELDS', 1, field)
+    elseif ARGV[3] == '2' then
+        redis.call('hpexpireat', KEYS[1], ARGV[4], 'FIELDS', 1, field)
+    end
+end
+return 1`;
+    const args: (string | number)[] = [this.name, mode, String(entries.length), ttlMode, ttlArg];
+    for (let i = 0; i < fields.length; i++) args.push(fields[i], values[i]);
+    try {
+      return toNumber(await luaEval(this.redis, lua, 1, ...args)) === 1;
+    } catch {
+      // mock fallback: conditional HSET only (no HPEXPIRE family)
+      for (const f of fields) {
+        const exists = toNumber(await this.redis.hexists(this.name, f)) === 1;
+        if (mode === 'XX' && !exists) return false;
+        if (mode === 'NX' && exists) return false;
+      }
+      for (let i = 0; i < fields.length; i++) await this.redis.hset(this.name, fields[i], values[i]);
+      return true;
+    }
+  }
+
+  /** Java `expireEntries(Set, ttl[, mode])`: batch field expiry; returns the
+   *  number of fields whose expiry was written. */
+  async expireEntries(keys: K[], ttl: number | Date, mode?: 'NX' | 'GT' | 'LT'): Promise<number> {
+    let n = 0;
+    for (const k of keys) {
+      const ok = mode === 'NX'
+        ? await this.expireEntryIfNotSet(k, ttl)
+        : mode === 'GT'
+          ? await this.expireEntryIfGreater(k, ttl)
+          : mode === 'LT'
+            ? await this.expireEntryIfLess(k, ttl)
+            : await this.expireEntry(k, ttl);
+      if (ok) n += 1;
+    }
+    return n;
+  }
+  async expireEntriesIfNotSet(keys: K[], ttl: number | Date): Promise<number> {
+    return this.expireEntries(keys, ttl, 'NX');
+  }
+  async expireEntriesIfGreater(keys: K[], ttl: number | Date): Promise<number> {
+    return this.expireEntries(keys, ttl, 'GT');
+  }
+  async expireEntriesIfLess(keys: K[], ttl: number | Date): Promise<number> {
+    return this.expireEntries(keys, ttl, 'LT');
   }
 
   /** Remove the field TTL (HPERSIST; Java clearExpire). The no-arg call

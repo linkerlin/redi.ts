@@ -61,11 +61,11 @@ const redisson = Redisson.create({ client: redis });
 六十多种，按你拿它来干什么分组。
 
 - 锁：`RLock`（含 `lockInterruptibly` + AbortSignal）、`Fair`、`ReadWrite`（读锁伴生 `:rwlock_timeout:<n>` 键，与 Java 混部安全）、`Spin`、`NonReentrant`、`Fenced`（`tryLockAndGetToken` 非阻塞/等待两种语义）、`Multi`、`Red`；以及 Key 级同步器（`map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`，伴生命名与 Java 逐字节一致）
-- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN`、惰性 HSCAN 迭代器、`keySet/values/entrySet` 视图、三参 `replace`）、`MapCache`（含 Native；`expireEntries`/`getWithTTLOnly`/`getMaxSize`、`compute/computeIfAbsent`、Native 支持绝对 `Date` 过期）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
+- 映射：`RMap`（另含 `HRANDFIELD`/`HSTRLEN`、惰性 HSCAN 迭代器、`keySet/values/entrySet` 视图、三参 `replace`）、`MapCache`（含 Native；`expireEntries`/`getWithTTLOnly`/`getMaxSize`、`compute/computeIfAbsent`、Native 支持绝对 `Date` 过期与 `putIfAllKeysExist/Absent` 条件批量）、`LocalCachedMap`（`maxSize` 下 LRU/LFU 淘汰、`getCachedMap()` 本地快照）
 - 集合：`RSet`（含惰性 `iterator`/`stream`）、`SetCache`
 - 列表和队列：`RList`、`RQueue`、`RDeque`（含阻塞、有界）；阻塞队列支持 `pollFromAny`/`pollFirstFromAny`/`pollLastFromAny`（BLPOP/BLMPOP）与 `move`/`moveWithTimeout`/`pollLastAndOfferFirstTo`（LMOVE/BLMOVE）
 - 排序：`RScoredSortedSet`（分数区间正反向、`addScore` 家族、`addIf*` 与 `addAll*` 条件批量、`random`/`randomEntries`、阻塞 `pollFirst/Last` 与 `FromAny`（BZPOP/BZMPOP）、`iterator`/`stream`/`entriesIterator`、按分数/排名删除，区间读取走 Redis 6.2+ `ZRANGE … BYSCORE`）；`RLexSortedSet`（成员不编码，原样放）
-- 单个值：`RBucket`、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`（文档/路径读写、NX/XX/CAS、字符串/数组/数字操作、merge/keys/type/toggle）
+- 单个值：`RBucket`、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`（文档/路径读写、NX/XX/CAS、字符串/数组/数字操作、merge/keys/type/toggle）、`RJsonBuckets`（MSET/MGET 批量）
 - 数字：`RAtomicLong`、`Double`（`getAndIncrement`/`Decrement`、`setIfLess`/`Greater`、`getAndDelete`/`compareAndDelete`）；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
 - 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`；每实例单组、publish 返回订阅者数、自动 XTRIM）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除

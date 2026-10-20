@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.17.0（2026-10-20）阶段 39：RReliableTopic 对齐 4.6.1（每实例单组/publish 计数/心跳清理/自动 XTRIM）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.18.0（2026-10-20）阶段 40：RJsonBuckets MSET/MGET 与 RMapCacheNative 全字段条件批量/批量过期；FPHA 本机 RedisJSON 不支持，记录为版本相关缺口。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -37,7 +37,7 @@
 
 **`RMapCache`**：`expireEntry`（单条目，拒已过期）、`expireEntries`（批量）、`remainTimeToLive`（`-2/-1/ms`）、`getWithTTLOnly`（不刷新 idle/access）、`getMaxSize`/`setMaxSize`、`putAll`（TTL 批量）、`compute`/`computeIfAbsent`（per-key 锁 + TTL）、事件订阅双向 ✅ (1.4.0/2.7.0/2.9.0)；`RLeasedMap` 归 PRO（开源 jar 无 `RedissonLeasedMap` 实现），不再作为开源缺口。
 
-**`RMapCacheNative`**（现有 4 个 vs ~38）：`putIfAbsent(key, value, ttl)`、`expireEntry(IfNotSet/IfGreater/IfLess)` + `clearExpire` + `remainTimeToLive`（`-2` 缺失）✅ (1.4.0)；仍缺条件写全族其余变体、`Instant` 绝对过期、`PutArgs` 批量、`compute*`。注：Java 4.6.1 对 HPERSIST `-2` 回 `null`，TS 统一 `false`（boolean 契约）。
+**`RMapCacheNative`**（现有 4 个 vs ~38）：`putIfAbsent(key, value, ttl|Date)`、`putIfAllKeysExist/Absent`（全字段条件 Lua + 逐字段 TTL）、`expireEntry(IfNotSet/IfGreater/IfLess)`（毫秒/Date）、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量、`clearExpire` + `remainTimeToLive`（`-2` 缺失）✅ (1.4.0/2.12.0/2.18.0)；仍缺 `fastPut`/`fastPutIfAbsent`/`fastPutIfExist` 的 Duration/Instant 重载、结构化 `PutArgs` 对象、`compute*`。注：Java 4.6.1 对 HPERSIST `-2` 回 `null`，TS 统一 `false`（boolean 契约）。
 
 **`RBlockingQueue/Deque`**：`pollFromAny`/`pollFromAnyWithName`（BLPOP）、`pollFirstFromAny`/`pollLastFromAny`（BLMPOP + COUNT）、`pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo`（BLMOVE）、deque `move`/`moveWithTimeout`（LMOVE/BLMOVE）✅ (2.1.0)；亚秒超时/`timeoutMs<=0` 语义、`take` 独立连接、`drainTo` 原子化均已在 v1.2.0/v1.3.0 修正 ✅。仍缺 Java 4.6.1 的 `pollLastFromAnyWithName(Duration, names...)` 与 `subscribeOnElements/unsubscribe` 元素订阅。
 
@@ -61,7 +61,7 @@
 
 **`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；仍缺 `hybridSearch`、`profileSearch/profileAggregate`、游标读取、`alter` 索引、`IndexOptions/FieldIndex` 结构化建索引。
 
-**`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；仍缺 `FPHAType` 参数、`*Multi` 多路径变体、`RJsonBuckets` 的 MSET/MGET 批量。
+**`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；`RJsonBuckets.set/get/getWithPath`（MSET/MGET）✅ (2.18.0)；仍缺 `FPHAType`（本机 RedisJSON 不支持 `JSON.SET … FPHA`，版本相关）、`*Multi` 多路径变体、`RJsonBucket` 的 `get(JsonCodec, paths...)` 多路径重载。
 
 **`RVectorSet`**：`size/dimensions/getVector/contains/random/range/getNeighbors/getInfo/getAttributes/setAttributes` ✅ (2.12.0，Redis 8 VEMB/VDIM/VRANDMEMBER/VRANGE/VLINKS/VINFO/VGETATTR/VSETATTR)；仍缺 `add(VectorAddArgs)` 高级版、`getRawVector`、`getSimilarEntriesWithAttributes`、iterator/stream。
 
@@ -117,5 +117,6 @@
 - **阶段 37（已完成 ✅，v2.15.0）**：`RSearch` 扩展（索引 info/别名/增强 search/aggregate/同义词/词典/config/spellcheck）；验证见 `test/live-phase37.test.ts`（1/1，Redis 8 内置 RediSearch）。
 - **阶段 38（已完成 ✅，v2.16.0）**：`RSet` 惰性 `iterator/distributedIterator/stream`（SSCAN）、`RScoredSortedSet` `iterator/stream/entriesIterator`（ZSCAN）、`RLocalCachedMap.preloadCache(count)`；验证见 `test/redisson.test.ts` + `test/live-phase38.test.ts`（1/1，编码前缀 MATCH + 限量预载）。
 - **阶段 39（已完成 ✅，v2.17.0）**：`RReliableTopic` 对齐 4.6.1——每实例单组（监听器共享）、`publish` 返回组数、心跳 ZSET 清理过期组、按最早组位点自动 XTRIM、最后监听器移除时销毁组；验证见 `test/live-phase39.test.ts`（1/1）与既有 phase3/17 回归。
+- **阶段 40（已完成 ✅，v2.18.0）**：`RJsonBuckets.set/get/getWithPath`（MSET/MGET）与 `RMapCacheNative.putIfAllKeysExist/Absent`、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量；FPHA 因本机 RedisJSON 不支持而记录为版本相关缺口；验证见 `test/redisson.test.ts` + `test/live-phase40.test.ts`（2/2）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

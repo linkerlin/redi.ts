@@ -79,8 +79,8 @@ export class Redisson {
   getJsonBucket<V>(name: string, codec?: Codec): RJsonBucket<V> {
     return new RJsonBucket<V>(this.redis, name, codec);
   }
-  getJsonBuckets(): RJsonBuckets {
-    return new RJsonBuckets(this.redis);
+  getJsonBuckets(codec?: Codec): RJsonBuckets {
+    return new RJsonBuckets(this.redis, codec);
   }
   getAtomicLong(name: string): RAtomicLong {
     return new RAtomicLong(this.redis, name);

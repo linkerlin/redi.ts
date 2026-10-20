@@ -1,3 +1,22 @@
+## 2.18.0 — 2026-10-20
+
+Phase 40: JSON bucket batches + native map-cache conditionals. Full suite:
+**258 tests / 43 files**.
+
+- **`RJsonBuckets`**: `set(Map, path?)` (JSON.MSET, default path `.`),
+  `get(...keys)` / `getWithPath(path, ...keys)` (JSON.MGET; null replies are
+  omitted from the result map) and `bucket(name)` now forwards an optional
+  codec.
+- **`RMapCacheNative`**: `putIfAllKeysExist` / `putIfAllKeysAbsent`
+  (atomic all-fields condition via Lua: HEXISTS guards then HSET +
+  HPEXPIRE/HPEXPIREAT), `expireEntries(keys, ttl|Date[, mode])` and
+  `expireEntriesIfNotSet/IfGreater/IfLess` batch helpers.
+- **FPHA note**: Java 4.6.1 `FPHAType` (BF16/FP16/FP32/FP64) is not supported
+  by the local RedisJSON build (`JSON.SET … FPHA …` → syntax error); recorded
+  as a version-dependent gap instead of silently emulating it.
+- Tests: 1 mock + `test/live-phase40.test.ts` 2/2 (JSON.MSET/MGET round-trip
+  and path reads; conditional batch + Date expiry with Java `map-get` reads).
+
 ## 2.17.0 — 2026-10-20
 
 Phase 39: RReliableTopic 4.6.1 semantics. Full suite:
