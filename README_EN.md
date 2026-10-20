@@ -117,7 +117,8 @@ keyspace zadd/zrem events, lazy TTL filtering), `RBloomFilter` (HighwayHash-128,
 items/incrementBy/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge/
 info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
-move, unlinkByPattern, lazy `getKeysStream`), `RScript` (+scriptKill/
+move, unlinkByPattern, migrate/MigrateArgs, remote copy, swapdb, parallel
+flushes, lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (index
 info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck,
 `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/`profileAggregate`,

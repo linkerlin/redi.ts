@@ -51,7 +51,7 @@
 
 **`RTimeSeries`**：`addAll`、`getEntry/getValue/getAndRemove(Entry)`、`first/last`（值/Entry/Timestamp/count 变体）、`pollFirst/Last`（值/Entry/count）、`range/rangeReversed/entryRange/entryRangeReversed`（limit）、`remove/removeRange` ✅ (2.4.0，读侧按 TTL ZSET 惰性过滤；label 形状兼容 n=2/3/4)；`stream/iterator` 分页取值 ✅ (2.6.0)；`addListener` ✅ (2.10.0，ScoredSortedSet zadd/zrem keyspace，需 K+E)。
 
-**`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`getKeysStream/getKeysStreamByPattern` 惰性 SCAN 生成器 ✅ (2.11.0)；`copy` 已有；仍缺 `migrate`/`MigrateArgs`、`swapdb`、`flushdbParallel/flushallParallel`、`addListener/removeListener`（`time` 在 4.6.1 接口中不存在，原 GAP 条目为误报）。
+**`RKeys`**：`expire` 单/多键、`expireAt` 单/多键、`clearExpire`、`remainTimeToLive`、`getSlot`（客户端 CRC16-XMODEM，hash-tag 感知；Java 走 `CLUSTER KEYSLOT`）、`move`、`unlinkByPattern` ✅ (2.2.0)；`getKeysStream/getKeysStreamByPattern` 惰性 SCAN 生成器 ✅ (2.11.0)；`migrate`（单键与 `MigrateArgs` 多键/COPY/REPLACE/AUTH2）、远程 `copy`（MIGRATE COPY，保留本地 COPY 重载）、`swapdb`、`flushdbParallel/flushallParallel` ✅ (2.24.0)；仍缺 `addListener/removeListener`（`time` 在 4.6.1 接口中不存在，原 GAP 条目为误报）。
 
 **`RScript`**：`scriptKill/scriptFlush` ✅ (2.12.0)；`mode` 参数保留在签名中但 ioredis 不复刻 Redisson 的 READ_ONLY/READ_WRITE 路由（单节点无影响；集群路由由 ioredis 处理）；`STRING/MAPVALUELIST` 精确 cast 未做（返回通用 EVAL 结构）。
 

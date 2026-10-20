@@ -11,9 +11,21 @@ import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchDequ
 
 // -- RKeys -----------------------------------------------------------------------
 
+/** Java `MigrateArgs` (multiple keys, optional COPY/REPLACE/AUTH/AUTH2). */
+export interface MigrateArgs {
+  keys: string[];
+  host: string;
+  port: number;
+  database: number;
+  timeoutMs: number;
+  copy?: boolean;
+  replace?: boolean;
+  password?: string;
+  username?: string;
+}
+
 export class RKeys {
-  constructor(private redis: Redis) {}
-  async count(): Promise<number> {
+  constructor(private redis: Redis) {}  async count(): Promise<number> {
     return this.redis.dbsize();
   }
   async countExists(...names: string[]): Promise<number> {
@@ -119,6 +131,25 @@ export class RKeys {
   async move(key: string, db: number): Promise<boolean> {
     return ((await this.redis.move(key, db)) as number) === 1;
   }
+  /** Java `migrate(name, host, port, database, timeout)`: single-key MIGRATE. */
+  async migrate(name: string, host: string, port: number, database: number, timeoutMs: number): Promise<void>;
+  /** Java `migrate(MigrateArgs)`: optional COPY/REPLACE/AUTH2 and multiple KEYS. */
+  async migrate(args: MigrateArgs): Promise<void>;
+  async migrate(nameOrArgs: string | MigrateArgs, host?: string, port?: number, database?: number, timeoutMs?: number): Promise<void> {
+    if (typeof nameOrArgs === 'string') {
+      await (this.redis as any).call('MIGRATE', host, String(port), nameOrArgs, String(database), String(timeoutMs));
+      return;
+    }
+    const a = nameOrArgs;
+    if (a.keys.length === 0) throw new Error('MigrateArgs.keys must not be empty');
+    const args: string[] = [a.host, String(a.port), '', String(a.database), String(a.timeoutMs)];
+    if (a.copy) args.push('COPY');
+    if (a.replace) args.push('REPLACE');
+    if (a.username !== undefined && a.username !== '') args.push('AUTH2', a.username, a.password ?? '');
+    else if (a.password !== undefined && a.password !== '') args.push('AUTH', a.password);
+    args.push('KEYS', ...a.keys);
+    await (this.redis as any).call('MIGRATE', ...args);
+  }
   async touch(...keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
     try {
@@ -145,12 +176,32 @@ export class RKeys {
   async flushdb(): Promise<void> {
     await this.redis.flushdb();
   }
+  /** Java `flushdbParallel()`: FLUSHDB ASYNC (single node here). */
+  async flushdbParallel(): Promise<void> {
+    await (this.redis as any).call('FLUSHDB', 'ASYNC');
+  }
   async flushall(): Promise<void> {
     await this.redis.flushall();
   }
-  async copy(src: string, dest: string, replace = false): Promise<boolean> {
+  /** Java `flushallParallel()`: FLUSHALL ASYNC (single node here). */
+  async flushallParallel(): Promise<void> {
+    await (this.redis as any).call('FLUSHALL', 'ASYNC');
+  }
+  /** Java `swapdb(db1, db2)`: SWAPDB. */
+  async swapdb(db1: number, db2: number): Promise<void> {
+    await (this.redis as any).call('SWAPDB', String(db1), String(db2));
+  }
+  /** Local Redis COPY (`copy(src, dest, replace?)`, TS extension). */
+  async copy(src: string, dest: string, replace?: boolean): Promise<boolean>;
+  /** Java `copy(name, host, port, database, timeout)`: MIGRATE ... COPY. */
+  async copy(name: string, host: string, port: number, database: number, timeoutMs: number): Promise<void>;
+  async copy(a: string, b: string, c?: boolean | number, d?: number, e?: number): Promise<boolean | void> {
+    if (typeof c === 'number') {
+      await (this.redis as any).call('MIGRATE', b, String(c), a, String(d), String(e), 'COPY');
+      return;
+    }
     // NOTE: exact form omits REPLACE entirely — sending '' is a syntax error.
-    const args: (string | number)[] = replace ? [src, dest, 'DB', 0, 'REPLACE'] : [src, dest];
+    const args: (string | number)[] = c ? [a, b, 'DB', 0, 'REPLACE'] : [a, b];
     try {
       return toNumber(await (this.redis as any).copy(...args)) === 1;
     } catch {

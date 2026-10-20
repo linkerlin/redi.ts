@@ -1,3 +1,21 @@
+## 2.24.0 — 2026-10-21
+
+Phase 46: RKeys migrate/database operations. Full suite:
+**269 tests / 49 files**.
+
+- **`migrate(name, host, port, database, timeoutMs)`**: single-key MIGRATE.
+- **`migrate(MigrateArgs)`**: multiple `KEYS`, optional `COPY`/`REPLACE`,
+  `AUTH` or `AUTH2` credentials.
+- **`copy(name, host, port, database, timeoutMs)`**: remote MIGRATE ... COPY
+  (source retained); the existing local `copy(src, dest, replace?)` overload
+  is unchanged and selected by the boolean third argument.
+- **`swapdb(db1, db2)`**, **`flushdbParallel()`** / **`flushallParallel()`**
+  (`FLUSHDB`/`FLUSHALL ASYNC`).
+- Tests: `test/live-phase46.test.ts` 1/1 with a second Redis on 6380
+  (`REDIS_MIGRATE_URL` overrides): single/multi-key migrate, remote copy,
+  COPY+REPLACE, SWAPDB 10/11, FLUSHDB ASYNC on db12 and FLUSHALL ASYNC on the
+  target; migration assertions log-skip when the second server is absent.
+
 ## 2.23.0 — 2026-10-21
 
 Phase 45: blocking-queue element subscriptions. Full suite:
