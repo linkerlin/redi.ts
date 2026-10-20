@@ -14,6 +14,7 @@ const TARGET_URL = process.env.REDIS_MIGRATE_URL ?? 'redis://127.0.0.1:6380';
 async function up(url: string): Promise<boolean> {
   try {
     const r = new Redis(url, { lazyConnect: true, connectTimeout: 1000, maxRetriesPerRequest: 1 });
+    r.on('error', () => undefined);
     await r.ping();
     r.disconnect();
     return true;
