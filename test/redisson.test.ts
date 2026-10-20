@@ -1671,3 +1671,45 @@ describe('phase 32: API polish (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 38: lazy iterators + preload count (mock)', () => {
+  it('RSet iterators and RScoredSortedSet value/entry iterators', async () => {
+    const r = make();
+    const s = r.getSet<string>('p38:s');
+    await s.add('a', 'b', 'c');
+    const vals: string[] = [];
+    for await (const v of s.iterator()) vals.push(v);
+    expect(vals.sort()).toEqual(['a', 'b', 'c']);
+    const dv: string[] = [];
+    for await (const v of s.distributedIterator()) dv.push(v);
+    expect(dv.sort()).toEqual(['a', 'b', 'c']);
+    const sv: string[] = [];
+    for await (const v of s.stream()) sv.push(v);
+    expect(sv.sort()).toEqual(['a', 'b', 'c']);
+
+    const z = r.getScoredSortedSet<string>('p38:z');
+    await z.add(1, 'a');
+    await z.add(2, 'b');
+    const zv: string[] = [];
+    for await (const v of z.iterator()) zv.push(v);
+    expect(zv.sort()).toEqual(['a', 'b']);
+    const ze: { value: string; score: number }[] = [];
+    for await (const e of z.entriesIterator()) ze.push(e);
+    expect(ze.sort((x, y) => x.score - y.score)).toEqual([
+      { value: 'a', score: 1 },
+      { value: 'b', score: 2 },
+    ]);
+    await r.shutdown();
+  });
+
+  it('RLocalCachedMap preloadCache(count) bounds the near-cache fill', async () => {
+    const r = make();
+    await r.redis.hset('p38:lcm', '"a"', '"1"', '"b"', '"2"', '"c"', '"3"');
+    const lcm = r.getLocalCachedMap<string, string>('p38:lcm', { maxSize: 10 });
+    await lcm.preloadCache(2);
+    expect(lcm.getCachedMap().size).toBe(2);
+    await lcm.preloadCache();
+    expect(lcm.getCachedMap().size).toBe(3);
+    await r.shutdown();
+  });
+});

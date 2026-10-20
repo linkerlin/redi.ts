@@ -76,12 +76,14 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry)/`LocalCachedMap` (LRU/LFU under `maxSize`,
-`getCachedMap()` view), `RSet`/`SetCache`,
+`getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
+(lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE), `RScoredSortedSet` (score
 ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 `addIf*`/`addAll*` conditionals, `random`/`randomEntries`, blocking
-`pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, deletion by
+`pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, lazy
+`iterator`/`stream`/`entriesIterator`, deletion by
 score/rank),
 `RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
 multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket` (document/path

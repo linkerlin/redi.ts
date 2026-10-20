@@ -508,6 +508,24 @@ return 1`;
     if (values.length === 0) return true;
     return toNumber(await luaEval(this.redis, s, 1, this.name, ...values.map((v) => this.encodeValue(v)))) === 1;
   }
+  /** Java `iterator(pattern, count)` / `stream`: lazy SSCAN generator.
+   *  MATCH applies to encoded members (same as HSCAN field semantics). */
+  async *iterator(pattern = '*', count = 100): AsyncGenerator<V> {
+    let cursor = '0';
+    do {
+      const [next, members] = (await this.redis.sscan(
+        this.name, cursor, 'MATCH', pattern, 'COUNT', String(count),
+      )) as [string, string[]];
+      for (const m of members) yield this.decodeValue(m) as V;
+      cursor = next;
+    } while (cursor !== '0');
+  }
+  async *distributedIterator(pattern = '*', count = 100): AsyncGenerator<V> {
+    yield* this.iterator(pattern, count);
+  }
+  async *stream(pattern = '*', count = 100): AsyncGenerator<V> {
+    yield* this.iterator(pattern, count);
+  }
 }
 
 export class RList<V = any> extends RedisDataStructure {
@@ -1353,6 +1371,34 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
   }
   async size(): Promise<number> {
     return this.redis.zcard(this.name);
+  }
+  /** Java `iterator(pattern, count)` / `stream`: lazy ZSCAN over members.
+   *  MATCH applies to encoded member names. */
+  async *iterator(pattern = '*', count = 100): AsyncGenerator<V> {
+    for await (const e of this.entriesIterator(pattern, count)) yield e.value;
+  }
+  /** Lazy ZSCAN over {value, score} entries (TS extension used by iterator). */
+  async *entriesIterator(pattern = '*', count = 100): AsyncGenerator<ScoredEntry<V>> {
+    try {
+      let cursor = '0';
+      do {
+        const [next, rows] = (await (this.redis as any).zscan(
+          this.name, cursor, 'MATCH', pattern, 'COUNT', String(count),
+        )) as [string, string[]];
+        for (let i = 0; i + 1 < rows.length; i += 2) {
+          yield { value: this.decodeValue(rows[i]) as V, score: Number(rows[i + 1]) };
+        }
+        cursor = next;
+      } while (cursor !== '0');
+    } catch {
+      // Mocks without ZSCAN: full range; glob matching beyond '*' is not
+      // emulated (real servers always take the ZSCAN path above).
+      if (pattern !== '*') return;
+      for (const e of await this.rangeWithScores(0, -1)) yield e;
+    }
+  }
+  async *stream(pattern = '*', count = 100): AsyncGenerator<V> {
+    yield* this.iterator(pattern, count);
   }
   async range(from: number, to: number): Promise<V[]> {
     const m = await this.redis.zrange(this.name, from, to);

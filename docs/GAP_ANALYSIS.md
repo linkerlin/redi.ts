@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.15.0（2026-10-20）阶段 37：RSearch 扩展（索引元信息/别名/增强查询/聚合/同义词/词典/配置）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.16.0（2026-10-20）阶段 38：RSet/RScoredSortedSet 惰性迭代器与 LocalCachedMap 限量预载。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -27,9 +27,9 @@
 
 按面积排序。命名精确到 Java 签名。
 
-**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) ✅ (2.2.0)；`addAll*` 条件批量、`random`/`randomEntries`、`firstEntry`/`lastEntry`、非阻塞 `pollFirst/LastEntry` 与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP）✅ (2.3.0)；区间读取改用 `ZRANGE ... BYSCORE [REV]` ✅ (2.3.0，弃用 `ZRANGEBYSCORE`/`ZREVRANGEBYSCORE`)；仍缺 `iterator/stream` 专用视图（ZSCAN/ZRANGE 迭代语义）。
+**`RScoredSortedSet`**：交并差已补 ✅ (1.8.4：`union/unionWith/readUnion/readUnionEntries/intersection/intersectionWith/readIntersection/readIntersectionEntries/countIntersection/countIntersectionLimit/diff/readDiff/readDiffEntries`，store 版“只算 others 存入 self”与 Java 逐字对齐，live 验证 WEIGHTS 位置）；分数族已补 ✅ (1.5.0：`firstScore/lastScore`、`addScore/addScoreAndGetRank/addScoreAndGetRevRank/addAndGetRank/addAndGetRevRank`（单 Lua ZADD+rank）、`count`、`entryRange`（索引+分数）、`valueRangeReversed/entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 startScore=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank/removeRangeByScore`；`rank/revRank` 回 `number | null` 与 Java 一致）；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) ✅ (2.2.0)；`addAll*` 条件批量、`random`/`randomEntries`、`firstEntry`/`lastEntry`、非阻塞 `pollFirst/LastEntry` 与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP）✅ (2.3.0)；区间读取改用 `ZRANGE ... BYSCORE [REV]` ✅ (2.3.0，弃用 `ZRANGEBYSCORE`/`ZREVRANGEBYSCORE`)；惰性 `iterator/stream/entriesIterator`（ZSCAN）✅ (2.16.0)。
 
-**`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；`addAllCounted/removeAllCounted/containsEach` ✅ (2.5.0)；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）、`iterator/distributedIterator/stream` 视图。
+**`RSet`**：store 交并差已补 ✅ (1.8.8)，且 **v2.0.0 修正为 Java 4.6.1 裸键形状**（`SUNIONSTORE/SINTERSTORE/SDIFFSTORE` + `dest others…`，无 numkeys、self 仅作目标且不入输入——此前多传 numkeys 并把 self 当输入，静默算错）；read 变体 self 作首输入的语义不变；`addAllCounted/removeAllCounted/containsEach` ✅ (2.5.0)；`iterator/distributedIterator/stream` 惰性 SSCAN ✅ (2.16.0)；仍缺 count 族完整面：`countIntersection/countDiff/countUnion` 的 limit 变体与 `countUnionApprox`（Java 形状 = `SINTERCARD/SDIFFCARD/SUNIONCARD numkeys self …names [APPROX] [LIMIT n]`，Redis 8.10+ 能力门控）。
 
 **`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`/`readGroupMany`（多流 XREAD/XREADGROUP）✅ (2.5.0/2.10.0)；`addListener(ObjectListener)` ✅ (2.10.0，keyspace `xadd|xdel|xgroup-*`，需服务端 `notify-keyspace-events` K+E；未配置时订阅静默)；`readGroupMany` 每流独立 group/consumer ✅ (2.11.0，按 group+consumer 分桶各发一条 XREADGROUP)。
 
@@ -69,7 +69,7 @@
 
 **`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；仍缺 `IncrementArgs`（增量配置）与 `addListener`；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
-**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；`loader/writer` 不移植（外部存储语义，对 Redis wire 无影响）——决策记录；仍缺 `preloadCache(count)`、重连策略、Caffeine、过期事件策略。
+**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；`preloadCache(count)`（HSCAN 限量）✅ (2.16.0)；`loader/writer` 不移植（外部存储语义，对 Redis wire 无影响）——决策记录；仍缺重连策略、Caffeine、过期事件策略。
 
 **`RRateLimiter`**：`keepAliveTime` 续期 ✅ (2.1.0，acquire 脚本内 `PEXPIRE` config/value/permits；keepAlive=0 时 value/permits 继承 config HASH 的 TTL，与 Java 4.6.1 一致)。
 
@@ -115,5 +115,6 @@
 - **阶段 35（已完成 ✅，v2.13.0）**：`RJsonBucket` 全族（文档/路径读写、NX/XX/CAS、getAndSet/Delete、字符串/数组/数字操作、merge/keys/type/toggle/clear；默认纯 JSON + 可选 Codec），新增 Java `json-set/json-get` 探针做双向验证；验证见 `test/live-phase35.test.ts`（1/1，Redis 8.6 内置 JSON 模块）。
 - **阶段 36（已完成 ✅，v2.14.0）**：`RTDigest`（create/merge/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）、`RTopK`（init 参数/add 丢弃项/incrementBy/listWithCount/info）；验证见 `test/live-phase36.test.ts`（3/3，Redis 8 模块能力门控）。
 - **阶段 37（已完成 ✅，v2.15.0）**：`RSearch` 扩展（索引 info/别名/增强 search/aggregate/同义词/词典/config/spellcheck）；验证见 `test/live-phase37.test.ts`（1/1，Redis 8 内置 RediSearch）。
+- **阶段 38（已完成 ✅，v2.16.0）**：`RSet` 惰性 `iterator/distributedIterator/stream`（SSCAN）、`RScoredSortedSet` `iterator/stream/entriesIterator`（ZSCAN）、`RLocalCachedMap.preloadCache(count)`；验证见 `test/redisson.test.ts` + `test/live-phase38.test.ts`（1/1，编码前缀 MATCH + 限量预载）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

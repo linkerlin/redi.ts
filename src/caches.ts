@@ -1216,8 +1216,23 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
       (this.sub as any)?.disconnect?.();
     } catch { /* noop */ }
   }
-  /** Back-compat: preload all entries into near cache. */
-  async preloadCache(): Promise<void> {
+  /** Back-compat: preload entries into near cache. `count > 0` loads at most
+   *  that many via HSCAN; 0/omitted loads all (Java `preloadCache(count)`). */
+  async preloadCache(count = 0): Promise<void> {
+    if (count > 0) {
+      let cursor = '0';
+      let loaded = 0;
+      do {
+        const [next, fields] = (await this.redis.hscan(
+          this.name, cursor, 'COUNT', String(Math.max(count, 100)),
+        )) as [string, string[]];
+        for (let i = 0; i + 1 < fields.length && loaded < count; i += 2, loaded++) {
+          this.setCached(fields[i], this.decodeValue(fields[i + 1]) as V);
+        }
+        cursor = next;
+      } while (cursor !== '0' && loaded < count);
+      return;
+    }
     const all = await this.redis.hgetall(this.name);
     for (const [f, raw] of Object.entries(all)) this.setCached(f, this.decodeValue(raw) as V);
     void sleep;

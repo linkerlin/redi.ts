@@ -1,3 +1,20 @@
+## 2.16.0 — 2026-10-20
+
+Phase 38: lazy iterators + preload bound. Full suite:
+**254 tests / 41 files**.
+
+- **`RSet`**: `iterator(pattern?, count?)` (lazy SSCAN), plus
+  `distributedIterator` and `stream` aliases. MATCH applies to encoded
+  member names (same convention as HSCAN/ZSCAN).
+- **`RScoredSortedSet`**: `iterator(pattern?, count?)` / `stream` over values
+  and `entriesIterator(pattern?, count?)` over `{value, score}` via ZSCAN
+  (mock falls back to a full range for `*`).
+- **`RLocalCachedMap.preloadCache(count?)`**: `count > 0` fills at most that
+  many entries with HSCAN; omitted/0 keeps the previous full-preload
+  behaviour.
+- Tests: 2 mock + `test/live-phase38.test.ts` 1/1 (SSCAN/ZSCAN with encoded
+  prefix MATCH, preload count vs full).
+
 ## 2.15.0 — 2026-10-20
 
 Phase 37: RSearch expansion (RediSearch in Redis 8). Full suite:
