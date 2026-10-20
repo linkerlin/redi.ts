@@ -95,12 +95,19 @@ export async function duplicateRedis(redis: Redis): Promise<Redis | null> {
 export async function withDedicatedRedis<T>(
   redis: Redis,
   fn: (conn: Redis, dedicated: boolean) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const conn = await duplicateRedis(redis);
   if (!conn) return fn(redis, false);
+  const abort = () => {
+    try { (conn as any).disconnect?.(); } catch { /* noop */ }
+  };
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
   try {
     return await fn(conn, true);
   } finally {
+    signal?.removeEventListener('abort', abort);
     try { (conn as any).disconnect?.(); } catch { /* noop */ }
   }
 }

@@ -814,7 +814,9 @@ async function blockingListPopFrom(
   names: string[],
   side: ListSide,
   timeoutMs: number | null,
+  signal?: AbortSignal,
 ): Promise<{ key: string; value: string } | null> {
+  if (signal?.aborted) return null;
   if (timeoutMs !== null && timeoutMs <= 0) return scanPop(redis, names, side);
   const immediate = await scanPop(redis, names, side);
   if (immediate !== null) return immediate;
@@ -823,6 +825,7 @@ async function blockingListPopFrom(
     const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
     const poll = async (): Promise<{ key: string; value: string } | null> => {
       for (;;) {
+        if (signal?.aborted) return null;
         const r = await scanPop(redis, names, side);
         if (r !== null) return r;
         const remain = deadline === Infinity ? 50 : deadline - Date.now();
@@ -838,10 +841,11 @@ async function blockingListPopFrom(
       if (r === null || r === undefined) return null;
       return Array.isArray(r) ? { key: String(r[0]), value: String(r[1]) } : { key: names[0], value: String(r) };
     } catch (e) {
+      if (signal?.aborted) return null;
       if (!isUnsupportedCommand(e)) throw e;
       return poll();
     }
-  });
+  }, signal);
 }
 
 /** Blocking multi-key, multi-value pop (BLMPOP). Returns the source key and at
@@ -945,9 +949,75 @@ async function blockingListPop(
   name: string,
   side: ListSide,
   timeoutMs: number | null,
+  signal?: AbortSignal,
 ): Promise<string | null> {
-  const r = await blockingListPopFrom(redis, [name], side, timeoutMs);
+  const r = await blockingListPopFrom(redis, [name], side, timeoutMs, signal);
   return r === null ? null : r.value;
+}
+
+// -- Element subscriptions (Java ElementsSubscribeService) ---------------------
+// Each listener runs a take loop: deliver the popped element to the consumer,
+// await it, then take again. Failures retry after one second. Cancellation
+// aborts the dedicated BLPOP connection so unsubscribe() is immediate.
+
+interface ElementSubscription {
+  cancelled: boolean;
+  controller: AbortController;
+  consumer: (value: any) => unknown;
+}
+
+const elementSubscriptions = new WeakMap<object, Map<number, ElementSubscription>>();
+const elementConsumerIds = new WeakMap<object, Map<Function, number>>();
+let elementSubscriptionSeq = 0;
+
+function registerElementSubscription<V>(
+  owner: object,
+  consumer: (value: V) => unknown,
+  take: (signal: AbortSignal) => Promise<V | null>,
+): number {
+  let subs = elementSubscriptions.get(owner);
+  if (!subs) { subs = new Map(); elementSubscriptions.set(owner, subs); }
+  let consumers = elementConsumerIds.get(owner);
+  if (!consumers) { consumers = new Map(); elementConsumerIds.set(owner, consumers); }
+  if (consumers.has(consumer)) {
+    throw new Error(`Consumer object with listener id ${consumers.get(consumer)} already registered`);
+  }
+  const id = ++elementSubscriptionSeq;
+  const sub: ElementSubscription = { cancelled: false, controller: new AbortController(), consumer };
+  subs.set(id, sub);
+  consumers.set(consumer, id);
+  void (async () => {
+    while (!sub.cancelled) {
+      let value: V | null;
+      try {
+        value = await take(sub.controller.signal);
+      } catch {
+        if (sub.cancelled) return;
+        await sleep(1000);
+        continue;
+      }
+      if (sub.cancelled) return;
+      if (value === null) continue;
+      try {
+        await sub.consumer(value);
+      } catch {
+        if (sub.cancelled) return;
+        await sleep(1000);
+      }
+    }
+  })();
+  return id;
+}
+
+function unregisterElementSubscription(owner: object, listenerId: number): void {
+  const subs = elementSubscriptions.get(owner);
+  const sub = subs?.get(listenerId);
+  if (!subs || !sub) return;
+  sub.cancelled = true;
+  sub.controller.abort();
+  subs.delete(listenerId);
+  const consumers = elementConsumerIds.get(owner);
+  consumers?.delete(sub.consumer);
 }
 
 /** ZPOPMIN/ZPOPMAX reply is a flat [member, score] pair. */
@@ -1073,6 +1143,20 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
       if (raw !== null) return this.decodeValue(raw) as V;
     }
   }
+  /** Take used by element subscriptions; overriding classes may alter it. */
+  protected async takeForElementSubscription(signal: AbortSignal): Promise<V | null> {
+    const raw = await blockingListPop(this.redis, this.name, 'LEFT', null, signal);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `subscribeOnElements(consumer)`: continuously take and deliver.
+   *  Async consumers provide back-pressure; failures retry after one second. */
+  subscribeOnElements(consumer: (value: V) => unknown): number {
+    return registerElementSubscription(this, consumer, (signal) => this.takeForElementSubscription(signal));
+  }
+  /** Java `unsubscribe(listenerId)`. Unknown ids are ignored. */
+  unsubscribe(listenerId: number): void {
+    unregisterElementSubscription(this, listenerId);
+  }
   async pollWithTimeout(timeoutMs: number): Promise<V | null> {
     const raw = await blockingListPop(this.redis, this.name, 'LEFT', timeoutMs);
     return raw === null ? null : (this.decodeValue(raw) as V);
@@ -1140,6 +1224,18 @@ export class RBlockingDeque<V = any> extends RDeque<V> {
       const raw = await blockingListPop(this.redis, this.name, 'LEFT', null);
       if (raw !== null) return this.decodeValue(raw) as V;
     }
+  }
+  protected async takeForElementSubscription(signal: AbortSignal): Promise<V | null> {
+    const raw = await blockingListPop(this.redis, this.name, 'LEFT', null, signal);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `subscribeOnElements(consumer)`: continuously takeFirst and deliver. */
+  subscribeOnElements(consumer: (value: V) => unknown): number {
+    return registerElementSubscription(this, consumer, (signal) => this.takeForElementSubscription(signal));
+  }
+  /** Java `unsubscribe(listenerId)`. Unknown ids are ignored. */
+  unsubscribe(listenerId: number): void {
+    unregisterElementSubscription(this, listenerId);
   }
   async takeLast(): Promise<V> {
     for (;;) {
@@ -1266,6 +1362,17 @@ export class RBoundedBlockingQueue<V = any> extends RBlockingQueue<V> {
     super(redis, name, codec);
     this.capacityKey = prefixName('redisson_bqs', name);
     this.channel = prefixName('redisson_sc', this.capacityKey);
+  }
+
+  /** Bounded queues subscribe through the capacity-aware poll so permits are
+   *  released on every delivered element (Java uses takeAsync). */
+  protected override async takeForElementSubscription(signal: AbortSignal): Promise<V | null> {
+    while (!signal.aborted) {
+      const v = await this.poll();
+      if (v !== null) return v;
+      await sleep(25);
+    }
+    return null;
   }
 
   async trySetCapacity(capacity: number): Promise<boolean> {

@@ -82,7 +82,7 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 (lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE, variadic adds/`*IfExists`/`poll(count)`/
-`RPOPLPUSH`), `RScoredSortedSet` (score
+`RPOPLPUSH`, `subscribeOnElements`/`unsubscribe`), `RScoredSortedSet` (score
 ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 `addIf*`/`addAll*` conditionals, `random`/`randomEntries`, blocking
 `pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, lazy

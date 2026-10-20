@@ -1796,3 +1796,64 @@ describe('phase 42: native map-cache fast writes (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 45: blocking queue element subscriptions (mock)', () => {
+  const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
+  const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<boolean> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (await check()) return true;
+      await sleep(20);
+    }
+    return check();
+  };
+
+  it('delivers in order with async back-pressure and stops on unsubscribe', async () => {
+    const r = make();
+    const q = r.getBlockingQueue<string>('p45:q');
+    const got: string[] = [];
+    const id = q.subscribeOnElements(async (v) => {
+      await sleep(10);
+      got.push(v);
+    });
+    await q.offer('a');
+    await q.offer('b');
+    expect(await waitFor(() => got.length === 2)).toBe(true);
+    expect(got).toEqual(['a', 'b']);
+
+    const consumer = () => undefined;
+    const id2 = q.subscribeOnElements(consumer);
+    expect(() => q.subscribeOnElements(consumer)).toThrow();
+    q.unsubscribe(id2);
+    q.unsubscribe(999999); // unknown ids are ignored
+    q.unsubscribe(id);
+    await sleep(150);
+    await q.offer('c');
+    await sleep(300);
+    expect(got).not.toContain('c');
+    expect(await q.poll()).toBe('c');
+    await r.shutdown();
+  });
+
+  it('works for blocking deques and bounded queues (capacity restored)', async () => {
+    const r = make();
+    const d = r.getBlockingDeque<string>('p45:d');
+    const dGot: string[] = [];
+    const did = d.subscribeOnElements((v) => { dGot.push(v); });
+    await d.addLast('x');
+    await d.addLast('y');
+    expect(await waitFor(() => dGot.length === 2)).toBe(true);
+    expect(dGot).toEqual(['x', 'y']);
+    d.unsubscribe(did);
+
+    const bq = r.getBoundedBlockingQueue<string>('p45:bq');
+    expect(await bq.trySetCapacity(1)).toBe(true);
+    const bGot: string[] = [];
+    const bid = bq.subscribeOnElements((v) => { bGot.push(v); });
+    await bq.offer('z');
+    expect(await waitFor(() => bGot.includes('z'))).toBe(true);
+    expect(await waitFor(async () => (await bq.remainingCapacity()) === 1)).toBe(true);
+    bq.unsubscribe(bid);
+    await r.shutdown();
+  });
+});

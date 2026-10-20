@@ -1,3 +1,23 @@
+## 2.23.0 — 2026-10-21
+
+Phase 45: blocking-queue element subscriptions. Full suite:
+**268 tests / 48 files**.
+
+- **`RBlockingQueue` / `RBlockingDeque`**: `subscribeOnElements(consumer)` and
+  `unsubscribe(listenerId)` (Java `ElementsSubscribeService` semantics):
+  continuous take → consumer → take again, async consumers provide
+  back-pressure, consumer failures retry after one second, registering the
+  same consumer twice throws, unknown unsubscribe ids are ignored.
+- Cancellation aborts the dedicated BLPOP/BRPOP connection, so
+  `unsubscribe` stops a blocked listener immediately instead of waiting for
+  the next element. Mock clients without dedicated connections fall back to
+  signal-aware polling.
+- **`RBoundedBlockingQueue`**: subscriptions run through the capacity-aware
+  poll, releasing one permit per delivered element.
+- Tests: 2 mock + `test/live-phase45.test.ts` 1/1 (order, back-pressure,
+  prompt cancellation leaving a later element queued, deque delivery, bounded
+  capacity restoration).
+
 ## 2.22.0 — 2026-10-20
 
 Phase 44: RSearch 4.6.1 hybrid/profile/cursor/alter. Full suite:

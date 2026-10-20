@@ -44,7 +44,7 @@
 | RSemaphore | STRING + `redisson_sc:{name}` Lua | WIRE_OK + live shared-permit ✅ |
 | RCountDownLatch | STRING + `redisson_countdownlatch__channel__{name}` (`1` set / `0` zero) | WIRE_OK (count shared, live read ✅) |
 | RPermitExpirableSemaphore | STRING + ZSET `{name}:timeout` + `redisson_sc:{name}`, lazy purge; permit ids are hex text (Java-UUID domain), `tryAcquire` returns `string[]`; `delete()` removes the timeout ZSET | WIRE_OK + live phase 3/8 (共享许可池/多许可 ✅） + live phase 16 (zero residue ✅) |
-| RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON); Bounded uses `redisson_bqs:{name}` as available permits: atomic DECRBY+RPUSH / INCRBY+PUBLISH, `put`/timed `offer` block, `remainingCapacity()`; BLPOP/BRPOP use dedicated connections + float seconds (0 = non-blocking); `drainTo` extracts with one atomic Lua; blocking queue/deque also expose `pollFromAny`/`pollFromAnyWithName` (BLPOP), `pollFirstFromAny`/`pollLastFromAny` (BLMPOP + COUNT), `pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo` (BLMOVE), deque `move`/`moveWithTimeout` (LMOVE/BLMOVE); base RQueue/RDeque add `poll(count)`, `indexOf`, non-blocking `pollLastAndOfferFirstTo` (RPOPLPUSH), variadic `addFirst/addLast`, `addFirstIfExists`/`addLastIfExists` (LPUSHX/RPUSHX), `pollFirst/pollLast(count)`, `move` (LMOVE); RMap 另有 `valueSize`（HSTRLEN）、`randomKeys`/`randomEntries`（HRANDFIELD [WITHVALUES]）、`keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)` 惰性 HSCAN 异步迭代器、物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet`、三参 `replace(key, old, new)` | WIRE_OK + live bidirectional ✅ + live phase 4/7/16/17/18 + live phase 20 ✅ + live phase 22 (真实 BLPOP/BLMPOP/BLMOVE 唤醒 ✅) + live phase 27 (视图 vs Java HSCAN / 条件 replace/remove ✅) + live phase 41（RPOPLPUSH/变参/LPUSHX/LMOVE ✅） |
+| RMap / RList / RQueue / RDeque / Blocking(+Bounded) | bare name + JSON values (map keys JSON); Bounded uses `redisson_bqs:{name}` as available permits: atomic DECRBY+RPUSH / INCRBY+PUBLISH, `put`/timed `offer` block, `remainingCapacity()`; BLPOP/BRPOP use dedicated connections + float seconds (0 = non-blocking); `drainTo` extracts with one atomic Lua; blocking queue/deque also expose `pollFromAny`/`pollFromAnyWithName` (BLPOP), `pollFirstFromAny`/`pollLastFromAny` (BLMPOP + COUNT), `pollLastAndOfferFirstTo`/`takeLastAndOfferFirstTo` (BLMOVE), deque `move`/`moveWithTimeout` (LMOVE/BLMOVE); base RQueue/RDeque add `poll(count)`, `indexOf`, non-blocking `pollLastAndOfferFirstTo` (RPOPLPUSH), variadic `addFirst/addLast`, `addFirstIfExists`/`addLastIfExists` (LPUSHX/RPUSHX), `pollFirst/pollLast(count)`, `move` (LMOVE); blocking queues/deques add `subscribeOnElements`/`unsubscribe` (continuous take, async back-pressure, BLPOP connection abort on cancel; bounded goes through capacity-aware poll); RMap 另有 `valueSize`（HSTRLEN）、`randomKeys`/`randomEntries`（HRANDFIELD [WITHVALUES]）、`keysIterator`/`valuesIterator`/`entriesIterator(pattern, count)` 惰性 HSCAN 异步迭代器、物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet`、三参 `replace(key, old, new)` | WIRE_OK + live bidirectional ✅ + live phase 4/7/16/17/18 + live phase 20 ✅ + live phase 22 (真实 BLPOP/BLMPOP/BLMOVE 唤醒 ✅) + live phase 27 (视图 vs Java HSCAN / 条件 replace/remove ✅) + live phase 41（RPOPLPUSH/变参/LPUSHX/LMOVE ✅） + live phase 45（元素订阅/即时取消/有界容量 ✅） |
 | RSet | set ops: store variants write into SELF like Java (self IS an input; old read-only names now `readUnion/readDiff/readIntersection`), explicit numkeys (`as any`: typings can't express it), `countUnion` via `.call`; `addAllCounted`/`removeAllCounted`/`containsEach`; lazy `iterator(pattern?, count?)`/`distributedIterator`/`stream` (SSCAN); key synchronizers shared with RMap (see below) | WIRE_OK + live bidirectional ✅ + live phase 15 (union ✅; inter/diff gated — local msys2 SINTERSTORE/SDIFFSTORE broken, raw-RESP verified) + live phase 38 (SSCAN ✅) |
 | Key synchronizers (RMap/RSet/MapCache/SetCache/Multimap) | `getLock`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/`getCountDownLatch`/`getPermitExpirableSemaphore`: companion = `suffixName(name, hash128toBase64(encode(key)) + ":" + {lock\|fairlock\|rw_lock\|semaphore\|countdownlatch\|permitexpirablesemaphore})`; owners inherit the client id/watchdog | WIRE_OK + live phase 19（6/6 命名与 Java 4.6.1 逐字节一致、Key 锁双向互斥 ✅） |
 | RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`firstEntry`/`lastEntry`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank`/`removeRangeByScore`；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) 与 `addAll*` 条件批量；`random`/`randomEntries`（ZRANDMEMBER [WITHSCORES]）；非阻塞 `pollFirst/LastEntry`（ZPOPMIN/MAX）与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP，独立连接+浮点秒）；惰性 `iterator`/`stream`/`entriesIterator`（ZSCAN）；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ + live phase 23 (GT/LT/XX 分数 Java 读回 ✅) + live phase 24 (addAll/random/BZPOP/BZMPOP ✅) + live phase 38 (ZSCAN ✅) |
@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 265 tests / 47 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 268 tests / 48 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
@@ -89,7 +89,8 @@
   phase-33 bitset batch/delayed-queue reads, phase-35 RJsonBucket, phase-36
   probabilistic deep APIs, phase-37 RSearch, phase-38 lazy iterators,
   phase-39 reliable-topic semantics, phase-40 JSON/native-map batches,
-  phase-41 queue/deque surface and phase-42 native-map fast writes), `interop`
+  phase-41 queue/deque surface, phase-42 native-map fast writes, phase-43
+  JSON multi-match and phase-45 queue element subscriptions), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -162,6 +163,8 @@
   arrayIndex boundaries, 1/1 PASS),
   `live-phase44` (FT.HYBRID KNN/RANGE + RRF/LINEAR, FT.PROFILE search/
   aggregate, FT.CURSOR READ/DEL, FT.ALTER and alias search, 1/1 PASS),
+  `live-phase45` (element subscriptions: order/back-pressure, prompt BLPOP
+  cancellation, deque and bounded-capacity delivery, 1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).
