@@ -545,14 +545,82 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
     const field = this.encodeKey(key);
     const old = await this.get(key);
     await this.redis.hset(this.name, field, this.encodeValue(value));
+    await this.applyFieldExpiry(field, ttl);
+    return old;
+  }
+
+  private async applyFieldExpiry(field: string, ttl: number | Date): Promise<void> {
     try {
       if (ttl instanceof Date) {
         await (this.redis as any).hpexpireat(this.name, ttl.getTime(), 'FIELDS', 1, field);
-      } else if (ttl > 0) {
+      } else if (typeof ttl === 'number' && ttl > 0) {
         await this.redis.hpexpire(this.name, ttl, 'FIELDS', 1, field);
       }
     } catch { /* server too old */ }
-    return old;
+  }
+
+  /** Java `fastPut(K, V[, Duration|Instant])`: HSET without reading the old value.
+   *  Returns whether the field was newly added (HSET reply 1). */
+  async fastPut(key: K, value: V, ttl: number | Date = 0): Promise<boolean> {
+    const field = this.encodeKey(key);
+    const added = toNumber(await this.redis.hset(this.name, field, this.encodeValue(value))) === 1;
+    await this.applyFieldExpiry(field, ttl);
+    return added;
+  }
+
+  /** Java `putIfExist(K, V[, Duration|Instant])`: write only when the field
+   *  exists; returns the previous value (null when absent, nothing written). */
+  async putIfExist(key: K, value: V, ttl: number | Date = 0): Promise<V | null> {
+    const field = this.encodeKey(key);
+    const ttlMode = ttl instanceof Date ? '2' : (typeof ttl === 'number' && ttl > 0 ? '1' : '0');
+    const ttlArg = ttl instanceof Date ? String(ttl.getTime()) : String(typeof ttl === 'number' ? ttl : 0);
+    const lua = `local old = redis.call('hget', KEYS[1], ARGV[1])
+if old == false then return nil end
+redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+if ARGV[4] == '1' then
+    redis.call('hpexpire', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+elseif ARGV[4] == '2' then
+    redis.call('hpexpireat', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+end
+return old`;
+    try {
+      const old: any = await luaEval(this.redis, lua, 1, this.name, field, this.encodeValue(value), ttlArg, ttlMode);
+      return old === null || old === undefined ? null : (this.decodeValue(String(old)) as V);
+    } catch {
+      const old = await this.get(key);
+      if (old === null) return null;
+      await this.redis.hset(this.name, field, this.encodeValue(value));
+      await this.applyFieldExpiry(field, ttl);
+      return old;
+    }
+  }
+
+  /** Java `fastPutIfAbsent(K, V[, Duration|Instant])`: HSETNX + optional TTL. */
+  async fastPutIfAbsent(key: K, value: V, ttl: number | Date = 0): Promise<boolean> {
+    const field = this.encodeKey(key);
+    const ttlMode = ttl instanceof Date ? '2' : (typeof ttl === 'number' && ttl > 0 ? '1' : '0');
+    const ttlArg = ttl instanceof Date ? String(ttl.getTime()) : String(typeof ttl === 'number' ? ttl : 0);
+    const lua = `if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then return 0 end
+redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+if ARGV[4] == '1' then
+    redis.call('hpexpire', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+elseif ARGV[4] == '2' then
+    redis.call('hpexpireat', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+end
+return 1`;
+    try {
+      return toNumber(await luaEval(this.redis, lua, 1, this.name, field, this.encodeValue(value), ttlArg, ttlMode)) === 1;
+    } catch {
+      const set = toNumber(await this.redis.hsetnx(this.name, field, this.encodeValue(value))) === 1;
+      if (set) await this.applyFieldExpiry(field, ttl);
+      return set;
+    }
+  }
+
+  /** Convenience boolean form of `putIfExist` (TS extension: 4.6.1 exposes
+   *  only `fastPut`/`fastPutIfAbsent`; newer Redisson adds `fastPutIfExist`). */
+  async fastPutIfExist(key: K, value: V, ttl: number | Date = 0): Promise<boolean> {
+    return (await this.putIfExist(key, value, ttl)) !== null;
   }
 
   /** Java RedissonMapCacheNative.putIfAbsent(key, value, ttl). With a TTL

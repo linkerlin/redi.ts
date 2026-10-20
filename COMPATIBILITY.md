@@ -54,7 +54,7 @@
 | RLongAdder / RDoubleAdder | `{name}:adder-topic` + `{name}:<id>:counter` + `{name}:<id>:semaphore` hash-tag 三元组；sum 只返回 GETDEL（请求者自 flush 已包含在内）；订阅先挂 handler 后 await ack | WIRE_OK + live phase 3 |
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
 | RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段）; `putAll(mapping,ttl,maxIdle)` per-key、`expireEntry`（拒已过期条目、重写 maxIdle 打包）、`expireEntries` 批量、`remainTimeToLive`（`-2` 缺失/已过期、`-1` 无过期）、`getWithTTLOnly`（不刷新 idle/access）、`getMaxSize`/`setMaxSize`、`compute`/`computeIfAbsent`（per-key 锁 + TTL）; `addListener`/`removeListener` 走独立连接 + `messageBuffer`（u64LE 长度前缀字节保真），写 `has-listeners=1` 使 Java 写端也发布，事件负载以 Buffer 发送; `unlink()` clears all companions | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） + live phase 19（双向事件 ✅、过期语义 ✅） + live phase 28（批量 TTL/only-read/max-size ✅） + live phase 30（compute + Java mc-get ✅） |
-| RMapCacheNative | plain HASH + `HPEXPIRE`/`HPEXPIREAT` + `HPERSIST`/`HPTTL` `FIELDS` (≥7.4); `put`/`putIfAbsent` 接受毫秒或 **绝对 `Date`**（HPEXPIRE/HPEXPIREAT）、`putIfAllKeysExist`/`putIfAllKeysAbsent`（全字段条件 Lua，含逐字段 TTL）、`expireEntry(IfNotSet/IfGreater/IfLess)`、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量、`clearExpire`（HPERSIST）、`remainTimeToLive`（HPTTL，`-2` 缺失）；4.6.1 Java 对 HPERSIST `-2` 返回 `null`，TS 统一 `false` | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） + live phase 19（条件过期/HPERSIST/putIfAbsent 双向 ✅） + live phase 33（Date/HPEXPIREAT ✅） + live phase 40（条件批量/批量过期 + Java 读 ✅） |
+| RMapCacheNative | plain HASH + `HPEXPIRE`/`HPEXPIREAT` + `HPERSIST`/`HPTTL` `FIELDS` (≥7.4); `put`/`putIfAbsent`/`fastPut`/`fastPutIfAbsent`/`putIfExist`/`fastPutIfExist`（`fastPutIfExist` 为 TS 扩展；4.6.1 jar 仅到 `fastPutIfAbsent`） 接受毫秒或 **绝对 `Date`**（HPEXPIRE/HPEXPIREAT）、`putIfAllKeysExist`/`putIfAllKeysAbsent`（全字段条件 Lua，含逐字段 TTL）、`expireEntry(IfNotSet/IfGreater/IfLess)`、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量、`clearExpire`（HPERSIST）、`remainTimeToLive`（HPTTL，`-2` 缺失）；4.6.1 Java 对 HPERSIST `-2` 返回 `null`，TS 统一 `false` | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） + live phase 19（条件过期/HPERSIST/putIfAbsent 双向 ✅） + live phase 33（Date/HPEXPIREAT ✅） + live phase 40（条件批量/批量过期 + Java 读 ✅） + live phase 42（fastPut 家族 + 字段 TTL/Java 读 ✅） |
 | RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable); `delete()/clear()` removes idle + touch | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) + live phase 16 (zero residue ✅) |
 | RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids; `delete()/clear()` reads the HASH first and removes every child collection | WIRE_OK + live phase 16 (Java reads empty after delete ✅) |
 | RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE`; `delete()/clear()`/`unlink()` also removes the TTL ZSET and (Native) child collections; opt-in `enablePeriodicEviction(intervalMs)` / `evictExpired()` sweeps child + HASH field + TTL member (default lazy) | WIRE_OK / NATIVE_OK + live phase 16 (zero residue ✅) + live phase 22 (周期清扫 ✅) |
@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 261 tests / 44 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 263 tests / 45 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
@@ -88,8 +88,8 @@
   phase-31 keyspace listeners/multi-stream group reads, phase-32 API polish,
   phase-33 bitset batch/delayed-queue reads, phase-35 RJsonBucket, phase-36
   probabilistic deep APIs, phase-37 RSearch, phase-38 lazy iterators,
-  phase-39 reliable-topic semantics, phase-40 JSON/native-map batches and
-  phase-41 queue/deque surface), `interop`
+  phase-39 reliable-topic semantics, phase-40 JSON/native-map batches,
+  phase-41 queue/deque surface and phase-42 native-map fast writes), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -156,6 +156,8 @@
   conditional batches/Date expiry with Java map reads, 2/2 PASS),
   `live-phase41` (RPOPLPUSH, variadic adds, LPUSHX/RPUSHX, LMOVE, count polls,
   1/1 PASS),
+  `live-phase42` (native MapCache fastPut/fastPutIfAbsent/putIfExist/
+  fastPutIfExist with field TTLs and Java reads, 1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

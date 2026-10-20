@@ -1772,3 +1772,27 @@ describe('phase 41: queue/deque 4.6.1 surface (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 42: native map-cache fast writes (mock)', () => {
+  it('fastPut / fastPutIfAbsent / putIfExist / fastPutIfExist', async () => {
+    const r = make();
+    const mn = r.getMapCacheNative<string, string>('p42:mn');
+    expect(await mn.fastPut('k', 'v1')).toBe(true);
+    expect(await mn.fastPut('k', 'v1b')).toBe(false);
+    expect(await mn.get('k')).toBe('v1b');
+    expect(await mn.fastPutIfAbsent('k', 'v2')).toBe(false);
+    expect(await mn.get('k')).toBe('v1b');
+    expect(await mn.fastPutIfAbsent('new', 'n1')).toBe(true);
+    expect(await mn.get('new')).toBe('n1');
+
+    expect(await mn.putIfExist('k', 'v3')).toBe('v1b');
+    expect(await mn.get('k')).toBe('v3');
+    expect(await mn.putIfExist('ghost', 'x')).toBeNull();
+    expect(await mn.get('ghost')).toBeNull();
+    expect(await mn.fastPutIfExist('k', 'v4')).toBe(true);
+    expect(await mn.fastPutIfExist('ghost2', 'x')).toBe(false);
+    expect(await mn.get('k')).toBe('v4');
+    expect(await mn.get('ghost2')).toBeNull();
+    await r.shutdown();
+  });
+});

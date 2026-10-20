@@ -76,7 +76,8 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry, conditional
-`putIfAllKeysExist`/`Absent` batches)/`LocalCachedMap` (LRU/LFU under `maxSize`,
+`putIfAllKeysExist`/`Absent` batches, `fastPut`/`fastPutIfAbsent`/`putIfExist`/
+`fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
 (lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,

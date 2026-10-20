@@ -1,3 +1,20 @@
+## 2.20.0 — 2026-10-20
+
+Phase 42: RMapCacheNative fast-write family. Full suite:
+**263 tests / 45 files**.
+
+- **`RMapCacheNative`**: `fastPut(key, value, ttl|Date)` (HSET without reading
+  the old value; returns whether the field was newly added), `fastPutIfAbsent`
+  (HSETNX / atomic Lua with per-field TTL), `putIfExist` (write only when the
+  field exists, returns the previous value), `fastPutIfExist` (boolean form;
+  TS extension — the 4.6.1 jar stops at `fastPutIfAbsent`). All accept relative
+  milliseconds or an absolute `Date` (HPEXPIRE/HPEXPIREAT), with JS fallbacks
+  on servers without the field-expiry family.
+- Refactored the shared `applyFieldExpiry` helper used by `put` and the fast
+  paths.
+- Tests: 1 mock + `test/live-phase42.test.ts` 1/1 (existence guards, relative
+  and absolute field TTLs, Java `map-get` reads).
+
 ## 2.19.0 — 2026-10-20
 
 Phase 41: RQueue/RDeque 4.6.1 surface. Full suite:
