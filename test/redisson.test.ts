@@ -1857,3 +1857,17 @@ describe('phase 45: blocking queue element subscriptions (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 47: RKeys keyspace listeners (mock)', () => {
+  it('registers/removes through different getKeys facades and rejects flush-only', async () => {
+    const r = make();
+    const id = await r.getKeys().addListener({ onSet: () => undefined, onDeleted: () => undefined });
+    expect(id).toBeGreaterThan(0);
+    await r.getKeys().removeListener(id);
+    await r.getKeys().removeListener(id); // idempotent
+    await r.getKeys().removeListener(999999);
+    await expect(r.getKeys().addListener({ onFlush: () => undefined })).rejects.toThrow(/RESP3/);
+    await expect(r.getKeys().addListener({} as any)).rejects.toThrow(/Unsupported/);
+    await r.shutdown();
+  });
+});

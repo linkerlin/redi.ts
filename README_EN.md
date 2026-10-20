@@ -118,7 +118,8 @@ items/incrementBy/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge/
 info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, migrate/MigrateArgs, remote copy, swapdb, parallel
-flushes, lazy `getKeysStream`), `RScript` (+scriptKill/
+flushes, global keyspace listeners (`onNew`/`onSet`/`onExpired`/`onDeleted`),
+lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (index
 info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck,
 `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/`profileAggregate`,

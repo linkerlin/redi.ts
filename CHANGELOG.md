@@ -1,3 +1,21 @@
+## 2.25.0 — 2026-10-21
+
+Phase 47: RKeys global keyspace listeners. Full suite:
+**271 tests / 50 files**.
+
+- **`RKeys.addListener` / `removeListener`**: Java 4.6.1 mappings
+  `onNew` → `__keyevent@*:new`, `onSet` → `:set`, `onExpired` → `:expired`,
+  `onDeleted` → `:del`. Callbacks receive the actual key name (global hub, no
+  per-structure filtering).
+- The listener hub is shared per Redis client, so removal works through any
+  `getKeys()` facade. Unknown ids are ignored; ids are idempotent on removal.
+- `onFlush` throws the Java RESP3 error (`protocol ... RESP3`) because this
+  client negotiates RESP2; unregistered/empty listeners throw
+  `Unsupported ObjectListener`.
+- Tests: 1 mock + `test/live-phase47.test.ts` 1/1 (new/set/expired/del with
+  `KEAn`, removal through a fresh facade, config saved/restored; logs/skips
+  when `CONFIG SET` or the `n` flag is unavailable).
+
 ## 2.24.0 — 2026-10-21
 
 Phase 46: RKeys migrate/database operations. Full suite:

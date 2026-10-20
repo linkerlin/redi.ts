@@ -17,6 +17,16 @@ export interface ObjectListener {
   onRemoveGroup?(key: string): void;
   onCreateConsumer?(key: string): void;
   onRemoveConsumer?(key: string): void;
+  /** RKeys: `new` key event (requires the `n` notify flag). */
+  onNew?(key: string): void;
+  /** RKeys: `set` event. */
+  onSet?(key: string): void;
+  /** RKeys: `expired` event. */
+  onExpired?(key: string): void;
+  /** RKeys: `del` event. */
+  onDeleted?(key: string): void;
+  /** RKeys: flush event (RESP3 only in Java 4.6.1). */
+  onFlush?(address: string): void;
 }
 
 interface KeyspaceSub {
@@ -33,6 +43,8 @@ export class KeyspaceListenerHub {
     private redis: Redis,
     private name: string,
     private events: Partial<Record<keyof ObjectListener, string>>,
+    /** false for the global RKeys hub: deliver the message key, not `name`. */
+    private filterName = true,
   ) {}
 
   async add(listener: ObjectListener): Promise<number> {
@@ -51,9 +63,10 @@ export class KeyspaceListenerHub {
       for (const [kind, event] of entries) {
         const pattern = `__keyevent@*:${event}`;
         const handler = (pat: string, _ch: string, msg: string) => {
-          if (pat !== pattern || msg !== this.name) return;
+          if (pat !== pattern) return;
+          if (this.filterName && msg !== this.name) return;
           try {
-            (listener[kind] as (key: string) => void).call(listener, this.name);
+            (listener[kind] as (key: string) => void).call(listener, this.filterName ? this.name : msg);
           } catch { /* user callback */ }
         };
         // Attach before PSUBSCRIBE so no event in the gap is lost.
@@ -87,4 +100,21 @@ export class KeyspaceListenerHub {
   async removeAll(): Promise<void> {
     for (const id of [...this.subs.keys()]) await this.remove(id);
   }
+}
+
+const sharedKeysHubs = new WeakMap<Redis, KeyspaceListenerHub>();
+
+/** One global RKeys hub per Redis client (getKeys() returns new facades). */
+export function sharedKeysListenerHub(redis: Redis): KeyspaceListenerHub {
+  let hub = sharedKeysHubs.get(redis);
+  if (!hub) {
+    hub = new KeyspaceListenerHub(redis, '*', {
+      onNew: 'new',
+      onSet: 'set',
+      onExpired: 'expired',
+      onDeleted: 'del',
+    }, false);
+    sharedKeysHubs.set(redis, hub);
+  }
+  return hub;
 }

@@ -6,6 +6,7 @@ import type { Redis } from 'ioredis';
 import { RedisDataStructure } from './base.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
+import { sharedKeysListenerHub, type ObjectListener } from './listeners.js';
 import { clusterSlot, luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
 import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchDeque, BatchGeo, BatchList, BatchMap, BatchMapCacheNative, BatchQueue, BatchScoredSortedSet, BatchSet, BatchStream } from './batch.js';
 
@@ -207,6 +208,24 @@ export class RKeys {
     } catch {
       return false;
     }
+  }
+  /** Java `addListener(ObjectListener)`: global keyspace events
+   *  (`new`/`set`/`expired`/`del`). `onFlush` requires RESP3 in Java 4.6.1,
+   *  which this client does not negotiate, so a flush-only listener throws. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    const supported = [listener.onNew, listener.onSet, listener.onExpired, listener.onDeleted]
+      .filter((fn) => typeof fn === 'function');
+    if (supported.length === 0) {
+      if (typeof listener.onFlush === 'function') {
+        throw new Error('`protocol` config setting should be set to RESP3 value');
+      }
+      throw new Error('Unsupported ObjectListener');
+    }
+    return sharedKeysListenerHub(this.redis).add(listener);
+  }
+  /** Java `removeListener(int)`: idempotent across getKeys() facades. */
+  async removeListener(listenerId: number): Promise<void> {
+    await sharedKeysListenerHub(this.redis).remove(listenerId);
   }
 }
 
