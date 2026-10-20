@@ -84,7 +84,8 @@ ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 `pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, deletion by
 score/rank),
 `RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
-multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket`,
+multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket` (document/path
+read-write, NX/XX/CAS, string/array/number ops, merge/keys/type/toggle),
 `RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,
 `getAndDelete`, `compareAndDelete`), `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`

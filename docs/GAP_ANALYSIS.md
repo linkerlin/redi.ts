@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 日期：2026-10-13；v2.12.1（2026-10-20）阶段 34 稳定化收尾：连续三次全量 246 项全绿（82.15s / 71.40s / 71.62s），文档一致性校对与模块能力门控说明定稿。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
+> 日期：2026-10-13；v2.13.0（2026-10-20）阶段 35：RJsonBucket 文档/路径/数组/字符串/数字全族（Redis 8 内置 JSON 模块），Java `JacksonCodec` 双向验证；阶段 34 的三次全量稳定基线保持。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -59,7 +59,7 @@
 
 **`RBuckets`**：`setIfAllKeysExist/setIfAllKeysAbsent` ✅ (2.2.0，`MSETEX … NX|XX [PX ms]`，Redis 8+；无该命令时显式报错而非降级)。
 
-**`RJsonBucket`**：`JSON.SET/GET/DEL` 子集 vs ~40 方法（path 系列、`array*`、`compareAndSet` 全缺）；需服务端 RedisJSON 模块，缺失时命令原样报错，测试按模块能力门控/跳过。
+**`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；仍缺 `FPHAType` 参数、`*Multi` 多路径变体、`RJsonBuckets` 的 MSET/MGET 批量。
 
 **`RVectorSet`**：`size/dimensions/getVector/contains/random/range/getNeighbors/getInfo/getAttributes/setAttributes` ✅ (2.12.0，Redis 8 VEMB/VDIM/VRANDMEMBER/VRANGE/VLINKS/VINFO/VGETATTR/VSETATTR)；仍缺 `add(VectorAddArgs)` 高级版、`getRawVector`、`getSimilarEntriesWithAttributes`、iterator/stream。
 
@@ -110,5 +110,6 @@
 - **阶段 32（已完成 ✅，v2.11.0）**：`RKeys.getKeysStream/getKeysStreamByPattern` 惰性 SCAN、Topic `removeListener(handler)` 按回调删除、`RStream.readGroupMany` 每流独立 group/consumer（按 group+consumer 分桶）；CommonOptions/Class<M> 记录为设计差异；验证见 `test/redisson.test.ts` + `test/live-phase32.test.ts`（2/2）。
 - **阶段 33（已完成 ✅，v2.12.0）**：最终审计——RScript `scriptKill/scriptFlush`、RFunction `kill/list/stats/dump/restore(+变体)`（修复 load 空参数）、RVectorSet 深层命令、RBitSet 批量/`asBitSet`、RMapCacheNative 绝对 `Date`（HPEXPIREAT）、RDelayedQueue `readAll/poll(count)`；同时剔除误报并归档设计差异；验证见 `test/redisson.test.ts` + `test/live-phase33.test.ts`（3/3）。
 - **阶段 34（已完成 ✅，v2.12.1）**：稳定化收尾——连续三次全量 246 项全绿（82.15s / 71.40s / 71.62s，无重试/阈值调整）、README/COMPATIBILITY/GAP 一致性校对、RSearch/RedisJSON 模块能力门控说明、PRO/设计差异清单定稿。
+- **阶段 35（已完成 ✅，v2.13.0）**：`RJsonBucket` 全族（文档/路径读写、NX/XX/CAS、getAndSet/Delete、字符串/数组/数字操作、merge/keys/type/toggle/clear；默认纯 JSON + 可选 Codec），新增 Java `json-set/json-get` 探针做双向验证；验证见 `test/live-phase35.test.ts`（1/1，Redis 8.6 内置 JSON 模块）。
 - **后续纵深研究与分阶段演进路线图**：详见根目录 [演进方案.md](../演进方案.md)。
 - 不做：§4。

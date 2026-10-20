@@ -942,6 +942,20 @@ public final class TsProbe {
                     redisson.getKeys().expire(key, ttlMs, java.util.concurrent.TimeUnit.MILLISECONDS);
                     System.out.println("EXPIRED");
                 }
+                case "json-set" -> {
+                    // args: json-set <name> — JsonBucket.set(Map.of("a",1)) via JacksonCodec<Map>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:p35:j";
+                    var jsonCodec = new org.redisson.codec.JacksonCodec<java.util.Map>(java.util.Map.class);
+                    redisson.getJsonBucket(name, jsonCodec).set(java.util.Map.of("a", 1));
+                    System.out.println("JSON_SET");
+                }
+                case "json-get" -> {
+                    // args: json-get <name> — JsonBucket.get() through JacksonCodec<Map>
+                    String name = args.length >= 2 ? args[1] : "TsJavaT:p35:j";
+                    var jsonCodec = new org.redisson.codec.JacksonCodec<java.util.Map>(java.util.Map.class);
+                    Object v = redisson.getJsonBucket(name, jsonCodec).get();
+                    System.out.println("JSON_GET:" + v);
+                }
                 case "vector-add" -> {
                     // args: vector-add <name> <element> <csvDoubles>
                     String name = args.length >= 2 ? args[1] : "TsJavaT:vec5:x";

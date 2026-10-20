@@ -346,21 +346,178 @@ export class RSearch {
 // -- JSON buckets (RedisJSON; values use plain JSON, not Java codec) ----------------
 
 export class RJsonBucket<V = any> {
-  constructor(private redis: Redis, readonly name: string) {}
-  async set(value: V, path = '$'): Promise<void> {
-    await this.redis.call('JSON.SET', this.name, path, JSON.stringify(value));
+  constructor(private redis: Redis, readonly name: string, private codec?: Codec) {}
+  private enc(value: unknown): string {
+    return this.codec ? this.codec.encode(value) : JSON.stringify(value);
   }
-  async get(path = '$'): Promise<V | null> {
-    const raw: any = await this.redis.call('JSON.GET', this.name, path);
+  private dec(raw: any): any {
     if (raw === null || raw === undefined) return null;
-    try {
-      return JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw)) as V;
-    } catch {
-      return raw as V;
+    if (this.codec) {
+      try { return this.codec.decode(typeof raw === 'string' ? raw : JSON.stringify(raw)); } catch { /* fall through */ }
     }
+    try {
+      return JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw));
+    } catch {
+      return raw;
+    }
+  }
+  private unwrap(raw: any): any {
+    return Array.isArray(raw) ? raw[0] : raw;
+  }
+  private payload(value: unknown): string {
+    return this.enc(value);
+  }
+  /** JSON.SET key path value [NX|XX]. */
+  async set(value: V, path = '$', opts: { nx?: boolean; xx?: boolean } = {}): Promise<void> {
+    const args: string[] = [this.name, path, this.enc(value)];
+    if (opts.nx) args.push('NX');
+    else if (opts.xx) args.push('XX');
+    await this.redis.call('JSON.SET', ...args);
+  }
+  /** JSON.GET: without a path returns the document; with one, the RedisJSON
+   *  match array (paths starting with `$`). */
+  async get(path?: string): Promise<V | null> {
+    const raw: any = path === undefined
+      ? await this.redis.call('JSON.GET', this.name)
+      : await this.redis.call('JSON.GET', this.name, path);
+    return this.dec(raw) as V | null;
   }
   async delete(path = '$'): Promise<number> {
     return toNumber(await this.redis.call('JSON.DEL', this.name, path));
+  }
+  /** JSON.SET ... NX (root value or explicit path). */
+  async setIfAbsent(value: V): Promise<boolean>;
+  async setIfAbsent(path: string, value: unknown): Promise<boolean>;
+  async setIfAbsent(a: V | string, b?: unknown): Promise<boolean> {
+    const [path, value] = arguments.length >= 2 ? [String(a), b] : ['$', a];
+    const r: any = await this.redis.call('JSON.SET', this.name, path, this.enc(value), 'NX');
+    return r === 'OK' || r === true;
+  }
+  async trySet(value: V): Promise<boolean>;
+  async trySet(path: string, value: unknown): Promise<boolean>;
+  async trySet(a: V | string, b?: unknown): Promise<boolean> {
+    return arguments.length >= 2 ? this.setIfAbsent(String(a), b) : this.setIfAbsent(a as V);
+  }
+  /** JSON.SET ... XX. */
+  async setIfExists(value: V): Promise<boolean>;
+  async setIfExists(path: string, value: unknown): Promise<boolean>;
+  async setIfExists(a: V | string, b?: unknown): Promise<boolean> {
+    const [path, value] = arguments.length >= 2 ? [String(a), b] : ['$', a];
+    const r: any = await this.redis.call('JSON.SET', this.name, path, this.enc(value), 'XX');
+    return r === 'OK' || r === true;
+  }
+  /** Atomic compare-and-set; `$` paths are compared against RedisJSON's match
+   *  array (like Java's path-based CAS). */
+  async compareAndSet(expect: V, update: V | null): Promise<boolean>;
+  async compareAndSet(path: string, expect: unknown, update: unknown | null): Promise<boolean>;
+  async compareAndSet(a: V | string, b: unknown, c?: unknown): Promise<boolean> {
+    const three = arguments.length >= 3;
+    const path = three ? String(a) : '$';
+    const expect = three ? b : a;
+    const update = three ? c : b;
+    const expected = path.startsWith('$')
+      ? (this.codec ? this.enc([expect]) : JSON.stringify([expect]))
+      : this.enc(expect);
+    const lua = `local cur = redis.call('json.get', KEYS[1], ARGV[1])
+if cur == ARGV[2] then
+    if ARGV[4] == '1' then
+        redis.call('json.del', KEYS[1], ARGV[1])
+    else
+        redis.call('json.set', KEYS[1], ARGV[1], ARGV[3])
+    end
+    return 1
+end
+return 0`;
+    if (update === null || update === undefined) {
+      return toNumber(await this.redis.eval(lua, 1, this.name, path, expected, '', '1')) === 1;
+    }
+    return toNumber(await this.redis.eval(lua, 1, this.name, path, expected, this.enc(update), '0')) === 1;
+  }
+  /** Atomic get-and-set (root or path); returns the previous value. */
+  async getAndSet(newValue: V): Promise<V | null>;
+  async getAndSet(path: string, newValue: unknown): Promise<V | null>;
+  async getAndSet(a: V | string, b?: unknown): Promise<V | null> {
+    const three = arguments.length >= 2;
+    if (!three) {
+      const lua = `local cur = redis.call('json.get', KEYS[1])
+redis.call('json.set', KEYS[1], '$', ARGV[1])
+return cur`;
+      return this.dec(await this.redis.eval(lua, 1, this.name, this.enc(a))) as V | null;
+    }
+    const lua = `local cur = redis.call('json.get', KEYS[1], ARGV[1])
+redis.call('json.set', KEYS[1], ARGV[1], ARGV[2])
+return cur`;
+    return this.dec(await this.redis.eval(lua, 1, this.name, String(a), this.enc(b))) as V | null;
+  }
+  /** Atomic get-and-delete (root or path). */
+  async getAndDelete(): Promise<V | null>;
+  async getAndDelete(path: string): Promise<V | null>;
+  async getAndDelete(path = '$'): Promise<V | null> {
+    const lua = path === '$'
+      ? `local cur = redis.call('json.get', KEYS[1])
+redis.call('json.del', KEYS[1], '$')
+return cur`
+      : `local cur = redis.call('json.get', KEYS[1], ARGV[1])
+redis.call('json.del', KEYS[1], ARGV[1])
+return cur`;
+    return this.dec(await this.redis.eval(lua, 1, this.name, path)) as V | null;
+  }
+  async stringSize(path = '$'): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.STRLEN', this.name, path)));
+  }
+  async stringAppend(path: string, value: unknown): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.STRAPPEND', this.name, path, this.enc(value))));
+  }
+  async arrayAppend(path: string, ...values: unknown[]): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRAPPEND', this.name, path, ...values.map((v) => this.enc(v)))));
+  }
+  async arrayIndex(path: string, value: unknown, start = 0, stop = 0): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRINDEX', this.name, path, this.enc(value), String(start), String(stop))));
+  }
+  async arrayInsert(path: string, index: number, ...values: unknown[]): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRINSERT', this.name, path, String(index), ...values.map((v) => this.enc(v)))));
+  }
+  async arraySize(path = '$'): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRLEN', this.name, path)));
+  }
+  async arrayPop(path: string, index = -1): Promise<any> {
+    return this.dec(this.unwrap(await this.redis.call('JSON.ARRPOP', this.name, path, String(index))));
+  }
+  async arrayPollFirst(path: string): Promise<any> {
+    return this.arrayPop(path, 0);
+  }
+  async arrayPollLast(path: string): Promise<any> {
+    return this.arrayPop(path, -1);
+  }
+  async arrayTrim(path: string, start: number, stop: number): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.ARRTRIM', this.name, path, String(start), String(stop))));
+  }
+  async clear(path?: string): Promise<number> {
+    return toNumber(path === undefined
+      ? await this.redis.call('JSON.CLEAR', this.name)
+      : await this.redis.call('JSON.CLEAR', this.name, path));
+  }
+  async incrementAndGet(path: string, delta: number): Promise<number> {
+    const raw: any = await this.redis.call('JSON.NUMINCRBY', this.name, path, String(delta));
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Number(this.unwrap(parsed));
+  }
+  async merge(path: string, value: unknown): Promise<void> {
+    await this.redis.call('JSON.MERGE', this.name, path, this.enc(value));
+  }
+  async countKeys(path = '$'): Promise<number> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.OBJLEN', this.name, path)));
+  }
+  async getKeys(path = '$'): Promise<string[]> {
+    const raw: any = await this.redis.call('JSON.OBJKEYS', this.name, path);
+    const first = Array.isArray(raw) && Array.isArray(raw[0]) ? raw[0] : raw;
+    return (first ?? []) as string[];
+  }
+  async toggle(path: string): Promise<boolean> {
+    return toNumber(this.unwrap(await this.redis.call('JSON.TOGGLE', this.name, path))) === 1;
+  }
+  async getType(path = '$'): Promise<string> {
+    return String(this.unwrap(await this.redis.call('JSON.TYPE', this.name, path)));
   }
 }
 

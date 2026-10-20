@@ -76,8 +76,8 @@ export class Redisson {
   getBinaryStream(name: string): RBinaryStream {
     return new RBinaryStream(this.redis, name, this.codec);
   }
-  getJsonBucket<V>(name: string): RJsonBucket<V> {
-    return new RJsonBucket<V>(this.redis, name);
+  getJsonBucket<V>(name: string, codec?: Codec): RJsonBucket<V> {
+    return new RJsonBucket<V>(this.redis, name, codec);
   }
   getJsonBuckets(): RJsonBuckets {
     return new RJsonBuckets(this.redis);

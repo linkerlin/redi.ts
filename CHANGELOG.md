@@ -1,3 +1,27 @@
+## 2.13.0 — 2026-10-20
+
+Phase 35: RJsonBucket (Redis 8 built-in JSON module). Full suite:
+**247 tests / 38 files green** (new live suite).
+
+- **Document/path API**: `set(value, path?, {nx, xx})`, `get(path?)`
+  (no path = whole document; `$` paths return RedisJSON match arrays),
+  `delete`, `setIfAbsent`/`trySet`/`setIfExists` (root or explicit path),
+  atomic `compareAndSet` (root/path, `$` expectations compared against the
+  match array like Java's path CAS), `getAndSet` and `getAndDelete` (root/path
+  Lua scripts).
+- **String/array/number ops**: `stringSize`/`stringAppend`, `arrayAppend`/
+  `arrayIndex`/`arrayInsert`/`arraySize`/`arrayPop`/`arrayPollFirst`/
+  `arrayPollLast`/`arrayTrim`, `incrementAndGet` (JSON.NUMINCRBY),
+  `merge`, `clear`, `countKeys` (OBJLEN), `getKeys` (OBJKEYS), `toggle`,
+  `getType`.
+- **Wire note**: plain JSON is the default (matches Java `JacksonCodec`, which
+  writes `{"a":1}` without `@class`); an optional `Codec` can be supplied to
+  the factory for typed documents. Java 4.6.1 `json-set`/`json-get` probes
+  (added to TsProbe, `JacksonCodec<Map>`) verify both read directions.
+- Redis 8.6 ships the JSON module; the live test capability-gates on
+  `COMMAND INFO JSON.SET` and skips with a log otherwise.
+- Tests: `test/live-phase35.test.ts` 1/1 (full API + Java round-trip).
+
 ## 2.12.1 — 2026-10-20
 
 Phase 34: stabilization & documentation audit (no behavior changes).
