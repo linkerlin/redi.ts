@@ -78,7 +78,8 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry, conditional
 `putIfAllKeysExist`/`Absent` batches, structured `PutArgs` HSETEX with
-KEEPTTL/PX/PXAT, `fastPut`/`fastPutIfAbsent`/`putIfExist`/
+KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`,
+`fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
 (`countIntersection` with LIMIT, sadd/srem/spop/store keyspace listeners,

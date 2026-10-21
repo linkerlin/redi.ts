@@ -1,3 +1,16 @@
+## 2.36.0 — 2026-10-21
+
+Phase 58: batch field TTLs for native map caches. Full suite:
+**290 tests / 61 files**.
+
+- `RMapCacheNative.remainTimeToLive(keys[])`: one `HPTTL ... FIELDS n`
+  returning `Map<K, number>` (`-2` missing, `-1` no TTL); per-key fallback for
+  mocks/older servers.
+- `RMapCacheNative.clearExpire(keys[])`: one `HPERSIST ... FIELDS n`
+  returning `Map<K, boolean>`; single-key and whole-HASH forms unchanged.
+- Tests: 1 mock (keyed maps, empty arrays) + `test/live-phase58.test.ts` 1/1
+  (HPTTL values, HPERSIST clearing, missing keys, empty batches).
+
 ## 2.35.0 — 2026-10-21
 
 Phase 57: SVS-VAMANA structured search indexes. Full suite:

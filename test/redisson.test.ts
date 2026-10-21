@@ -2017,3 +2017,21 @@ describe('phase 56: RMap putAll batchSize (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 58: native map-cache batch TTL reads (mock)', () => {
+  it('returns keyed maps for remainTimeToLive/clearExpire batches', async () => {
+    const r = make();
+    const mn = r.getMapCacheNative<string, string>('p58:mn');
+    await mn.put('a', '1', 5000);
+    await mn.put('b', '2');
+    const ttls = await mn.remainTimeToLive(['a', 'b', 'missing']);
+    expect([...ttls.keys()]).toEqual(['a', 'b', 'missing']);
+    expect(ttls.has('a')).toBe(true);
+    const cleared = await mn.clearExpire(['a', 'b', 'missing']);
+    expect([...cleared.keys()]).toEqual(['a', 'b', 'missing']);
+    expect(cleared.get('a')).toBe(false);
+    expect(await mn.remainTimeToLive([])).toEqual(new Map());
+    expect(await mn.clearExpire([])).toEqual(new Map());
+    await r.shutdown();
+  });
+});

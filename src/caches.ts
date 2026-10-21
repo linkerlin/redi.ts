@@ -784,8 +784,24 @@ return 1`;
     }
   }
 
-  /** Java RMapCacheNative.remainTimeToLive(key) — HPTTL FIELDS 1. */
-  override async remainTimeToLive(key?: K): Promise<number> {
+  /** Java RMapCacheNative.remainTimeToLive(key) — HPTTL FIELDS 1;
+   *  Java remainTimeToLive(Set<K>) — one HPTTL FIELDS n batch. */
+  override async remainTimeToLive(key?: K): Promise<number>;
+  async remainTimeToLive(keys: K[]): Promise<Map<K, number>>;
+  override async remainTimeToLive(key?: K | K[]): Promise<number | Map<K, number>> {
+    if (Array.isArray(key)) {
+      if (key.length === 0) return new Map();
+      const fields = key.map((k) => this.encodeKey(k));
+      try {
+        const r: any = await this.redis.hpttl(this.name, 'FIELDS', fields.length, ...fields);
+        const arr: any[] = Array.isArray(r) ? r : [r];
+        return new Map(key.map((k, i) => [k, toNumber(arr[i], -2)]));
+      } catch {
+        const out = new Map<K, number>();
+        for (const k of key) out.set(k, await this.remainTTL(k));
+        return out;
+      }
+    }
     if (key === undefined) return super.remainTimeToLive();
     return this.remainTTL(key);
   }
@@ -925,7 +941,27 @@ return 1`;
 
   /** Remove the field TTL (HPERSIST; Java clearExpire). The no-arg call
    *  (RedisDataStructure) PERSISTs the whole HASH. */
-  override async clearExpire(key?: K): Promise<boolean> {
+  /** Remove the field TTL (HPERSIST; Java clearExpire). Single key, batch
+   *  keys (one HPERSIST FIELDS n), or no-arg PERSIST for the whole HASH. */
+  override async clearExpire(key?: K): Promise<boolean>;
+  async clearExpire(keys: K[]): Promise<Map<K, boolean>>;
+  override async clearExpire(key?: K | K[]): Promise<boolean | Map<K, boolean>> {
+    if (Array.isArray(key)) {
+      if (key.length === 0) return new Map();
+      const fields = key.map((k) => this.encodeKey(k));
+      try {
+        const hpersist = (this.redis as any).hpersist;
+        const r: any = typeof hpersist === 'function'
+          ? await hpersist.call(this.redis, this.name, 'FIELDS', fields.length, ...fields)
+          : await this.redis.call('HPERSIST', this.name, 'FIELDS', fields.length, ...fields);
+        const arr: any[] = Array.isArray(r) ? r : [r];
+        return new Map(key.map((k, i) => [k, toNumber(arr[i]) === 1]));
+      } catch {
+        const out = new Map<K, boolean>();
+        for (const k of key) out.set(k, await this.clearExpire(k));
+        return out;
+      }
+    }
     if (key === undefined) return super.clearExpire();
     const field = this.encodeKey(key);
     try {
