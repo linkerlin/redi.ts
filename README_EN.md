@@ -129,7 +129,7 @@ or raw schemas, index info/aliases/sort/params/aggregate/synonyms/dicts/config/
 spellcheck, `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/
 `profileAggregate`, aggregation cursors, `alter`),
 `RVectorSet` (VADD args, VEMB/RAW, VINFO, VLINKS WITHSCORES, VRANDMEMBER/
-VRANGE, VSIM names/scores/attributes), priority queues
+VRANGE, VSIM names/scores/attributes, iterator/stream), priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).

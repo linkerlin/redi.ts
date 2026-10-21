@@ -1454,6 +1454,22 @@ export class RVectorSet extends RedisDataStructure {
     if (count !== undefined) args.push(String(count));
     return ((await (this.redis as any).call(...args)) as string[]) ?? [];
   }
+  /** Java `iterator()`: VRANGE pages of `batchSize`, resuming with `(` + last. */
+  async *iterator(batchSize = 10): AsyncGenerator<string> {
+    let last: string | null = null;
+    for (;;) {
+      const start = last === null ? '-' : `(${last}`;
+      const buffer = await this.range(start, '+', batchSize);
+      if (buffer.length === 0) return;
+      last = buffer[buffer.length - 1];
+      for (const item of buffer) yield item;
+      if (buffer.length < batchSize) return;
+    }
+  }
+  /** Java `stream()`: lazy iterator. */
+  async *stream(batchSize = 10): AsyncGenerator<string> {
+    yield* this.iterator(batchSize);
+  }
   /** Java `getNeighbors(element)`: VLINKS → member names (unwraps the nested
    *  Redis reply shape). */
   async getNeighbors(element: string): Promise<string[]> {

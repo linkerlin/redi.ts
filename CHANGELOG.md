@@ -1,3 +1,14 @@
+## 2.33.0 — 2026-10-21
+
+Phase 55: RVectorSet iterator/stream. Full suite:
+**285 tests / 58 files**.
+
+- `RVectorSet.iterator(batchSize = 10)` pages with `VRANGE start + count`,
+  resuming at `(` + last element (exclusive) exactly like Java
+  `RedissonVectorSet`; `stream()` yields the same lazy sequence.
+- Tests: `test/live-phase55.test.ts` 1/1 (non-alphabetical insertion order,
+  batch sizes 2 and 4, empty set; capability-gated on VADD).
+
 ## 2.32.0 — 2026-10-21
 
 Phase 54: RDelayedQueue 4.6.1 surface. Full suite:
