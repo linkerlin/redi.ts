@@ -23,6 +23,7 @@ import {
   unpackMapCacheValue,
 } from './util.js';
 import { RMap } from './collections.js';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 /** Map-cache entry event (mirrors Redisson EntryEvent + MapEntryListener). */
 export type MapEntryEventType = 'CREATED' | 'UPDATED' | 'REMOVED' | 'EXPIRED';
@@ -546,8 +547,16 @@ export interface NativePutArgs<K = any, V = any> {
 }
 
 export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, {
+      onPut: 'hset',
+      onIncrement: 'hincrbyfloat',
+      onRemove: 'hdel',
+      onExpired: 'hexpired',
+      onClearExpire: 'hpersist',
+    });
   }
   async put(key: K, value: V, ttl: number | Date = 0): Promise<V | null> {
     const field = this.encodeKey(key);
@@ -974,6 +983,15 @@ return 1`;
     } catch {
       return false;
     }
+  }
+  /** Java `addListener(ObjectListener)`: HSET/HDEL/HINCRBYFLOAT plus native
+   *  HEXPIRED/HPERSIST field events. Field is null without subkey events. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  /** Java `removeListener(int)`; unknown ids are ignored. */
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
 }
 

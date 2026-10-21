@@ -1,3 +1,22 @@
+## 2.37.0 — 2026-10-21
+
+Phase 59: map field listeners. Full suite:
+**292 tests / 62 files**.
+
+- **`RMap.addListener` / `removeListener`**: `onPut` → `hset`,
+  `onIncrement` → `hincrbyfloat`, `onRemove` → `hdel`.
+- **`RMapCacheNative.addListener`** adds `onExpired` → `hexpired` and
+  `onClearExpire` → `hpersist` on top of put/incr/remove.
+- Redis 8.6 emits only `__keyevent` (no `__subkeyevent`), so callbacks get
+  `field = null` — the same fallback Java applies when no subkey event
+  arrives.
+- `RMap.addAndGet` stays on the exact-decimal Lua path (HSET), so it emits
+  `hset` rather than `hincrbyfloat`; raw HINCRBYFLOAT events still reach
+  `onIncrement`.
+- Tests: 1 mock (registration/removal on both maps) +
+  `test/live-phase59.test.ts` 1/1 (put/incr/remove, native expired/clear,
+  removal silence; keyspace config uses the shared lock).
+
 ## 2.36.0 — 2026-10-21
 
 Phase 58: batch field TTLs for native map caches. Full suite:

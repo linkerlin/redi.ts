@@ -74,11 +74,11 @@ key synchronizers through
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
 names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`, batched
-`putAll(map, batchSize)`)/
+`putAll(map, batchSize)`, put/incr/remove field listeners)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry, conditional
 `putIfAllKeysExist`/`Absent` batches, structured `PutArgs` HSETEX with
-KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`,
+KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`, field listeners,
 `fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`

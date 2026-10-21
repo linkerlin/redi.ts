@@ -12,7 +12,7 @@ import { duplicateRedis } from './util.js';
 
 export interface ObjectListener {
   onAdd?(key: string): void;
-  onRemove?(key: string): void;
+  onRemove?(key: string, field?: string | null): void;
   onCreateGroup?(key: string): void;
   onRemoveGroup?(key: string): void;
   onCreateConsumer?(key: string): void;
@@ -33,6 +33,14 @@ export interface ObjectListener {
   onStore?(key: string): void;
   /** Atomic structures: INCRBY/INCRBYFLOAT event. */
   onChange?(key: string): void;
+  /** RMap: HSET event (field is null when only keyevent is available). */
+  onPut?(key: string, field: string | null): void;
+  /** RMap: HINCRBYFLOAT event. */
+  onIncrement?(key: string, field: string | null): void;
+  /** RMapCacheNative: HEXPIRED event. */
+  onExpired?(key: string, field?: string | null): void;
+  /** RMapCacheNative: HPERSIST event. */
+  onClearExpire?(key: string, field: string | null): void;
 }
 
 interface KeyspaceSub {
@@ -73,7 +81,10 @@ export class KeyspaceListenerHub {
             if (pat !== pattern) return;
             if (this.filterName && msg !== this.name) return;
             try {
-              (listener[kind] as (key: string) => void).call(listener, this.filterName ? this.name : msg);
+              // Field-aware listeners receive null unless a subkey event exists
+              // (Redis 8.6 emits only keyevent; Java falls back the same way).
+              (listener[kind] as (key: string, field?: string | null) => void)
+                .call(listener, this.filterName ? this.name : msg, null);
             } catch { /* user callback */ }
           };
           // Attach before PSUBSCRIBE so no event in the gap is lost.

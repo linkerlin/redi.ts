@@ -166,8 +166,14 @@ export class RBuckets {
 }
 
 export class RMap<K = any, V = any> extends RedisKeyedStructure<K> {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, {
+      onPut: 'hset',
+      onIncrement: 'hincrbyfloat',
+      onRemove: 'hdel',
+    });
   }
   async get(key: K): Promise<V | null> {
     const raw = await this.redis.hget(this.name, this.encodeKey(key));
@@ -401,6 +407,16 @@ return tostring(n)`;
   }
   async clear(): Promise<void> {
     await this.redis.del(this.name);
+  }
+  /** Java `addListener(ObjectListener)`: MapPut/MapIncr/MapRemove events from
+   *  hset/hincrbyfloat/hdel keyspace notifications. Field is null on servers
+   *  without `__subkeyevent` (the Java fallback path). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  /** Java `removeListener(int)`; unknown ids are ignored. */
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
   override async delete(): Promise<boolean> {
     return super.delete();

@@ -2035,3 +2035,25 @@ describe('phase 58: native map-cache batch TTL reads (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 59: map field listeners (mock)', () => {
+  it('registers/removes listeners on RMap and RMapCacheNative', async () => {
+    const r = make();
+    const m = r.getMap<string, string>('p59:m');
+    const mn = r.getMapCacheNative<string, string>('p59:mn');
+    const mid = await m.addListener({ onPut: () => undefined, onIncrement: () => undefined, onRemove: () => undefined });
+    const nid = await mn.addListener({
+      onPut: () => undefined,
+      onRemove: () => undefined,
+      onExpired: () => undefined,
+      onClearExpire: () => undefined,
+    });
+    expect(mid).toBeGreaterThan(0);
+    expect(nid).toBeGreaterThan(0);
+    await m.removeListener(mid);
+    await mn.removeListener(nid);
+    await m.removeListener(mid);
+    await mn.removeListener(999999);
+    await r.shutdown();
+  });
+});
