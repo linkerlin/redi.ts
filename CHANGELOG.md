@@ -1,3 +1,23 @@
+## 2.42.0 — 2026-10-21
+
+Phase 64: local cached map expiration events. Full suite:
+**302 tests / 67 files**.
+
+- `LocalCachedMapOptions.expirationEventPolicy`:
+  `DONT_SUBSCRIBE` / `SUBSCRIBE_WITH_KEYEVENT_PATTERN` (default) /
+  `SUBSCRIBE_WITH_KEYSPACE_CHANNEL`.
+- In keyevent mode the invalidation connection PSUBSCRIBEs `expired` and
+  `hexpired`; any event for the map key clears the near cache (Redis 8.6
+  keyevent carries only the key name, so field-level expiry invalidates the
+  whole local map entry set for that key).
+- Reconnection re-subscribes the expiration patterns as well.
+- Tests: 1 mock (both policies) + `test/live-phase64.test.ts` 1/1 (expiry
+  clears the cache; DONT_SUBSCRIBE keeps it; keyspace config uses the shared
+  lock).
+- Test stabilization: SVS KNN assertions check the result set rather than
+  approximate ranking order (SVS may return equidistant/small-set results in
+  any order).
+
 ## 2.41.0 — 2026-10-21
 
 Phase 63: local cached map reconnection strategies. Full suite:

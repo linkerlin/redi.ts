@@ -82,7 +82,7 @@ KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`, field listeners,
 `fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`, NONE/CLEAR/LOAD
-reconnection strategies), `RSet`/`SetCache`
+reconnection strategies, keyevent expiration policy), `RSet`/`SetCache`
 (`countIntersection` with LIMIT, sadd/srem/spop/store keyspace listeners,
 SetCache zadd/zrem listeners, lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,

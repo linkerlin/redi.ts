@@ -58,7 +58,7 @@
 | RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable); `delete()/clear()` removes idle + touch; `addListener/removeListener` for zadd/zrem (SetExpiredListener not implemented) | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) + live phase 16 (zero residue ✅) + live phase 62（zadd/zrem 监听 ✅） |
 | RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids; `delete()/clear()` reads the HASH first and removes every child collection | WIRE_OK + live phase 16 (Java reads empty after delete ✅) |
 | RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE`; `delete()/clear()`/`unlink()` also removes the TTL ZSET and (Native) child collections; opt-in `enablePeriodicEviction(intervalMs)` / `evictExpired()` sweeps child + HASH field + TTL member (default lazy) | WIRE_OK / NATIVE_OK + live phase 16 (zero residue ✅) + live phase 22 (周期清扫 ✅) |
-| RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试; near-cache honours `timeToLiveMs`/`maxIdleMs`/`maxSize` + `evictionPolicy` LRU/LFU (entries track expiry, last access and hit count; local reads await subscription ack); `getCachedMap()` snapshot; bounded `preloadCache(count)` (HSCAN) ✅ (2.16.0); 重连策略 NONE/CLEAR/LOAD（订阅重连后清空或按本地已缓存字段回源刷新）✅ (2.41.0); Java binary protocol not ported — disable near-cache for mixed deploys; `loader/writer` deliberately not ported (external-store semantics, no wire impact) | PARTIAL + live phase 16 (TTL/idle ✅) + mock phase 22 (LRU/LFU + view ✅) + live phase 38 (preload count ✅) + live phase 63 (reconnection ✅) |
+| RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试; near-cache honours `timeToLiveMs`/`maxIdleMs`/`maxSize` + `evictionPolicy` LRU/LFU (entries track expiry, last access and hit count; local reads await subscription ack); `getCachedMap()` snapshot; bounded `preloadCache(count)` (HSCAN) ✅ (2.16.0); 重连策略 NONE/CLEAR/LOAD（订阅重连后清空或按本地已缓存字段回源刷新）✅ (2.41.0)；`expirationEventPolicy`（默认 keyevent expired/hexpired 清空近端缓存；DONT_SUBSCRIBE 可关闭）✅ (2.42.0); Java binary protocol not ported — disable near-cache for mixed deploys; `loader/writer` deliberately not ported (external-store semantics, no wire impact) | PARTIAL + live phase 16 (TTL/idle ✅) + mock phase 22 (LRU/LFU + view ✅) + live phase 38 (preload count ✅) + live phase 63 (reconnection ✅) + live phase 64 (expiration policy ✅) |
 | RTopic / RPatternTopic / RShardedTopic | `PUBLISH`/`PSUBSCRIBE`/`SSUBSCRIBE` + JSON（分片投递走 `smessage` 事件）; handlers attached before subscribe; Sharded saves conn and supports removeListener/removeAllListeners; management: `getChannelNames`, `countListeners` (local), `countSubscribers` (`PUBSUB NUMSUB`; sharded `SHARDNUMSUB` with fallbacks), Pattern `getPatternNames`/`getActiveTopics` (`PUBSUB CHANNELS`), `StatusListener` (onSubscribe/onUnsubscribe; removeListener handles both listener kinds), `removeListener(handler)` by callback identity | WIRE_OK / NATIVE_OK + live phase 4/5/17（Topic/Sharded/Pattern 双向 + lifecycle ✅） + live phase 26（counts/active topics ✅） + live phase 30（status callbacks ✅） + live phase 32（handler removal ✅） |
 | RReliableTopic | STREAM field **`m`** + one subscriber group per client instance (all listeners share it; created at `0`, destroyed when the last listener leaves) + `{name}:timeout` heartbeat ZSET (120s; expired groups destroyed, stream trimmed to the earliest group's last-delivered id, Java 4.6.1 maintenance Lua port); `publish` returns the group count (XADD + XINFO GROUPS); XREADGROUP BLOCK on a dedicated connection; `unlink()` clears stream+timeout | WIRE_OK + live phase 3/17 (双向投递） + live phase 39 (单实例单组/publish 计数/自动 trim ✅) |
 | RStream | STREAM, field names **and** values JSON-encoded; group mgmt + pending/claim/autoClaim + info/list + add/read opts + nack/ackdel; `fastClaim`/`fastAutoClaim` (XCLAIM/XAUTOCLAIM JUSTID → ids), `readMany`/`readGroupMany` (one XREAD/XREADGROUP over several streams; per-stream groups supported) and `addListener(ObjectListener)` via `__keyevent@*:xadd|xdel|xgroup-*` (requires `notify-keyspace-events` K+E); blocking `readGroupWith({blockMs})` uses a dedicated connection | WIRE_OK + live bidirectional ✅ + live phase 13/14/17 ✅ + live phase 26（JUSTID/多流读 ✅） + live phase 31（keyspace 六事件/多流 group 读 ✅; keyspace 未配置时无事件） + live phase 32（每流独立 group ✅） |
@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 300 tests / 66 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 302 tests / 67 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
@@ -96,8 +96,8 @@
   queue surface, phase-55 VectorSet iterators, phase-56 batched putAll,
   phase-57 SVS-VAMANA vectors, phase-58 batch TTLs, phase-59 map field
   listeners, phase-60 conditional compareAndDelete, phase-61 IncrementArgs,
-  phase-62 SetCache listeners/newCondition and phase-63 local-cache
-  reconnection), `interop`
+  phase-62 SetCache listeners/newCondition, phase-63 local-cache reconnection
+  and phase-64 expiration events), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -206,6 +206,8 @@
   1/1 PASS),
   `live-phase63` (local cached map CLEAR/LOAD after forced reconnect, 1/1
   PASS),
+  `live-phase64` (keyevent expiration clears the near cache; DONT_SUBSCRIBE
+  keeps it, 1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

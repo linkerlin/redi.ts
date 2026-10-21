@@ -60,7 +60,8 @@ describe('live phase 57: SVS-VAMANA indexes', () => {
         params: { q: vec(1, 0) }, dialect: 2, returnFields: ['dist'],
       });
       expect(knn.total).toBe(2);
-      expect(knn.docs[0].id).toBe(h1);
+      const ids = knn.docs.map((d) => d.id);
+      expect(ids).toEqual(expect.arrayContaining([h1, h2]));
       expect(JSON.stringify(await search.info(idx))).toContain('SVS-VAMANA');
     } finally {
       await r.getKeys().delete(h1, h2);

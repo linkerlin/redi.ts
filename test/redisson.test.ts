@@ -2153,3 +2153,18 @@ describe('phase 63: local cached map reconnection options (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 64: local cached map expiration policy (mock)', () => {
+  it('accepts both expiration policies without affecting local reads', async () => {
+    const r = make();
+    const d = r.getLocalCachedMap<string, string>('p64:d');
+    const none = r.getLocalCachedMap<string, string>('p64:n', { expirationEventPolicy: 'DONT_SUBSCRIBE' });
+    await d.put('a', '1');
+    await none.put('a', '2');
+    expect(await d.get('a')).toBe('1');
+    expect(await none.get('a')).toBe('2');
+    expect(d.getCachedMap().get('a')).toBe('1');
+    expect(none.getCachedMap().get('a')).toBe('2');
+    await r.shutdown();
+  });
+});

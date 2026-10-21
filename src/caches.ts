@@ -1365,6 +1365,9 @@ export interface LocalCachedMapOptions {
   disableNearCache?: boolean;
   /** Behaviour when the invalidation subscription reconnects. */
   reconnectionStrategy?: 'NONE' | 'CLEAR' | 'LOAD';
+  /** Drop near-cache entries when the Redis key/fields expire (default
+   *  SUBSCRIBE_WITH_KEYEVENT_PATTERN, matching Java 4.6.1 defaults). */
+  expirationEventPolicy?: 'DONT_SUBSCRIBE' | 'SUBSCRIBE_WITH_KEYEVENT_PATTERN' | 'SUBSCRIBE_WITH_KEYSPACE_CHANNEL';
 }
 
 export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
@@ -1376,10 +1379,17 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
   private ready: Promise<void> = Promise.resolve();
   private subscribed = false;
   private reconnectBusy = false;
+  private readonly expirePatterns = ['__keyevent@*:expired', '__keyevent@*:hexpired'];
 
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec(), opts: LocalCachedMapOptions = {}, clientTag = '') {
     super(redis, name, codec);
-    this.opts = { evictionPolicy: 'NONE', syncStrategy: 'INVALIDATE', reconnectionStrategy: 'NONE', ...opts };
+    this.opts = {
+      evictionPolicy: 'NONE',
+      syncStrategy: 'INVALIDATE',
+      reconnectionStrategy: 'NONE',
+      expirationEventPolicy: 'SUBSCRIBE_WITH_KEYEVENT_PATTERN',
+      ...opts,
+    };
     this.clientTag = clientTag || Math.random().toString(36).slice(2);
     this.invalChannel = `${name}:inval`;
     if (!this.opts.disableNearCache) this.ready = this.listen();
@@ -1423,7 +1433,16 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
         // apply the configured strategy.
         if (this.subscribed) void this.applyReconnectionStrategy();
       });
+      const expiryEnabled = (this.opts.expirationEventPolicy ?? 'SUBSCRIBE_WITH_KEYEVENT_PATTERN') !== 'DONT_SUBSCRIBE';
+      if (expiryEnabled) {
+        (this.sub as any).on('pmessage', (_pat: string, _ch: string, msg: string) => {
+          // Redis 8.6 keyevent only carries the key name; expiring a HASH or
+          // any field invalidates the whole near cache for that key.
+          if (msg === this.name) this.cache.clear();
+        });
+      }
       await (this.sub as any).subscribe(this.invalChannel);
+      if (expiryEnabled) await (this.sub as any).psubscribe(...this.expirePatterns);
       this.subscribed = true;
     } catch {
       this.sub = null;
@@ -1438,7 +1457,12 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
     if (strategy === 'NONE' || this.reconnectBusy) return;
     this.reconnectBusy = true;
     try {
-      try { await (this.sub as any)?.subscribe?.(this.invalChannel); } catch { /* noop */ }
+      try {
+        await (this.sub as any)?.subscribe?.(this.invalChannel);
+        if ((this.opts.expirationEventPolicy ?? 'SUBSCRIBE_WITH_KEYEVENT_PATTERN') !== 'DONT_SUBSCRIBE') {
+          await (this.sub as any)?.psubscribe?.(...this.expirePatterns);
+        }
+      } catch { /* noop */ }
       if (strategy === 'CLEAR') {
         this.cache.clear();
         return;
