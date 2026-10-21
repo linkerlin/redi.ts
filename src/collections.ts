@@ -11,8 +11,14 @@ import { luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util
 import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 export class RBucket<V = any> extends RedisDataStructure {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, {
+      onSet: 'set',
+      onExpired: 'expired',
+      onDeleted: 'del',
+    });
   }
   async get(): Promise<V | null> {
     const raw = await this.redis.get(this.name);
@@ -88,6 +94,13 @@ return 0`;
       if (v !== null) await this.redis.pexpire(this.name, ttlMs);
       return v;
     }
+  }
+  /** Java `addListener(ObjectListener)`: onSet → `set`, plus expired/del. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
   override async delete(): Promise<boolean> {
     return super.delete();
@@ -1578,8 +1591,15 @@ export interface ScoredEntry<V> {
 export type ZAggregate = 'SUM' | 'MIN' | 'MAX';
 
 export class RScoredSortedSet<V = any> extends RedisDataStructure {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, {
+      onAdd: 'zadd',
+      onRemove: 'zrem',
+      onIncrement: 'zincr',
+      onStore: ['zunionstore', 'zinterstore', 'zdiffstore'],
+    });
   }
   async add(score: number, value: V): Promise<boolean> {
     return ((await this.redis.zadd(this.name, String(score), this.encodeValue(value))) as number) > 0;
@@ -1987,6 +2007,13 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
   async readDiffEntries(...names: string[]): Promise<ScoredEntry<V>[]> {
     const m: string[] = await this.redis.zdiff(1 + names.length, this.name, ...names, 'WITHSCORES');
     return this.decodeScoredFlat(m);
+  }
+  /** Java `addListener(ObjectListener)`: zadd/zrem/zincr and store events. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
 }
 

@@ -1,3 +1,17 @@
+## 2.45.0 — 2026-10-22
+
+Phase 67: bucket/zset listeners + MultiLock rejection. Full suite:
+**307 tests / 70 files**.
+
+- `RBucket.addListener` / `removeListener`: `onSet` → `set`, plus
+  `onExpired`/`onDeleted`.
+- `RScoredSortedSet.addListener`: `onAdd` → `zadd`, `onRemove` → `zrem`,
+  `onIncrement` → `zincr`, `onStore` → `zunionstore`/`zinterstore`/`zdiffstore`.
+- `RMultiLock` / `RRedLock` `addListener`/`removeListener` now throw
+  UnsupportedOperationException, matching Java 4.6.1.
+- Tests: 1 mock + `test/live-phase67.test.ts` 1/1 (bucket set/expired/del,
+  zset add/incr/remove/store, removal; shared keyspace config lock).
+
 ## 2.44.0 — 2026-10-21
 
 Phase 66: probabilistic advanced argument objects. Full suite:

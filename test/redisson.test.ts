@@ -2190,3 +2190,33 @@ describe('phase 65: lock keyspace listeners (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 67: bucket/zset listeners + MultiLock rejection (mock)', () => {
+  it('registers listeners and rejects MultiLock/RedLock listeners', async () => {
+    const r = make();
+    const bucket = r.getBucket<string>('p67:b');
+    const zset = r.getScoredSortedSet<string>('p67:z');
+    const bid = await bucket.addListener({
+      onSet: () => undefined,
+      onExpired: () => undefined,
+      onDeleted: () => undefined,
+    });
+    const zid = await zset.addListener({
+      onAdd: () => undefined,
+      onRemove: () => undefined,
+      onIncrement: () => undefined,
+      onStore: () => undefined,
+    });
+    expect(bid).toBeGreaterThan(0);
+    expect(zid).toBeGreaterThan(0);
+    await bucket.removeListener(bid);
+    await zset.removeListener(zid);
+    await bucket.removeListener(bid);
+    await zset.removeListener(999999);
+
+    const lock = r.getLock('p67:l');
+    expect(() => r.getMultiLock(lock).addListener({ onExpired: () => undefined })).toThrow(/Unsupported/);
+    expect(() => r.getRedLock(lock).removeListener(1)).toThrow(/Unsupported/);
+    await r.shutdown();
+  });
+});

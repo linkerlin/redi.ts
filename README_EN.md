@@ -91,9 +91,9 @@ SetCache zadd/zrem listeners, lazy `iterator`/`stream`),
 ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 `addIf*`/`addAll*` conditionals, `random`/`randomEntries`, blocking
 `pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, lazy
-`iterator`/`stream`/`entriesIterator`, deletion by
+`iterator`/`stream`/`entriesIterator`, zadd/zrem/zincr/store listeners, deletion by
 score/rank),
-`RLexSortedSet` (raw members), `RBucket`/`RBuckets` (NX/XX conditional
+`RLexSortedSet` (raw members), `RBucket` (set/expired/del listeners)/`RBuckets` (NX/XX conditional
 multi-set via Redis 8 `MSETEX`)/`RBinaryStream`/`RJsonBucket` (document/path
 read-write, NX/XX/CAS, string/array/number ops, `*Multi` match lists,
 multi-path `get(codec, paths...)`, merge/keys/type/toggle)/

@@ -1509,6 +1509,13 @@ export class RMultiLock {
   newCondition(): never {
     throw new Error('UnsupportedOperationException');
   }
+  /** Java 4.6.1 MultiLock listener APIs throw. */
+  addListener(_listener: ObjectListener): never {
+    throw new Error('UnsupportedOperationException');
+  }
+  removeListener(_listenerId: number): never {
+    throw new Error('UnsupportedOperationException');
+  }
 }
 
 export class RRedLock {
@@ -1581,6 +1588,13 @@ export class RRedLock {
   }
   /** Java 4.6.1 RedLock `newCondition()` throws. */
   newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
+  /** Java 4.6.1 RedLock listener APIs throw (inherited from MultiLock). */
+  addListener(_listener: ObjectListener): never {
+    throw new Error('UnsupportedOperationException');
+  }
+  removeListener(_listenerId: number): never {
     throw new Error('UnsupportedOperationException');
   }
 }
