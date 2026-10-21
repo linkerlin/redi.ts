@@ -45,6 +45,42 @@ return 0`;
 
 export type LongValue = number | bigint;
 
+export type CompareCondition = '<' | '<=' | '>' | '>=' | '==' | '~=';
+
+export interface CompareAndDeleteArgs {
+  condition: CompareCondition;
+  threshold: number;
+}
+
+/** TS shape of Java's static `CompareAndDeleteArgs` factories. */
+export const CompareAndDeleteArgs = {
+  less: (threshold: number): CompareAndDeleteArgs => ({ condition: '<', threshold }),
+  lessOrEqual: (threshold: number): CompareAndDeleteArgs => ({ condition: '<=', threshold }),
+  greater: (threshold: number): CompareAndDeleteArgs => ({ condition: '>', threshold }),
+  greaterOrEqual: (threshold: number): CompareAndDeleteArgs => ({ condition: '>=', threshold }),
+  equal: (threshold: number): CompareAndDeleteArgs => ({ condition: '==', threshold }),
+  notEqual: (threshold: number): CompareAndDeleteArgs => ({ condition: '~=', threshold }),
+};
+
+const COMPARE_AND_DELETE = `local currValue = redis.call('get', KEYS[1])
+if currValue == false then return 0 end
+currValue = tonumber(currValue)
+local threshold = tonumber(ARGV[1])
+local op = ARGV[2]
+local match = false
+if op == '<' then match = currValue < threshold
+elseif op == '<=' then match = currValue <= threshold
+elseif op == '>' then match = currValue > threshold
+elseif op == '>=' then match = currValue >= threshold
+elseif op == '==' then match = currValue == threshold
+elseif op == '~=' then match = currValue ~= threshold
+end
+if match then
+    redis.call('del', KEYS[1])
+    return 1
+end
+return 0`;
+
 function parseLong(raw: string | null): LongValue {
   if (raw === null || raw === undefined) return 0;
   if (/^-?\d+$/.test(raw) && !Number.isSafeInteger(Number(raw))) {
@@ -106,8 +142,16 @@ export class RAtomicLong extends RedisDataStructure {
   async compareAndSet(expect: LongValue, update: LongValue): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_CAS, 1, this.name, String(expect), String(update))) === 1;
   }
-  async compareAndDelete(expect: LongValue): Promise<boolean> {
-    return toNumber(await luaEval(this.redis, ATOMIC_DEL, 1, this.name, String(expect))) === 1;
+  async compareAndDelete(expect: LongValue): Promise<boolean>;
+  async compareAndDelete(args: CompareAndDeleteArgs): Promise<boolean>;
+  async compareAndDelete(expectOrArgs: LongValue | CompareAndDeleteArgs): Promise<boolean> {
+    if (typeof expectOrArgs === 'object') {
+      return toNumber(await luaEval(
+        this.redis, COMPARE_AND_DELETE, 1, this.name,
+        String(expectOrArgs.threshold), expectOrArgs.condition,
+      )) === 1;
+    }
+    return toNumber(await luaEval(this.redis, ATOMIC_DEL, 1, this.name, String(expectOrArgs))) === 1;
   }
   /** Java `addListener(ObjectListener)`: IncrByListener → `incrby` keyspace
    *  events (requires K/E notifications). */
@@ -179,8 +223,16 @@ return old`, 1, this.name, String(delta));
   async setIfGreater(threshold: number, value: number): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_SET_IF, 1, this.name, 'greater', String(threshold), String(value))) === 1;
   }
-  async compareAndDelete(expect: number): Promise<boolean> {
-    return toNumber(await luaEval(this.redis, DOUBLE_COMPARE_DELETE, 1, this.name, String(expect))) === 1;
+  async compareAndDelete(expect: number): Promise<boolean>;
+  async compareAndDelete(args: CompareAndDeleteArgs): Promise<boolean>;
+  async compareAndDelete(expectOrArgs: number | CompareAndDeleteArgs): Promise<boolean> {
+    if (typeof expectOrArgs === 'object') {
+      return toNumber(await luaEval(
+        this.redis, COMPARE_AND_DELETE, 1, this.name,
+        String(expectOrArgs.threshold), expectOrArgs.condition,
+      )) === 1;
+    }
+    return toNumber(await luaEval(this.redis, DOUBLE_COMPARE_DELETE, 1, this.name, String(expectOrArgs))) === 1;
   }
   async compareAndSet(expect: number, update: number): Promise<boolean> {
     const s = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;

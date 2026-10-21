@@ -1,3 +1,17 @@
+## 2.38.0 — 2026-10-21
+
+Phase 60: conditional compareAndDelete. Full suite:
+**294 tests / 63 files**.
+
+- `RAtomicLong` / `RAtomicDouble.compareAndDelete(CompareAndDeleteArgs)`:
+  atomic `<`, `<=`, `>`, `>=`, `==`, `~=` threshold checks followed by DEL
+  (single Lua, same shape as Java 4.6.1).
+- `CompareAndDeleteArgs` exposes the Java factory helpers
+  (`less`, `lessOrEqual`, `greater`, `greaterOrEqual`, `equal`, `notEqual`);
+  the existing equality overload (`compareAndDelete(value)`) is unchanged.
+- Tests: 1 mock + `test/live-phase60.test.ts` 1/1 (all operators, mismatch
+  leaves the value, Long and Double equality).
+
 ## 2.37.0 — 2026-10-21
 
 Phase 59: map field listeners. Full suite:

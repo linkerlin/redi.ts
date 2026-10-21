@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
-import { Redisson, StringCodec, JsonCodec } from '../src';
+import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs } from '../src';
 import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
@@ -2054,6 +2054,34 @@ describe('phase 59: map field listeners (mock)', () => {
     await mn.removeListener(nid);
     await m.removeListener(mid);
     await mn.removeListener(999999);
+    await r.shutdown();
+  });
+});
+
+describe('phase 60: conditional compareAndDelete (mock)', () => {
+  it('supports all comparison operators without deleting on mismatch', async () => {
+    const r = make();
+    const al = r.getAtomicLong('p60:al');
+    const ad = r.getAtomicDouble('p60:ad');
+    await al.set(5);
+    expect(await al.compareAndDelete(CompareAndDeleteArgs.greater(4))).toBe(true);
+    expect(await al.get()).toBe(0);
+
+    await al.set(5);
+    expect(await al.compareAndDelete(CompareAndDeleteArgs.lessOrEqual(4))).toBe(false);
+    expect(await al.get()).toBe(5);
+    expect(await al.compareAndDelete(CompareAndDeleteArgs.equal(5))).toBe(true);
+    expect(await al.get()).toBe(0);
+    expect(await al.compareAndDelete(CompareAndDeleteArgs.greater(0))).toBe(false);
+    expect(await al.compareAndDelete(7)).toBe(false);
+
+    await ad.set(1.5);
+    expect(await ad.compareAndDelete(CompareAndDeleteArgs.notEqual(2))).toBe(true);
+    expect(await ad.get()).toBe(0);
+    await ad.set(1.5);
+    expect(await ad.compareAndDelete(CompareAndDeleteArgs.lessOrEqual(1.4))).toBe(false);
+    expect(await ad.get()).toBe(1.5);
+    expect(await ad.compareAndDelete(1.5)).toBe(true);
     await r.shutdown();
   });
 });
