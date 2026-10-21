@@ -1,3 +1,27 @@
+## 2.39.0 — 2026-10-21
+
+Phase 61: IncrementArgs via Lua-CAS. Full suite:
+**296 tests / 64 files**.
+
+- `RAtomicLong.incrementAndGet(LongIncrementArgs)` and
+  `RAtomicDouble.incrementAndGet(DoubleIncrementArgs)`: `by`, `lowerBound`,
+  `upperBound`, `saturate`, `timeToLiveMs`, `expireAt`, `persist`,
+  `expireIfNotSet` (ENX semantics: keep the old TTL).
+- Vanilla Redis has no INCREX/DECREX, so this is a compare-and-set loop with
+  server-side Lua: exact BigInt arithmetic for Long, existing TTL preserved by
+  default, PERSIST/PX/PXAT applied atomically in the CAS.
+- Out-of-bounds without SATURATE returns the current value and leaves value +
+  TTL untouched (Java docs semantics).
+- Tests: 1 mock (bounds/saturation, BigInt, 10 concurrent CAS increments,
+  Double) + `test/live-phase61.test.ts` 1/1 (20 concurrent increments, BigInt
+  2^53+1, TTL/ENX/PERSIST/PXAT, Double bounds).
+- Fix found during regression: Redis `VLINKS` returns one neighbor array per
+  HNSW layer; `getNeighbors`/`getNeighborEntries` now flatten all layers like
+  Java instead of reading only layer 0.
+- Test stabilization: the Java reliable-topic fanout probe deduplicates group
+  deliveries (Redisson can occasionally deliver the same group twice), while
+  still requiring both G1 and G2.
+
 ## 2.38.0 — 2026-10-21
 
 Phase 60: conditional compareAndDelete. Full suite:

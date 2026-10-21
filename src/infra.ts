@@ -1487,20 +1487,29 @@ export class RVectorSet extends RedisDataStructure {
   async *stream(batchSize = 10): AsyncGenerator<string> {
     yield* this.iterator(batchSize);
   }
-  /** Java `getNeighbors(element)`: VLINKS → member names (unwraps the nested
-   *  Redis reply shape). */
+  /** Java `getNeighbors(element)`: VLINKS → member names. Redis returns one
+   *  array per HNSW layer; Java flattens all layers, and so do we. */
   async getNeighbors(element: string): Promise<string[]> {
     const r: any = await this.redis.call('VLINKS', this.name, element);
-    const first = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : r;
-    return (first ?? []) as string[];
+    return this.flattenLinks(r) as string[];
   }
   /** Java `getNeighborEntries(element)`: VLINKS ... WITHSCORES. */
   async getNeighborEntries(element: string): Promise<VectorScoredEntry[]> {
     const r: any = await this.redis.call('VLINKS', this.name, element, 'WITHSCORES');
-    const flat = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : (r ?? []);
+    const flat = this.flattenLinks(r);
     const out: VectorScoredEntry[] = [];
     for (let i = 0; i + 1 < flat.length; i += 2) {
       out.push({ value: String(flat[i]), score: Number(flat[i + 1]) });
+    }
+    return out;
+  }
+
+  private flattenLinks(raw: any): any[] {
+    if (!Array.isArray(raw)) return raw === null || raw === undefined ? [] : [raw];
+    const out: any[] = [];
+    for (const layer of raw) {
+      if (Array.isArray(layer)) out.push(...layer);
+      else out.push(layer);
     }
     return out;
   }

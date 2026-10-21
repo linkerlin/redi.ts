@@ -2085,3 +2085,31 @@ describe('phase 60: conditional compareAndDelete (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 61: IncrementArgs emulation (mock)', () => {
+  it('respects bounds/saturation, BigInt and concurrent CAS retries', async () => {
+    const r = make();
+    const al = r.getAtomicLong('p61:l');
+    const ad = r.getAtomicDouble('p61:d');
+    await al.set(8);
+    expect(await al.incrementAndGet({ by: 5, lowerBound: 0, upperBound: 10, saturate: true })).toBe(10);
+    expect(await al.incrementAndGet({ by: 5, upperBound: 10, saturate: true })).toBe(10);
+    await al.set(9);
+    expect(await al.incrementAndGet({ by: 5, upperBound: 10 })).toBe(9);
+    expect(await al.get()).toBe(9);
+
+    await al.set(9007199254740993n);
+    expect(await al.incrementAndGet({ by: 1 })).toBe(9007199254740994n);
+
+    await al.set(0);
+    await Promise.all(Array.from({ length: 10 }, () => al.incrementAndGet({ by: 2 })));
+    expect(await al.get()).toBe(20);
+
+    await ad.set(1.5);
+    expect(await ad.incrementAndGet({ by: 0.25, lowerBound: 0, upperBound: 1.6, saturate: true })).toBe(1.6);
+    await ad.set(1.5);
+    expect(await ad.incrementAndGet({ by: 1, upperBound: 2 })).toBe(1.5);
+    expect(await ad.incrementAndGet({ by: 0.5, lowerBound: 0, upperBound: 2 })).toBe(2);
+    await r.shutdown();
+  });
+});

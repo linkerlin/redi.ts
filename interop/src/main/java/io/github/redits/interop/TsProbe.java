@@ -742,18 +742,15 @@ public final class TsProbe {
                     long timeoutMs = args.length >= 3 ? Long.parseLong(args[2]) : 12000;
                     String resultKey = args.length >= 4 ? args[3] : (topic + ":fanout-result");
                     var latch = new java.util.concurrent.CountDownLatch(2);
-                    var got = new java.util.concurrent.CopyOnWriteArrayList<String>();
+                    var got = java.util.Collections.synchronizedSet(new java.util.TreeSet<String>());
                     var rt = redisson.getReliableTopic(topic);
                     rt.addListener(String.class, (ch, msg) -> {
-                        got.add("G1:" + msg);
-                        latch.countDown();
+                        if (got.add("G1:" + msg)) latch.countDown();
                     });
                     rt.addListener(String.class, (ch, msg) -> {
-                        got.add("G2:" + msg);
-                        latch.countDown();
+                        if (got.add("G2:" + msg)) latch.countDown();
                     });
                     boolean ok = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    java.util.Collections.sort(got);
                     String verdict = ok ? ("FANOUT:" + String.join(",", got)) : "FANOUT_TIMEOUT";
                     try {
                         redisson.<String>getBucket(resultKey).set(verdict);

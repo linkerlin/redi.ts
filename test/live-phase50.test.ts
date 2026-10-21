@@ -33,6 +33,15 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
+const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<boolean> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await check()) return true;
+    await sleep(20);
+  }
+  return check();
+};
 
 describe('live phase 50: RVectorSet deep API', () => {
   it('supports add args, raw vectors, scored neighbors and similar queries', async () => {
@@ -61,9 +70,11 @@ describe('live phase 50: RVectorSet deep API', () => {
       const raw = await vs.getRawVector('a');
       expect(Array.isArray(raw)).toBe(true);
       expect(raw.some((x) => Buffer.isBuffer(x))).toBe(true);
+      await waitFor(async () => (await vs.getNeighbors('a')).length > 0);
       const neighbors = await vs.getNeighbors('a');
       expect(neighbors.length).toBeGreaterThan(0);
       expect(neighbors.every((x) => typeof x === 'string')).toBe(true);
+      await waitFor(async () => (await vs.getNeighborEntries('a')).length > 0);
       const neighborEntries = await vs.getNeighborEntries('a');
       expect(neighborEntries.length).toBeGreaterThan(0);
       expect(typeof neighborEntries[0].score).toBe('number');

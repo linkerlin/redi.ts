@@ -50,7 +50,7 @@
 | RScoredSortedSet | ZSET + JSON members; union/intersection/diff store+read+count (store 版只算 others 存入 self，WEIGHTS/AGGREGATE/LIMIT 位置对齐）；分数族：`firstScore`/`lastScore`、`firstEntry`/`lastEntry`、`addScore`/`addScoreAndGetRank`/`addScoreAndGetRevRank`/`addAndGetRank`/`addAndGetRevRank`、`count`、`entryRange`（索引+分数）、`valueRangeReversed`/`entryRangeReversed`（分数 4/6 参与索引 2 参；Java 语义 `startScore`=下界，命令 `ZRANGE max min BYSCORE REV`）、`removeRangeByRank`/`removeRangeByScore`；`addIfAbsent`(NX)/`addIfExists`(XX CH)/`addIfLess`(LT CH)/`addIfGreater`(GT CH) 与 `addAll*` 条件批量；`random`/`randomEntries`（ZRANDMEMBER [WITHSCORES]）；非阻塞 `pollFirst/LastEntry`（ZPOPMIN/MAX）与阻塞 `pollFirst/LastWithTimeout`、`pollFirst/LastFromAny`（BZPOPMIN/MAX、BZMPOP，独立连接+浮点秒）；惰性 `iterator`/`stream`/`entriesIterator`（ZSCAN）；`rank`/`revRank` 回 `number \| null`（Java 语义） | WIRE_OK + live bidirectional ✅ + live phase 11 ✅ + live phase 20 ✅ + live phase 23 (GT/LT/XX 分数 Java 读回 ✅) + live phase 24 (addAll/random/BZPOP/BZMPOP ✅) + live phase 38 (ZSCAN ✅) |
 | RLexSortedSet | ZSET score 0, **raw** members (no codec) | WIRE_OK + live bidirectional ✅ |
 | RBucket / RBuckets / RBinaryStream | STRING (+ms TTL, CAS Lua); RBuckets conditional multi-set uses Java's `MSETEX numkeys k v… NX\|XX [PX ms]` (Redis 8+; without MSETEX it fails loudly), values codec-encoded | WIRE_OK + live bidirectional ✅ + live phase 23 (MSETEX NX/XX + Java read ✅) |
-| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value; `getAndIncrement`/`getAndDecrement`/`getAndDelete` and `setIfLess`/`setIfGreater` (single Lua from redi.go) on both; Double `compareAndDelete`; conditional `compareAndDelete(CompareAndDeleteArgs)` (`< <= > >= == ~=`); `addListener/removeListener` (Long→incrby, Double→incrby+incrbyfloat) | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) + live phase 23 (scalar remainder ✅) + live phase 53 (atomic listeners ✅) + live phase 60 (conditional delete ✅) |
+| RAtomicLong / RAtomicDouble | decimal strings, `INCRBY(FLOAT)`; Long CAS compares exact decimal strings (no Lua double), `LongValue = number/bigint` accepted, unsafe results return BigInt, `getAndAdd` single Lua; Double `getAndAdd` returns the stored old value; `getAndIncrement`/`getAndDecrement`/`getAndDelete` and `setIfLess`/`setIfGreater` (single Lua from redi.go) on both; Double `compareAndDelete`; conditional `compareAndDelete(CompareAndDeleteArgs)` (`< <= > >= == ~=`)；`incrementAndGet(IncrementArgs)` Lua-CAS 等价（by/bounds/saturate/PX/PXAT/PERSIST/ENX）；`addListener/removeListener` (Long→incrby, Double→incrby+incrbyfloat) | WIRE_OK + live bidirectional ✅ + live phase 18 (Long.MAX CAS ✅) + live phase 23 (scalar remainder ✅) + live phase 53 (atomic listeners ✅) + live phase 60 (conditional delete ✅) + live phase 61 (IncrementArgs ✅) |
 | RLongAdder / RDoubleAdder | `{name}:adder-topic` + `{name}:<id>:counter` + `{name}:<id>:semaphore` hash-tag 三元组；sum 只返回 GETDEL（请求者自 flush 已包含在内）；订阅先挂 handler 后 await ack | WIRE_OK + live phase 3 |
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
 | RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段）; `putAll(mapping,ttl,maxIdle)` per-key、`expireEntry`（拒已过期条目、重写 maxIdle 打包）、`expireEntries` 批量、`remainTimeToLive`（`-2` 缺失/已过期、`-1` 无过期）、`getWithTTLOnly`（不刷新 idle/access）、`getMaxSize`/`setMaxSize`、`compute`/`computeIfAbsent`（per-key 锁 + TTL）; `addListener`/`removeListener` 走独立连接 + `messageBuffer`（u64LE 长度前缀字节保真），写 `has-listeners=1` 使 Java 写端也发布，事件负载以 Buffer 发送; `unlink()` clears all companions | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） + live phase 19（双向事件 ✅、过期语义 ✅） + live phase 28（批量 TTL/only-read/max-size ✅） + live phase 30（compute + Java mc-get ✅） |
@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 294 tests / 63 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 296 tests / 64 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
@@ -95,7 +95,8 @@
   phase-52 set count/listeners, phase-53 atomic listeners, phase-54 delayed
   queue surface, phase-55 VectorSet iterators, phase-56 batched putAll,
   phase-57 SVS-VAMANA vectors, phase-58 batch TTLs, phase-59 map field
-  listeners and phase-60 conditional compareAndDelete), `interop`
+  listeners, phase-60 conditional compareAndDelete and phase-61 IncrementArgs),
+  `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -198,6 +199,8 @@
   1/1 PASS),
   `live-phase60` (conditional compareAndDelete across all six operators,
   1/1 PASS),
+  `live-phase61` (IncrementArgs bounds/saturation/BigInt/TTL, 20 concurrent
+  CAS increments, 1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

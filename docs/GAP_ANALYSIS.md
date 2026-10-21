@@ -67,7 +67,7 @@
 
 **概率三件套**：`RTDigest`（create(compression)/mergeWith/min/max/quantile/cdf/trimmedMean/rank/revRank/byRank/byRevRank/info/reset）✅ (2.14.0)、`RCuckooFilter`（init/addIfAbsent/existsMany/count/info）✅ (2.14.0)、`RTopK`（init 参数/add 丢弃项/incrementBy/contains/count/list/listWithCount/info）✅ (2.14.0)；仍缺 `TDigestMergeArgs`、`CuckooFilterAddArgs`/`TopKInitArgs` 的高级参数对象与批量元素重载。
 
-**`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；`addListener/removeListener`（Long incrby、Double incrby+incrbyfloat）✅ (2.31.0)；条件 `compareAndDelete(CompareAndDeleteArgs)`（`< <= > >= == ~=`）✅ (2.38.0)；仍缺 `IncrementArgs`（增量配置，后端 INCREX 非标准 Redis 命令）；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
+**`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；`addListener/removeListener`（Long incrby、Double incrby+incrbyfloat）✅ (2.31.0)；条件 `compareAndDelete(CompareAndDeleteArgs)`（`< <= > >= == ~=`）✅ (2.38.0)；`IncrementArgs`（by/bounds/saturate/PX/PXAT/PERSIST/ENX）✅ (2.39.0，原生 Redis 无 INCREX，用 Lua-CAS 等价实现；Long 保持 BigInt 精度)；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
 **`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；`preloadCache(count)`（HSCAN 限量）✅ (2.16.0)；`loader/writer` 不移植（外部存储语义，对 Redis wire 无影响）——决策记录；仍缺重连策略、Caffeine、过期事件策略。
 

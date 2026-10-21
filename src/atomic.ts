@@ -45,6 +45,65 @@ return 0`;
 
 export type LongValue = number | bigint;
 
+export interface LongIncrementArgs {
+  by?: LongValue;
+  lowerBound?: LongValue;
+  upperBound?: LongValue;
+  saturate?: boolean;
+  timeToLiveMs?: number;
+  expireAt?: Date;
+  persist?: boolean;
+  expireIfNotSet?: boolean;
+}
+
+/** TS shape of Java's static `LongIncrementArgs` factories. */
+export const LongIncrementArgs = {
+  defaults: (): LongIncrementArgs => ({}),
+  by: (by: LongValue): LongIncrementArgs => ({ by }),
+};
+
+export interface DoubleIncrementArgs {
+  by?: number;
+  lowerBound?: number;
+  upperBound?: number;
+  saturate?: boolean;
+  timeToLiveMs?: number;
+  expireAt?: Date;
+  persist?: boolean;
+  expireIfNotSet?: boolean;
+}
+
+export const DoubleIncrementArgs = {
+  defaults: (): DoubleIncrementArgs => ({}),
+  by: (by: number): DoubleIncrementArgs => ({ by }),
+};
+
+/** CAS applied by the Lua-IncrementArgs emulation. Preserves an existing TTL
+ *  unless an expiry option/PERSIST is supplied; ENX keeps the old TTL. */
+const INCREMENT_CAS = `local curr = redis.call('get', KEYS[1])
+if curr == false then curr = '0' end
+if curr ~= ARGV[1] then return 0 end
+local pttl = redis.call('pttl', KEYS[1])
+local hadTtl = pttl > 0
+redis.call('set', KEYS[1], ARGV[2])
+local mode = ARGV[3]
+local enx = ARGV[6] == '1'
+if mode == 'PX' then
+    if enx and hadTtl then redis.call('pexpire', KEYS[1], pttl)
+    else redis.call('pexpire', KEYS[1], ARGV[4]) end
+elseif mode == 'PXAT' then
+    if enx and hadTtl then redis.call('pexpire', KEYS[1], pttl)
+    else redis.call('pexpireat', KEYS[1], ARGV[4]) end
+elseif mode == 'PERSIST' then
+    redis.call('persist', KEYS[1])
+elseif hadTtl then
+    redis.call('pexpire', KEYS[1], pttl)
+end
+return 1`;
+
+const BIG_MIN = -(2n ** 63n);
+const BIG_MAX = 2n ** 63n - 1n;
+
 export type CompareCondition = '<' | '<=' | '>' | '>=' | '==' | '~=';
 
 export interface CompareAndDeleteArgs {
@@ -111,8 +170,38 @@ export class RAtomicLong extends RedisDataStructure {
     if (old !== null) await this.redis.del(this.name);
     return old === null ? null : parseLong(old);
   }
-  async incrementAndGet(): Promise<LongValue> {
-    return this.addAndGet(1);
+  async incrementAndGet(): Promise<LongValue>;
+  async incrementAndGet(args: LongIncrementArgs): Promise<LongValue>;
+  async incrementAndGet(args?: LongIncrementArgs): Promise<LongValue> {
+    if (args === undefined) return this.addAndGet(1);
+    return this.incrementWithArgs(args);
+  }
+  /** Lua-CAS emulation of Redisson's INCREX (not available on vanilla Redis). */
+  private async incrementWithArgs(args: LongIncrementArgs): Promise<LongValue> {
+    for (let attempt = 0; attempt < 1000; attempt++) {
+      const raw = await this.redis.get(this.name);
+      const curStr = raw ?? '0';
+      let cur: bigint;
+      try { cur = BigInt(curStr); } catch { cur = 0n; }
+      const by = BigInt(args.by ?? 1);
+      let next = cur + by;
+      const lower = args.lowerBound !== undefined ? BigInt(args.lowerBound) : BIG_MIN;
+      const upper = args.upperBound !== undefined ? BigInt(args.upperBound) : BIG_MAX;
+      if (next < lower || next > upper) {
+        if (!args.saturate) return parseLong(curStr);
+        next = next < lower ? lower : upper;
+      }
+      const mode = args.timeToLiveMs !== undefined ? 'PX'
+        : args.expireAt !== undefined ? 'PXAT'
+          : args.persist ? 'PERSIST' : 'NONE';
+      const ttl = args.timeToLiveMs ?? args.expireAt?.getTime() ?? 0;
+      const ok = toNumber(await luaEval(
+        this.redis, INCREMENT_CAS, 1, this.name,
+        curStr, next.toString(), mode, String(ttl), '0', args.expireIfNotSet ? '1' : '0',
+      )) === 1;
+      if (ok) return parseLong(next.toString());
+    }
+    throw new Error('incrementAndGet args: CAS retries exhausted');
   }
   async decrementAndGet(): Promise<LongValue> {
     return this.addAndGet(-1);
@@ -188,8 +277,37 @@ export class RAtomicDouble extends RedisDataStructure {
   async addAndGet(delta: number): Promise<number> {
     return Number(await this.redis.incrbyfloat(this.name, delta));
   }
-  async incrementAndGet(): Promise<number> {
-    return this.addAndGet(1);
+  async incrementAndGet(): Promise<number>;
+  async incrementAndGet(args: DoubleIncrementArgs): Promise<number>;
+  async incrementAndGet(args?: DoubleIncrementArgs): Promise<number> {
+    if (args === undefined) return this.addAndGet(1);
+    return this.incrementWithArgs(args);
+  }
+  /** Lua-CAS emulation of Redisson's INCREX (not available on vanilla Redis). */
+  private async incrementWithArgs(args: DoubleIncrementArgs): Promise<number> {
+    for (let attempt = 0; attempt < 1000; attempt++) {
+      const raw = await this.redis.get(this.name);
+      const curStr = raw ?? '0';
+      const cur = Number(curStr);
+      const nextRaw = cur + (args.by ?? 1);
+      const lower = args.lowerBound ?? -Number.MAX_VALUE;
+      const upper = args.upperBound ?? Number.MAX_VALUE;
+      let next = nextRaw;
+      if (!Number.isFinite(next) || next < lower || next > upper) {
+        if (!args.saturate) return cur;
+        next = nextRaw === Infinity || next > upper ? upper : lower;
+      }
+      const mode = args.timeToLiveMs !== undefined ? 'PX'
+        : args.expireAt !== undefined ? 'PXAT'
+          : args.persist ? 'PERSIST' : 'NONE';
+      const ttl = args.timeToLiveMs ?? args.expireAt?.getTime() ?? 0;
+      const ok = toNumber(await luaEval(
+        this.redis, INCREMENT_CAS, 1, this.name,
+        curStr, String(next), mode, String(ttl), '0', args.expireIfNotSet ? '1' : '0',
+      )) === 1;
+      if (ok) return next;
+    }
+    throw new Error('incrementAndGet args: CAS retries exhausted');
   }
   async decrementAndGet(): Promise<number> {
     return this.addAndGet(-1);

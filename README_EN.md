@@ -99,7 +99,7 @@ multi-path `get(codec, paths...)`, merge/keys/type/toggle)/
 `RJsonBuckets` (MSET/MGET batches),
 `RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,
 `getAndDelete`, `compareAndDelete` incl. `< <= > >= == ~=` conditions,
-incrby/incrbyfloat keyspace listeners),
+`IncrementArgs` bounds/saturate/TTL, incrby/incrbyfloat keyspace listeners),
 `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
 (keepAlive renewed inside the acquire Lua),
