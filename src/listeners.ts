@@ -31,6 +31,8 @@ export interface ObjectListener {
   onRandomRemove?(key: string): void;
   /** RSet: SINTERSTORE/SUNIONSTORE/SDIFFSTORE event. */
   onStore?(key: string): void;
+  /** Atomic structures: INCRBY/INCRBYFLOAT event. */
+  onChange?(key: string): void;
 }
 
 interface KeyspaceSub {

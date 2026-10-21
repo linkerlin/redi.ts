@@ -96,7 +96,8 @@ read-write, NX/XX/CAS, string/array/number ops, `*Multi` match lists,
 multi-path `get(codec, paths...)`, merge/keys/type/toggle)/
 `RJsonBuckets` (MSET/MGET batches),
 `RAtomicLong`/`Double` (`getAndIncrement`/`Decrement`, `setIfLess`/`Greater`,
-`getAndDelete`, `compareAndDelete`), `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
+`getAndDelete`, `compareAndDelete`, incrby/incrbyfloat keyspace listeners),
+`RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
 (keepAlive renewed inside the acquire Lua),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;

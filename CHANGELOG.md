@@ -1,3 +1,17 @@
+## 2.31.0 — 2026-10-21
+
+Phase 53: atomic keyspace listeners. Full suite:
+**282 tests / 56 files**.
+
+- **`RAtomicLong.addListener` / `removeListener`**: `onChange` → `incrby`
+  keyspace events.
+- **`RAtomicDouble.addListener` / `removeListener`**: subscribes to both
+  `incrby` and `incrbyfloat` (Redis emits the latter for INCRBYFLOAT; Java
+  maps only `incrby`, which would miss addAndGet).
+- Tests: 1 mock (registration/removal) + `test/live-phase53.test.ts` 1/1
+  (incrby + incrbyfloat delivery, removal silence; config serialized with the
+  shared keyspace test lock).
+
 ## 2.30.0 — 2026-10-21
 
 Phase 52: RSet countIntersection + keyspace listeners. Full suite:

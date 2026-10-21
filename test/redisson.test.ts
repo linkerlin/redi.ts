@@ -1967,3 +1967,20 @@ describe('phase 52: RSet countIntersection + listeners (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 53: atomic listener registration (mock)', () => {
+  it('registers/removes listeners on RAtomicLong and RAtomicDouble', async () => {
+    const r = make();
+    const al = r.getAtomicLong('p53:al');
+    const ad = r.getAtomicDouble('p53:ad');
+    const lid = await al.addListener({ onChange: () => undefined });
+    const did = await ad.addListener({ onChange: () => undefined });
+    expect(lid).toBeGreaterThan(0);
+    expect(did).toBeGreaterThan(0);
+    await al.removeListener(lid);
+    await ad.removeListener(did);
+    await al.removeListener(lid);
+    await ad.removeListener(999999);
+    await r.shutdown();
+  });
+});

@@ -7,6 +7,7 @@ import { RedisDataStructure } from './base.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import { luaEval, prefixName, randomHex, serverNowMs, sleep, suffixName, toNumber } from './util.js';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 const ATOMIC_CAS = `local currValue = redis.call('get', KEYS[1])
 if currValue == ARGV[1] or (tonumber(ARGV[1]) == 0 and currValue == false) then
@@ -53,8 +54,10 @@ function parseLong(raw: string | null): LongValue {
 }
 
 export class RAtomicLong extends RedisDataStructure {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string) {
     super(redis, name, new JsonCodec());
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onChange: 'incrby' });
   }
   async get(): Promise<LongValue> {
     return parseLong(await this.redis.get(this.name));
@@ -106,14 +109,26 @@ export class RAtomicLong extends RedisDataStructure {
   async compareAndDelete(expect: LongValue): Promise<boolean> {
     return toNumber(await luaEval(this.redis, ATOMIC_DEL, 1, this.name, String(expect))) === 1;
   }
+  /** Java `addListener(ObjectListener)`: IncrByListener → `incrby` keyspace
+   *  events (requires K/E notifications). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
+  }
   override async delete(): Promise<boolean> {
     return super.delete();
   }
 }
 
 export class RAtomicDouble extends RedisDataStructure {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string) {
     super(redis, name, new JsonCodec());
+    // Java maps IncrByListener to `incrby`; INCRBYFLOAT emits `incrbyfloat`,
+    // so subscribe both to keep addAndGet observable.
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onChange: ['incrby', 'incrbyfloat'] });
   }
   async get(): Promise<number> {
     const v = await this.redis.get(this.name);
@@ -171,6 +186,14 @@ return old`, 1, this.name, String(delta));
     const s = `local v = redis.call('get', KEYS[1]); if v == false then v = '0' end;
 if tonumber(v) == tonumber(ARGV[1]) then redis.call('set', KEYS[1], ARGV[2]); return 1 else return 0 end`;
     return toNumber(await luaEval(this.redis, s, 1, this.name, String(expect), String(update))) === 1;
+  }
+  /** Java `addListener(ObjectListener)`: IncrByListener; subscribes to both
+   *  `incrby` and `incrbyfloat` (Redis emits the latter for INCRBYFLOAT). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
 }
 
