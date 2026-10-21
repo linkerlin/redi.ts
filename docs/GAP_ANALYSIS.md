@@ -69,7 +69,7 @@
 
 **`RAtomic*`**：`getAndIncrement/getAndDecrement`、`getAndDelete`、`setIfLess/setIfGreater`、Double `compareAndDelete` ✅ (2.2.0)；`addListener/removeListener`（Long incrby、Double incrby+incrbyfloat）✅ (2.31.0)；条件 `compareAndDelete(CompareAndDeleteArgs)`（`< <= > >= == ~=`）✅ (2.38.0)；`IncrementArgs`（by/bounds/saturate/PX/PXAT/PERSIST/ENX）✅ (2.39.0，原生 Redis 无 INCREX，用 Lua-CAS 等价实现；Long 保持 BigInt 精度)；`getAndAdd` 浮点回算与超 `2^53` 的 `compareAndSet` 已在 v1.3.0 修复 ✅（Long 字符串 CAS / BigInt，Double 单 Lua 旧值）。
 
-**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；`preloadCache(count)`（HSCAN 限量）✅ (2.16.0)；`loader/writer` 不移植（外部存储语义，对 Redis wire 无影响）——决策记录；仍缺重连策略、Caffeine、过期事件策略。
+**`RLocalCachedMap`**：`timeToLiveMs/maxIdleMs` 已在近端缓存兑现 ✅ (1.1.0)；`maxSize` 下 LRU/LFU 淘汰与 `getCachedMap()` 本地快照 ✅ (2.1.0)；`preloadCache(count)`（HSCAN 限量）✅ (2.16.0)；`loader/writer` 不移植（外部存储语义，对 Redis wire 无影响）——决策记录；`reconnectionStrategy` NONE/CLEAR/LOAD ✅ (2.41.0，LOAD 用回源刷新代替 Java 的失效日志重放)；仍缺 Caffeine 淘汰与过期事件策略。
 
 **`RRateLimiter`**：`keepAliveTime` 续期 ✅ (2.1.0，acquire 脚本内 `PEXPIRE` config/value/permits；keepAlive=0 时 value/permits 继承 config HASH 的 TTL，与 Java 4.6.1 一致)。
 

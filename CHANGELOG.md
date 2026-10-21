@@ -1,3 +1,17 @@
+## 2.41.0 — 2026-10-21
+
+Phase 63: local cached map reconnection strategies. Full suite:
+**300 tests / 66 files**.
+
+- `LocalCachedMapOptions.reconnectionStrategy` (`NONE`/`CLEAR`/`LOAD`).
+  After the invalidation subscription reconnects, `CLEAR` drops the near
+  cache and `LOAD` refreshes every locally cached field from Redis (an
+  equivalent, stronger form of Java's invalidation-log replay).
+- Initial connection does not trigger a strategy; only real reconnects do.
+- Tests: 1 mock (all three strategies, cache snapshot) +
+  `test/live-phase63.test.ts` 1/1 (forced disconnect/reconnect: CLEAR empties,
+  LOAD observes a write missed while disconnected).
+
 ## 2.40.0 — 2026-10-21
 
 Phase 62: RSetCache listeners + newCondition parity. Full suite:

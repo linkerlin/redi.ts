@@ -2138,3 +2138,18 @@ describe('phase 62: SetCache listeners + newCondition (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 63: local cached map reconnection options (mock)', () => {
+  it('accepts NONE/CLEAR/LOAD and keeps normal get/put behavior', async () => {
+    const r = make();
+    for (const strategy of ['NONE', 'CLEAR', 'LOAD'] as const) {
+      const m = r.getLocalCachedMap<string, string>(`p63:${strategy}`, { reconnectionStrategy: strategy });
+      await m.put('a', '1');
+      expect(await m.get('a')).toBe('1');
+      expect(m.getCachedMap().get('a')).toBe('1');
+      await m.clearLocalCache();
+      expect(m.getCachedMap().size).toBe(0);
+    }
+    await r.shutdown();
+  });
+});

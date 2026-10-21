@@ -81,7 +81,8 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`, field listeners,
 `fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
-`getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
+`getCachedMap()` view, bounded `preloadCache(count)`, NONE/CLEAR/LOAD
+reconnection strategies), `RSet`/`SetCache`
 (`countIntersection` with LIMIT, sadd/srem/spop/store keyspace listeners,
 SetCache zadd/zrem listeners, lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,

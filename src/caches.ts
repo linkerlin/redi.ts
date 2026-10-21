@@ -1363,6 +1363,8 @@ export interface LocalCachedMapOptions {
   syncStrategy?: 'INVALIDATE' | 'UPDATE' | 'NONE';
   storeCacheMiss?: boolean;
   disableNearCache?: boolean;
+  /** Behaviour when the invalidation subscription reconnects. */
+  reconnectionStrategy?: 'NONE' | 'CLEAR' | 'LOAD';
 }
 
 export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
@@ -1372,10 +1374,12 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
   private clientTag: string;
   private invalChannel: string;
   private ready: Promise<void> = Promise.resolve();
+  private subscribed = false;
+  private reconnectBusy = false;
 
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec(), opts: LocalCachedMapOptions = {}, clientTag = '') {
     super(redis, name, codec);
-    this.opts = { evictionPolicy: 'NONE', syncStrategy: 'INVALIDATE', ...opts };
+    this.opts = { evictionPolicy: 'NONE', syncStrategy: 'INVALIDATE', reconnectionStrategy: 'NONE', ...opts };
     this.clientTag = clientTag || Math.random().toString(36).slice(2);
     this.invalChannel = `${name}:inval`;
     if (!this.opts.disableNearCache) this.ready = this.listen();
@@ -1414,9 +1418,38 @@ export class RLocalCachedMap<K = any, V = any> extends RedisDataStructure {
           } else this.cache.delete(m.field);
         } catch { /* noop */ }
       });
+      (this.sub as any).on?.('ready', () => {
+        // The initial ready fires before `subscribed` is set; only reconnects
+        // apply the configured strategy.
+        if (this.subscribed) void this.applyReconnectionStrategy();
+      });
       await (this.sub as any).subscribe(this.invalChannel);
+      this.subscribed = true;
     } catch {
       this.sub = null;
+    }
+  }
+
+  /** Java LocalCacheListener.onSubscribe: CLEAR drops the near cache; LOAD
+   *  refreshes every locally cached field from Redis (an equivalent, stronger
+   *  form of replaying the invalidation log). */
+  private async applyReconnectionStrategy(): Promise<void> {
+    const strategy = this.opts.reconnectionStrategy ?? 'NONE';
+    if (strategy === 'NONE' || this.reconnectBusy) return;
+    this.reconnectBusy = true;
+    try {
+      try { await (this.sub as any)?.subscribe?.(this.invalChannel); } catch { /* noop */ }
+      if (strategy === 'CLEAR') {
+        this.cache.clear();
+        return;
+      }
+      for (const field of [...this.cache.keys()]) {
+        const raw = await this.redis.hget(this.name, field);
+        if (raw === null) this.cache.delete(field);
+        else this.setCached(field, this.decodeValue(raw) as V);
+      }
+    } finally {
+      this.reconnectBusy = false;
     }
   }
 
