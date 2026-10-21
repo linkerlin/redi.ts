@@ -1,3 +1,22 @@
+## 2.28.0 — 2026-10-21
+
+Phase 50: RVectorSet deep API. Full suite:
+**276 tests / 53 files**.
+
+- **`add(VectorAddArgs)`** (in addition to `add(element, vector)`): REDUCE, CAS,
+  quantization (NOQUANT/Q8/BIN), EF, SETATTR with a per-call codec and M.
+- **`getRawVector(element)`**: `VEMB ... RAW` returning raw parts with binary
+  payloads preserved (Buffer).
+- **`getNeighborEntries(element)`**: `VLINKS ... WITHSCORES` as
+  `{ value, score }`; `getNeighbors` now unwraps the nested VLINKS reply.
+- **`getSimilar` / `getSimilarEntries` / `getSimilarEntriesWithAttributes`**:
+  `VSIM` by element or vector (VALUES/FP32) with COUNT/EPSILON/EF/FILTER/
+  FILTER-EF/TRUTH/NOTHREAD and WITHSCORES/WITHATTRIBS parsing.
+- `setAttributes` accepts an optional codec.
+- Tests: `test/live-phase50.test.ts` 1/1 (attributes, CAS, raw vector, scored
+  neighbors, filtered/similar names-scores-attributes, Q8/REDUCE/M options;
+  capability-gated on VADD).
+
 ## 2.27.0 — 2026-10-21
 
 Phase 49: structured RSearch index definitions. Full suite:

@@ -125,7 +125,8 @@ scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (structured
 or raw schemas, index info/aliases/sort/params/aggregate/synonyms/dicts/config/
 spellcheck, `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/
 `profileAggregate`, aggregation cursors, `alter`),
-`RVectorSet` (VEMB/VINFO/VLINKS/VRANDMEMBER/VRANGE/attributes), priority queues
+`RVectorSet` (VADD args, VEMB/RAW, VINFO, VLINKS WITHSCORES, VRANDMEMBER/
+VRANGE, VSIM names/scores/attributes), priority queues
 (`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
 facades), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).

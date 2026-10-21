@@ -1342,9 +1342,65 @@ export class RJsonBuckets {
 
 // -- VectorSet (Redis 8+ VSET) -------------------------------------------------------
 
+export interface VectorAddArgs {
+  element: string;
+  vector: number[] | Buffer;
+  /** REDUCE dimension factor. */
+  reduce?: number;
+  /** CAS (check-and-set attributes). */
+  cas?: boolean;
+  quantization?: 'NOQUANT' | 'Q8' | 'BIN';
+  explorationFactor?: number;
+  attributes?: unknown;
+  /** Codec used for attributes (defaults to the instance codec). */
+  codec?: Codec;
+  maxConnections?: number;
+}
+
+export interface VectorSimilarArgs {
+  /** Exactly one of `element` or `vector` is required. */
+  element?: string;
+  vector?: number[] | Buffer;
+  count?: number;
+  epsilon?: number;
+  explorationFactor?: number;
+  filter?: string;
+  filterEffort?: number;
+  /** TRUTH: brute-force linear scan. */
+  linearScan?: boolean;
+  /** NOTHREAD: run on the main thread. */
+  mainThread?: boolean;
+}
+
+export interface VectorScoredEntry {
+  value: string;
+  score: number;
+}
+
+export interface VectorScoredAttributesEntry extends VectorScoredEntry {
+  attributes: string | null;
+}
+
 export class RVectorSet extends RedisDataStructure {
-  async add(element: string, vector: number[]): Promise<boolean> {
-    const r: any = await this.redis.call('VADD', this.name, 'VALUES', vector.length, ...vector.map(String), element);
+  async add(element: string, vector: number[] | Buffer): Promise<boolean>;
+  async add(args: VectorAddArgs): Promise<boolean>;
+  async add(a: string | VectorAddArgs, b?: number[] | Buffer): Promise<boolean> {
+    const args: VectorAddArgs = typeof a === 'string' ? { element: a, vector: b as number[] | Buffer } : a;
+    if (!args.element) throw new Error('VectorAddArgs.element is required');
+    const cmd: (string | number | Buffer)[] = ['VADD', this.name];
+    if (args.reduce !== undefined) cmd.push('REDUCE', String(args.reduce));
+    if (Buffer.isBuffer(args.vector)) cmd.push('FP32', args.vector);
+    else cmd.push('VALUES', String(args.vector.length), ...args.vector.map(String));
+    cmd.push(args.element);
+    if (args.cas) cmd.push('CAS');
+    if (args.quantization) cmd.push(args.quantization);
+    if (args.explorationFactor !== undefined) cmd.push('EF', String(args.explorationFactor));
+    if (args.attributes !== undefined) {
+      const codec = args.codec ?? this.codec;
+      cmd.push('SETATTR', codec.encode(args.attributes));
+    }
+    if (args.maxConnections !== undefined) cmd.push('M', String(args.maxConnections));
+    const r: any = await (this.redis as any).call(...cmd);
     return toNumber(r) === 1 || r === true;
   }
   async sim(element: string, count = 10): Promise<string[]> {
@@ -1369,6 +1425,14 @@ export class RVectorSet extends RedisDataStructure {
     const r: any = await this.redis.call('VEMB', this.name, element);
     return (r ?? []).map((x: any) => Number(x));
   }
+  /** Java `getRawVector(element)`: VEMB ... RAW → raw parts (binary kept). */
+  async getRawVector(element: string): Promise<any[]> {
+    const raw: any = (this.redis as any).callBuffer
+      ? await (this.redis as any).callBuffer('VEMB', this.name, element, 'RAW')
+      : await (this.redis as any).call('VEMB', this.name, element, 'RAW');
+    if (raw === null || raw === undefined) return [];
+    return Array.isArray(raw) ? raw : [raw];
+  }
   /** Java `contains(element)`: VEMB returns nil for absent members. */
   async contains(element: string): Promise<boolean> {
     const r: any = await this.redis.call('VEMB', this.name, element);
@@ -1390,9 +1454,75 @@ export class RVectorSet extends RedisDataStructure {
     if (count !== undefined) args.push(String(count));
     return ((await (this.redis as any).call(...args)) as string[]) ?? [];
   }
-  /** Java `getNeighbors(element)`: VLINKS (member names only). */
+  /** Java `getNeighbors(element)`: VLINKS → member names (unwraps the nested
+   *  Redis reply shape). */
   async getNeighbors(element: string): Promise<string[]> {
-    return ((await this.redis.call('VLINKS', this.name, element)) as string[]) ?? [];
+    const r: any = await this.redis.call('VLINKS', this.name, element);
+    const first = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : r;
+    return (first ?? []) as string[];
+  }
+  /** Java `getNeighborEntries(element)`: VLINKS ... WITHSCORES. */
+  async getNeighborEntries(element: string): Promise<VectorScoredEntry[]> {
+    const r: any = await this.redis.call('VLINKS', this.name, element, 'WITHSCORES');
+    const flat = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : (r ?? []);
+    const out: VectorScoredEntry[] = [];
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      out.push({ value: String(flat[i]), score: Number(flat[i + 1]) });
+    }
+    return out;
+  }
+
+  private similarArgs(args: VectorSimilarArgs, extras: string[] = []): (string | number | Buffer)[] {
+    if (args.element === undefined && args.vector === undefined) {
+      throw new Error('VectorSimilarArgs requires element or vector');
+    }
+    if (args.element !== undefined && args.vector !== undefined) {
+      throw new Error('VectorSimilarArgs accepts either element or vector, not both');
+    }
+    const cmd: (string | number | Buffer)[] = ['VSIM', this.name];
+    if (args.element !== undefined) cmd.push('ELE', args.element);
+    else if (Buffer.isBuffer(args.vector)) cmd.push('FP32', args.vector);
+    else cmd.push('VALUES', String(args.vector!.length), ...args.vector!.map(String));
+    if (args.count !== undefined) cmd.push('COUNT', String(args.count));
+    if (args.epsilon !== undefined) cmd.push('EPSILON', String(args.epsilon));
+    if (args.explorationFactor !== undefined) cmd.push('EF', String(args.explorationFactor));
+    if (args.filter) cmd.push('FILTER', args.filter);
+    if (args.filterEffort !== undefined) cmd.push('FILTER-EF', String(args.filterEffort));
+    if (args.linearScan) cmd.push('TRUTH');
+    if (args.mainThread) cmd.push('NOTHREAD');
+    cmd.push(...extras);
+    return cmd;
+  }
+
+  /** Java `getSimilar(args)`: VSIM → member names. */
+  async getSimilar(args: VectorSimilarArgs): Promise<string[]> {
+    return ((await (this.redis as any).call(...this.similarArgs(args))) as string[]) ?? [];
+  }
+
+  /** Java `getSimilarEntries(args)`: VSIM ... WITHSCORES. */
+  async getSimilarEntries(args: VectorSimilarArgs): Promise<VectorScoredEntry[]> {
+    const r: any = await (this.redis as any).call(...this.similarArgs(args, ['WITHSCORES']));
+    const flat = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : (r ?? []);
+    const out: VectorScoredEntry[] = [];
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      out.push({ value: String(flat[i]), score: Number(flat[i + 1]) });
+    }
+    return out;
+  }
+
+  /** Java `getSimilarEntriesWithAttributes(args)`: VSIM ... WITHSCORES WITHATTRIBS. */
+  async getSimilarEntriesWithAttributes(args: VectorSimilarArgs): Promise<VectorScoredAttributesEntry[]> {
+    const r: any = await (this.redis as any).call(...this.similarArgs(args, ['WITHSCORES', 'WITHATTRIBS']));
+    const flat = Array.isArray(r) && Array.isArray(r[0]) ? r[0] : (r ?? []);
+    const out: VectorScoredAttributesEntry[] = [];
+    for (let i = 0; i + 2 < flat.length; i += 3) {
+      out.push({
+        value: String(flat[i]),
+        score: Number(flat[i + 1]),
+        attributes: flat[i + 2] === null || flat[i + 2] === undefined ? null : String(flat[i + 2]),
+      });
+    }
+    return out;
   }
   /** Java `getInfo()`: VINFO flat field/value pairs. */
   async getInfo(): Promise<Record<string, any>> {
@@ -1411,9 +1541,9 @@ export class RVectorSet extends RedisDataStructure {
       return String(r);
     }
   }
-  /** Java `setAttributes(element, value)`: VSETATTR with codec-encoded JSON. */
-  async setAttributes(element: string, value: unknown): Promise<boolean> {
-    return toNumber(await this.redis.call('VSETATTR', this.name, element, this.encodeValue(value))) === 1;
+  /** Java `setAttributes(element, value[, codec])`: VSETATTR with codec JSON. */
+  async setAttributes(element: string, value: unknown, codec: Codec = this.codec): Promise<boolean> {
+    return toNumber(await this.redis.call('VSETATTR', this.name, element, codec.encode(value))) === 1;
   }
 }
 
