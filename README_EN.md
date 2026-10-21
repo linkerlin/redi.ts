@@ -126,7 +126,8 @@ flushes, global keyspace listeners (`onNew`/`onSet`/`onExpired`/`onDeleted`),
 `getKeysWithLimit`/`getKeysByPattern`,
 lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (structured
-or raw schemas, index info/aliases/sort/params/aggregate/synonyms/dicts/config/
+or raw schemas incl. VECTOR FLAT/HNSW/SVS-VAMANA, index info/aliases/sort/
+params/aggregate/synonyms/dicts/config/
 spellcheck, `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/
 `profileAggregate`, aggregation cursors, `alter`),
 `RVectorSet` (VADD args, VEMB/RAW, VINFO, VLINKS WITHSCORES, VRANDMEMBER/

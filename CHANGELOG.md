@@ -1,3 +1,16 @@
+## 2.35.0 — 2026-10-21
+
+Phase 57: SVS-VAMANA structured search indexes. Full suite:
+**288 tests / 60 files**.
+
+- `SearchVectorField.algorithm` accepts `SVS-VAMANA`; parameters
+  COMPRESSION (LVQ8/LVQ4/LVQ4x4/LVQ4x8/LeanVec4x8/LeanVec8x8),
+  CONSTRUCTION_WINDOW_SIZE, GRAPH_MAX_DEGREE, SEARCH_WINDOW_SIZE, EPSILON,
+  TRAINING_THRESHOLD and LEANVEC_DIM.
+- Tests: `test/live-phase57.test.ts` 1/1 (plain SVS KNN plus a compressed
+  field with all build options; FT.INFO). Redis requires
+  TRAINING_THRESHOLD ≥ 1024, documented.
+
 ## 2.34.0 — 2026-10-21
 
 Phase 56: RMap batched putAll. Full suite:

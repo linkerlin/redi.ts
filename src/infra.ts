@@ -551,7 +551,7 @@ export interface SearchGeoShapeField extends SearchFieldBase {
 
 export interface SearchVectorField extends SearchFieldBase {
   type: 'VECTOR';
-  algorithm?: 'FLAT' | 'HNSW';
+  algorithm?: 'FLAT' | 'HNSW' | 'SVS-VAMANA';
   dataType?: 'FLOAT32' | 'FLOAT64' | 'BFLOAT16' | 'FLOAT16' | 'INT8' | 'UINT8';
   dim: number;
   distanceMetric?: 'L2' | 'IP' | 'COSINE';
@@ -562,7 +562,15 @@ export interface SearchVectorField extends SearchFieldBase {
   m?: number;
   efConstruction?: number;
   efRuntime?: number;
+  /** HNSW/SVS. */
   epsilon?: number;
+  /** SVS-VAMANA. */
+  compression?: 'LVQ8' | 'LVQ4' | 'LVQ4x4' | 'LVQ4x8' | 'LeanVec4x8' | 'LeanVec8x8';
+  constructionWindowSize?: number;
+  graphMaxDegree?: number;
+  searchWindowSize?: number;
+  trainingThreshold?: number;
+  leanVecDim?: number;
 }
 
 export type SearchFieldIndex =
@@ -638,14 +646,23 @@ export class RSearch {
             'DIM', f.dim,
             'DISTANCE_METRIC', f.distanceMetric ?? 'COSINE',
           ];
-          if (f.initialCap !== undefined) params.push('INITIAL_CAP', f.initialCap);
           if (algorithm === 'FLAT') {
+            if (f.initialCap !== undefined) params.push('INITIAL_CAP', f.initialCap);
             if (f.blockSize !== undefined) params.push('BLOCK_SIZE', f.blockSize);
-          } else {
+          } else if (algorithm === 'HNSW') {
+            if (f.initialCap !== undefined) params.push('INITIAL_CAP', f.initialCap);
             if (f.m !== undefined) params.push('M', f.m);
             if (f.efConstruction !== undefined) params.push('EF_CONSTRUCTION', f.efConstruction);
             if (f.efRuntime !== undefined) params.push('EF_RUNTIME', f.efRuntime);
             if (f.epsilon !== undefined) params.push('EPSILON', f.epsilon);
+          } else {
+            if (f.compression) params.push('COMPRESSION', f.compression);
+            if (f.constructionWindowSize !== undefined) params.push('CONSTRUCTION_WINDOW_SIZE', f.constructionWindowSize);
+            if (f.graphMaxDegree !== undefined) params.push('GRAPH_MAX_DEGREE', f.graphMaxDegree);
+            if (f.searchWindowSize !== undefined) params.push('SEARCH_WINDOW_SIZE', f.searchWindowSize);
+            if (f.epsilon !== undefined) params.push('EPSILON', f.epsilon);
+            if (f.trainingThreshold !== undefined) params.push('TRAINING_THRESHOLD', f.trainingThreshold);
+            if (f.leanVecDim !== undefined) params.push('LEANVEC_DIM', f.leanVecDim);
           }
           out.push('VECTOR', algorithm, String((3 + (params.length - 6) / 2) * 2), ...params.map(String));
           break;
