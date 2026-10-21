@@ -82,7 +82,7 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 (lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE, variadic adds/`*IfExists`/`poll(count)`/
-`RPOPLPUSH`, `subscribeOnElements`/`unsubscribe`), `RScoredSortedSet` (score
+`RPOPLPUSH`, `subscribeOnElements`/`unsubscribe`, BRPOP-with-name), `RScoredSortedSet` (score
 ranges incl. reversed forms via `ZRANGE … BYSCORE`, `addScore` family,
 `addIf*`/`addAll*` conditionals, `random`/`randomEntries`, blocking
 `pollFirst/Last` + `FromAny` via BZPOPMIN/MAX and BZMPOP, lazy
@@ -119,6 +119,7 @@ info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, migrate/MigrateArgs, remote copy, swapdb, parallel
 flushes, global keyspace listeners (`onNew`/`onSet`/`onExpired`/`onDeleted`),
+`getKeysWithLimit`/`getKeysByPattern`,
 lazy `getKeysStream`), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (index
 info/aliases/sort/params/aggregate/synonyms/dicts/config/spellcheck,

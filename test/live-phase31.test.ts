@@ -3,9 +3,10 @@
  * (RStream xadd/xdel/xgroup-*, RTimeSeries zadd/zrem) and multi-stream
  * XREADGROUP (`readGroupMany`).
  *
- * Keyspace notifications need `notify-keyspace-events` with K+E ("KEA");
- * the test saves and restores the previous value and skips (with a log) when
- * the server refuses CONFIG SET.
+ * Keyspace notifications need `notify-keyspace-events` with K+E ("KEAn" is
+ * used so concurrent RKeys new-event tests retain the `n` flag); the test
+ * serializes config changes with other keyspace tests, saves and restores the
+ * previous value and skips (with a log) when the server refuses CONFIG SET.
  *
  * Needs real Redis; skips when Redis is unavailable.
  */
@@ -13,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
 import { prefixName } from '../src/util';
+import { acquireKeyspaceConfigLock } from './helpers/keyspace-lock';
 
 const NS = 'TsJavaT:p31:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -48,10 +50,12 @@ describe('live interop phase 31: keyspace listeners + multi-stream group read', 
     const tn = `${NS}ts`;
     let prev = '';
     let canConfig = false;
+    let releaseLock: (() => Promise<void>) | null = null;
     try {
+      releaseLock = await acquireKeyspaceConfigLock(r.redis);
       const cur: any = await r.redis.config('GET', 'notify-keyspace-events');
       prev = Array.isArray(cur) ? String(cur[1] ?? '') : '';
-      await r.redis.config('SET', 'notify-keyspace-events', 'KEA');
+      await r.redis.config('SET', 'notify-keyspace-events', 'KEAn');
       canConfig = true;
     } catch {
       console.log('[phase31] notify-keyspace-events not configurable — skipping keyspace listener assertions');
@@ -99,6 +103,7 @@ describe('live interop phase 31: keyspace listeners + multi-stream group read', 
       if (canConfig) {
         try { await r.redis.config('SET', 'notify-keyspace-events', prev); } catch { /* noop */ }
       }
+      await releaseLock?.();
       await r.shutdown();
     }
   }, 180000);

@@ -1202,6 +1202,13 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
     if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
     return out;
   }
+  /** Java `pollLastFromAnyWithName(Duration, queueNames...)`: BRPOP with the
+   *  source queue name. Negative timeouts return null without scanning. */
+  async pollLastFromAnyWithName(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V } | null> {
+    if (timeoutMs !== null && timeoutMs < 0) return null;
+    const r = await blockingListPopFrom(this.redis, [this.name, ...otherNames], 'RIGHT', timeoutMs);
+    return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V };
+  }
   /** Java `pollLastAndOfferFirstTo(dest)`: non-blocking RPOPLPUSH. */
   override async pollLastAndOfferFirstTo(dest: string): Promise<V | null>;
   /** Java `pollLastAndOfferFirstTo(dest, timeout, unit)`: BLMOVE RIGHT→LEFT.
@@ -1276,6 +1283,13 @@ export class RBlockingDeque<V = any> extends RDeque<V> {
     const out = new Map<string, V[]>();
     if (r !== null) out.set(r.key, r.values.map((x) => this.decodeValue(x) as V));
     return out;
+  }
+  /** Java `pollLastFromAnyWithName(Duration, queueNames...)`: BRPOP with the
+   *  source queue name. Negative timeouts return null without scanning. */
+  async pollLastFromAnyWithName(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V } | null> {
+    if (timeoutMs !== null && timeoutMs < 0) return null;
+    const r = await blockingListPopFrom(this.redis, [this.name, ...otherNames], 'RIGHT', timeoutMs);
+    return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V };
   }
   /** Java `pollLastAndOfferFirstTo(dest)`: non-blocking RPOPLPUSH. */
   override async pollLastAndOfferFirstTo(dest: string): Promise<V | null>;

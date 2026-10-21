@@ -1871,3 +1871,33 @@ describe('phase 47: RKeys keyspace listeners (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 48: queue last-from-any + limited key scans (mock)', () => {
+  it('pollLastFromAnyWithName honours queue priority, source name and negative timeout', async () => {
+    const r = make();
+    const q = r.getBlockingQueue<string>('p48:q');
+    const q2 = r.getBlockingQueue<string>('p48:q2');
+    await q.add('a1');
+    await q.add('a2');
+    expect(await q.pollLastFromAnyWithName(1000, 'p48:q2')).toEqual({ key: 'p48:q', value: 'a2' });
+    expect(await q.pollLastFromAnyWithName(-1, 'p48:q2')).toBeNull();
+    expect(await q.pollLastFromAnyWithName(200)).toEqual({ key: 'p48:q', value: 'a1' });
+    await q2.add('b1');
+    await q2.add('b2');
+    expect(await q.pollLastFromAnyWithName(1000, 'p48:q2')).toEqual({ key: 'p48:q2', value: 'b2' });
+    expect(await q.pollLastFromAnyWithName(50, 'p48:q2')).toEqual({ key: 'p48:q2', value: 'b1' });
+    expect(await q2.pollLastFromAnyWithName(100, 'p48:q')).toBeNull();
+    await r.shutdown();
+  });
+
+  it('getKeysWithLimit and getKeysByPattern', async () => {
+    const r = make();
+    for (let i = 0; i < 5; i++) await r.getBucket(`p48:key:${i}`).set(i);
+    expect((await r.getKeys().getKeysWithLimit('p48:key:*', 2))).toHaveLength(2);
+    expect((await r.getKeys().getKeysWithLimit(1))).toHaveLength(1);
+    expect(await r.getKeys().getKeysWithLimit(0)).toEqual([]);
+    const all = await r.getKeys().getKeysByPattern('p48:key:*');
+    expect(all.sort()).toEqual(['p48:key:0', 'p48:key:1', 'p48:key:2', 'p48:key:3', 'p48:key:4']);
+    await r.shutdown();
+  });
+});

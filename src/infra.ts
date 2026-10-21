@@ -34,14 +34,34 @@ export class RKeys {
     return this.redis.exists(...names);
   }
   async getKeys(pattern = '*', count = 100): Promise<string[]> {
+    return this.scanKeys(pattern, undefined, count);
+  }
+  private async scanKeys(pattern: string, limit?: number, count = 100): Promise<string[]> {
     const out: string[] = [];
     let cursor = '0';
     do {
       const [next, keys] = (await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', count)) as [string, string[]];
-      out.push(...keys);
+      for (const key of keys) {
+        out.push(key);
+        if (limit !== undefined && out.length >= limit) return out;
+      }
       cursor = next;
     } while (cursor !== '0');
     return out;
+  }
+  /** Java `getKeysWithLimit(limit)`: at most `limit` keys. */
+  async getKeysWithLimit(limit: number): Promise<string[]>;
+  /** Java `getKeysWithLimit(pattern, limit)`. */
+  async getKeysWithLimit(pattern: string, limit: number): Promise<string[]>;
+  async getKeysWithLimit(a: string | number, b?: number): Promise<string[]> {
+    const pattern = typeof a === 'string' ? a : '*';
+    const limit = typeof a === 'string' ? (b as number) : a;
+    if (limit <= 0) return [];
+    return this.scanKeys(pattern, limit);
+  }
+  /** Java `getKeysByPattern(pattern[, count])`: SCAN MATCH. */
+  async getKeysByPattern(pattern: string, count = 100): Promise<string[]> {
+    return this.scanKeys(pattern, undefined, count);
   }
   /** Java `getKeysStream()` / `getKeysStreamByPattern(pattern)`: lazy SCAN. */
   async *getKeysStream(pattern = '*', count = 100): AsyncGenerator<string> {

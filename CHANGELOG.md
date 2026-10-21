@@ -1,3 +1,25 @@
+## 2.26.0 — 2026-10-21
+
+Phase 48: last-from-any with source name + limited key scans. Full suite:
+**274 tests / 51 files**.
+
+- **`RBlockingQueue` / `RBlockingDeque`**:
+  `pollLastFromAnyWithName(timeoutMs, ...queueNames)` — BRPOP over this queue
+  plus the given ones, returning `{ key, value }`; negative timeouts return
+  null without scanning, `null` blocks forever.
+- **`RKeys`**: `getKeysWithLimit(limit)` / `getKeysWithLimit(pattern, limit)`
+  (SCAN stops after the limit, `limit <= 0` → empty) and
+  `getKeysByPattern(pattern[, count])`; both share the SCAN helper with
+  `getKeys`.
+- Note: `QueueMoveElementsArgs`/`RQueue.move` belong to newer Redisson
+  sources and are absent from the 4.6.1 jar, so they are recorded as
+  version-out rather than implemented.
+- Tests: 2 mock + `test/live-phase48.test.ts` 1/1 (BRPOP priority/source
+  name/negative + empty timeout, deque path, limited/pattern scans).
+- Stabilization: the two keyspace-config tests (phase 31/47) now serialize
+  their `notify-keyspace-events` sections with a Redis test lock, removing a
+  parallel-restore race that could drop `new`/`set` events.
+
 ## 2.25.0 — 2026-10-21
 
 Phase 47: RKeys global keyspace listeners. Full suite:

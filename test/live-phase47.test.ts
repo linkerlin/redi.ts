@@ -1,11 +1,13 @@
 /**
  * Phase 47 live: RKeys global keyspace listeners (new/set/expired/del).
- * Requires notify-keyspace-events with K+E (+n for new); the test saves and
- * restores the previous config and skips when CONFIG SET is refused.
+ * Requires notify-keyspace-events with K+E (+n for new); the test serializes
+ * config changes with live-phase31, saves/restores the previous config and
+ * skips when CONFIG SET is refused.
  */
 import { describe, it, expect } from 'vitest';
 import Redis from 'ioredis';
 import { Redisson } from '../src';
+import { acquireKeyspaceConfigLock } from './helpers/keyspace-lock';
 
 const NS = 'TsJavaT:p47:';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -44,7 +46,9 @@ describe('live phase 47: RKeys keyspace listeners', () => {
     let prev = '';
     let canConfig = false;
     let canNew = true;
+    let releaseLock: (() => Promise<void>) | null = null;
     try {
+      releaseLock = await acquireKeyspaceConfigLock(r.redis);
       const cur: any = await r.redis.config('GET', 'notify-keyspace-events');
       prev = Array.isArray(cur) ? String(cur[1] ?? '') : '';
       try {
@@ -93,6 +97,7 @@ describe('live phase 47: RKeys keyspace listeners', () => {
       if (canConfig) {
         try { await r.redis.config('SET', 'notify-keyspace-events', prev); } catch { /* noop */ }
       }
+      await releaseLock?.();
       await r.shutdown();
     }
   }, 120000);
