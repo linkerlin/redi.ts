@@ -1,3 +1,26 @@
+## 2.27.0 — 2026-10-21
+
+Phase 49: structured RSearch index definitions. Full suite:
+**275 tests / 52 files**.
+
+- **`RSearch.createIndex`** now accepts either raw schema tokens (unchanged)
+  or structured `SearchFieldIndex` objects with `SearchIndexOptions`
+  (TS shape of Java `IndexOptions`/`FieldIndex`).
+- Field types: TEXT (AS/NOSTEM/PHONETIC/WEIGHT/WITHSUFFIXTRIE/SORTABLE/UNF/
+  NOINDEX/INDEXEMPTY/INDEXMISSING), TAG (CASESENSITIVE/SEPARATOR/...), NUMERIC,
+  GEO, GEOSHAPE, and VECTOR with FLAT or HNSW (TYPE/DIM/DISTANCE_METRIC/
+  INITIAL_CAP/BLOCK_SIZE/M/EF_CONSTRUCTION/EF_RUNTIME/EPSILON).
+- Index options: ON, PREFIX, FILTER, LANGUAGE, LANGUAGE_FIELD, SCORE,
+  SCORE_FIELD, PAYLOAD_FIELD, MAXTEXTFIELDS, TEMPORARY, NOOFFSETS, NOHL,
+  NOFIELDS, NOFREQS, STOPWORDS (including empty) and SKIPINITIALSCAN.
+- **`RSearch.alter`** accepts structured fields too (one `ADD` per field).
+- Redis grammar note: INDEXEMPTY/INDEXMISSING must precede SORTABLE; the
+  builder emits that order even though the newer Java source emits them last.
+  SVS-VAMANA vectors are not built yet.
+- Tests: `test/live-phase49.test.ts` 1/1 (structured HASH index with aliases,
+  filter/stopwords/no-offsets, tag case sensitivity, numeric/geo queries,
+  sort by alias, FLAT+HNSW KNN, FT.INFO and structured ALTER).
+
 ## 2.26.0 — 2026-10-21
 
 Phase 48: last-from-any with source name + limited key scans. Full suite:

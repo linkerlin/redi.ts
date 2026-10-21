@@ -488,15 +488,200 @@ export interface CursorParams {
   cursor?: number;
 }
 
+/** Structured FT.CREATE options (TS shape of Java `IndexOptions`). */
+export interface SearchIndexOptions {
+  on?: 'HASH' | 'JSON';
+  prefixes?: string[];
+  filter?: string;
+  language?: string;
+  languageField?: string;
+  score?: number;
+  scoreField?: string;
+  maxTextFields?: boolean;
+  noOffsets?: boolean;
+  /** TEMPORARY <ms>. */
+  temporaryMs?: number;
+  noHL?: boolean;
+  noFields?: boolean;
+  noFreqs?: boolean;
+  stopwords?: string[];
+  skipInitialScan?: boolean;
+  payloadField?: string;
+}
+
+export type SearchSortMode = boolean | 'UNF';
+
+interface SearchFieldBase {
+  property: string;
+  as?: string;
+  sortable?: SearchSortMode;
+  noIndex?: boolean;
+  indexMissing?: boolean;
+}
+
+export interface SearchTextField extends SearchFieldBase {
+  type: 'TEXT';
+  noStem?: boolean;
+  phonetic?: string;
+  weight?: number;
+  withSuffixTrie?: boolean;
+  indexEmpty?: boolean;
+}
+
+export interface SearchTagField extends SearchFieldBase {
+  type: 'TAG';
+  separator?: string;
+  caseSensitive?: boolean;
+  withSuffixTrie?: boolean;
+  indexEmpty?: boolean;
+}
+
+export interface SearchNumericField extends SearchFieldBase {
+  type: 'NUMERIC';
+}
+
+export interface SearchGeoField extends SearchFieldBase {
+  type: 'GEO';
+}
+
+export interface SearchGeoShapeField extends SearchFieldBase {
+  type: 'GEOSHAPE';
+  coordinateSystem?: 'FLAT' | 'SPHERICAL';
+}
+
+export interface SearchVectorField extends SearchFieldBase {
+  type: 'VECTOR';
+  algorithm?: 'FLAT' | 'HNSW';
+  dataType?: 'FLOAT32' | 'FLOAT64' | 'BFLOAT16' | 'FLOAT16' | 'INT8' | 'UINT8';
+  dim: number;
+  distanceMetric?: 'L2' | 'IP' | 'COSINE';
+  initialCap?: number;
+  /** FLAT. */
+  blockSize?: number;
+  /** HNSW. */
+  m?: number;
+  efConstruction?: number;
+  efRuntime?: number;
+  epsilon?: number;
+}
+
+export type SearchFieldIndex =
+  | SearchTextField
+  | SearchTagField
+  | SearchNumericField
+  | SearchGeoField
+  | SearchGeoShapeField
+  | SearchVectorField;
+
 export class RSearch {
   constructor(private redis: Redis) {}
   private async call(...args: (string | number | Buffer)[]): Promise<any> {
     return (this.redis as any).call(...args);
   }
-  async createIndex(name: string, schema: string[], options: { on?: string; prefixes?: string[] } = {}): Promise<void> {
-    const args: string[] = ['FT.CREATE', name, 'ON', options.on ?? 'HASH'];
+  private pushSortable(out: string[], mode?: SearchSortMode): void {
+    if (!mode) return;
+    out.push('SORTABLE');
+    if (mode === 'UNF') out.push('UNF');
+  }
+
+  /** Convert structured fields to FT.CREATE/FT.ALTER schema tokens. */
+  private structuredSchemaTokens(fields: SearchFieldIndex[]): string[] {
+    const out: string[] = [];
+    for (const f of fields) {
+      if (!f.property) throw new Error('SearchFieldIndex.property is required');
+      out.push(f.property);
+      if (f.as) out.push('AS', f.as);
+      switch (f.type) {
+        case 'TEXT':
+          out.push('TEXT');
+          if (f.noStem) out.push('NOSTEM');
+          if (f.phonetic) out.push('PHONETIC', f.phonetic);
+          if (f.weight !== undefined) out.push('WEIGHT', String(f.weight));
+          if (f.withSuffixTrie) out.push('WITHSUFFIXTRIE');
+          if (f.indexEmpty) out.push('INDEXEMPTY');
+          if (f.indexMissing) out.push('INDEXMISSING');
+          this.pushSortable(out, f.sortable);
+          if (f.noIndex) out.push('NOINDEX');
+          break;
+        case 'TAG':
+          out.push('TAG');
+          if (f.caseSensitive) out.push('CASESENSITIVE');
+          if (f.separator !== undefined) out.push('SEPARATOR', f.separator);
+          if (f.withSuffixTrie) out.push('WITHSUFFIXTRIE');
+          if (f.indexEmpty) out.push('INDEXEMPTY');
+          if (f.indexMissing) out.push('INDEXMISSING');
+          this.pushSortable(out, f.sortable);
+          if (f.noIndex) out.push('NOINDEX');
+          break;
+        case 'NUMERIC':
+          out.push('NUMERIC');
+          if (f.indexMissing) out.push('INDEXMISSING');
+          this.pushSortable(out, f.sortable);
+          if (f.noIndex) out.push('NOINDEX');
+          break;
+        case 'GEO':
+          out.push('GEO');
+          if (f.indexMissing) out.push('INDEXMISSING');
+          this.pushSortable(out, f.sortable);
+          if (f.noIndex) out.push('NOINDEX');
+          break;
+        case 'GEOSHAPE':
+          out.push('GEOSHAPE');
+          if (f.coordinateSystem) out.push(f.coordinateSystem);
+          if (f.noIndex) out.push('NOINDEX');
+          if (f.indexMissing) out.push('INDEXMISSING');
+          break;
+        case 'VECTOR': {
+          const algorithm = f.algorithm ?? 'FLAT';
+          const params: (string | number)[] = [
+            'TYPE', f.dataType ?? 'FLOAT32',
+            'DIM', f.dim,
+            'DISTANCE_METRIC', f.distanceMetric ?? 'COSINE',
+          ];
+          if (f.initialCap !== undefined) params.push('INITIAL_CAP', f.initialCap);
+          if (algorithm === 'FLAT') {
+            if (f.blockSize !== undefined) params.push('BLOCK_SIZE', f.blockSize);
+          } else {
+            if (f.m !== undefined) params.push('M', f.m);
+            if (f.efConstruction !== undefined) params.push('EF_CONSTRUCTION', f.efConstruction);
+            if (f.efRuntime !== undefined) params.push('EF_RUNTIME', f.efRuntime);
+            if (f.epsilon !== undefined) params.push('EPSILON', f.epsilon);
+          }
+          out.push('VECTOR', algorithm, String((3 + (params.length - 6) / 2) * 2), ...params.map(String));
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  private indexOptionsArgs(options: SearchIndexOptions): string[] {
+    const args: string[] = ['ON', options.on ?? 'HASH'];
     if (options.prefixes?.length) args.push('PREFIX', String(options.prefixes.length), ...options.prefixes);
-    args.push('SCHEMA', ...schema);
+    if (options.filter) args.push('FILTER', options.filter);
+    if (options.language) args.push('LANGUAGE', options.language);
+    if (options.languageField) args.push('LANGUAGE_FIELD', options.languageField);
+    if (options.score !== undefined) args.push('SCORE', String(options.score));
+    if (options.scoreField) args.push('SCORE_FIELD', options.scoreField);
+    if (options.payloadField) args.push('PAYLOAD_FIELD', options.payloadField);
+    if (options.maxTextFields) args.push('MAXTEXTFIELDS');
+    if (options.temporaryMs !== undefined) args.push('TEMPORARY', String(options.temporaryMs));
+    if (options.noOffsets) args.push('NOOFFSETS');
+    if (options.noHL) args.push('NOHL');
+    if (options.noFields) args.push('NOFIELDS');
+    if (options.noFreqs) args.push('NOFREQS');
+    if (options.stopwords) args.push('STOPWORDS', String(options.stopwords.length), ...options.stopwords);
+    if (options.skipInitialScan) args.push('SKIPINITIALSCAN');
+    return args;
+  }
+
+  async createIndex(name: string, schema: string[] | SearchFieldIndex[], options: SearchIndexOptions = {}): Promise<void> {
+    if (schema.length === 0) throw new Error('At least one field index should be defined');
+    const structured = typeof schema[0] !== 'string';
+    const tokens = structured
+      ? this.structuredSchemaTokens(schema as SearchFieldIndex[])
+      : (schema as string[]);
+    const args: string[] = ['FT.CREATE', name, ...this.indexOptionsArgs(options), 'SCHEMA', ...tokens];
     await this.call(...args);
   }
   async dropIndex(name: string, deleteDocs = false): Promise<void> {
@@ -735,11 +920,18 @@ export class RSearch {
     await this.call('FT.CURSOR', 'DEL', index, cursorId);
   }
 
-  /** Java `alter(index, skipInitialScan, fields...)`: FT.ALTER ... SCHEMA ADD. */
-  async alter(index: string, schema: string[], skipInitialScan = false): Promise<void> {
+  /** Java `alter(index, skipInitialScan, fields...)`: FT.ALTER ... SCHEMA ADD,
+   *  accepting raw tokens or structured `SearchFieldIndex` objects. */
+  async alter(index: string, schema: string[] | SearchFieldIndex[], skipInitialScan = false): Promise<void> {
+    if (schema.length === 0) throw new Error('At least one field index should be defined');
     const args: string[] = ['FT.ALTER', index];
     if (skipInitialScan) args.push('SKIPINITIALSCAN');
-    args.push('SCHEMA', 'ADD', ...schema);
+    args.push('SCHEMA');
+    if (typeof schema[0] === 'string') {
+      args.push('ADD', ...(schema as string[]));
+    } else {
+      for (const field of schema as SearchFieldIndex[]) args.push('ADD', ...this.structuredSchemaTokens([field]));
+    }
     await this.call(...args);
   }
 
