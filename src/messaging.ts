@@ -1054,7 +1054,16 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
     }
     if (next !== null) void this.scheduleTask(next);
   }
-  async offer(value: V, delayMs: number): Promise<void> {
+  /** Java `add(V)`: unsupported on a delayed queue — use timed `offer`. */
+  async add(_value: V): Promise<boolean> {
+    throw new Error("Use 'offer' method with timeout param");
+  }
+  /** Java `offer(V)`: unsupported without a delay. */
+  async offer(value: V): Promise<void>;
+  async offer(value: V, delayMs: number): Promise<void>;
+  async offer(value: V, delayMs?: number): Promise<void> {
+    if (delayMs === undefined) throw new Error("Use 'offer' method with timeout param");
+    if (delayMs < 0) throw new Error("Delay can't be negative");
     const now = await serverNowMs(this.redis);
     const deadline = now + delayMs;
     // 8 opaque id bytes as Buffer: exact bytes reach Lua (no UTF-8 expansion).
@@ -1123,8 +1132,17 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
     }
     return false;
   }
-  async remove(value: V): Promise<boolean> {
-    const enc = this.encodeValue(value);
+  /** Java `Queue.remove()`: poll or throw NoSuchElementException. */
+  async remove(): Promise<V>;
+  /** Java `Queue.remove(Object)`: remove a staged member. */
+  async remove(value: V): Promise<boolean>;
+  async remove(value?: V): Promise<V | boolean> {
+    if (arguments.length === 0) {
+      const v = await this.poll();
+      if (v === null) throw new Error('NoSuchElementException');
+      return v;
+    }
+    const enc = this.encodeValue(value as V);
     const members: Buffer[] = await this.redis.lrangeBuffer(this.queueKey, 0, -1);
     for (const m of members) {
       const buf = Buffer.isBuffer(m) ? m : Buffer.from(String(m), 'latin1');
@@ -1136,6 +1154,35 @@ export class RDelayedQueue<V = any> extends RedisDataStructure {
       }
     }
     return false;
+  }
+  /** Java `indexOf(V)`: unsupported on a delayed queue. */
+  async indexOf(_value: V): Promise<number> {
+    throw new Error('UnsupportedOperationException');
+  }
+  /** Java `pollLastAndOfferFirstTo(dest)`: atomically move the staging-list
+   *  tail (removing its timeout entry) to the destination head. */
+  async pollLastAndOfferFirstTo(dest: string): Promise<V | null> {
+    const lua = `local v = redis.call('rpop', KEYS[1])
+if v == false then return nil end
+redis.call('zrem', KEYS[2], v)
+local _, value = struct.unpack('Bc0Lc0', v)
+redis.call('lpush', KEYS[3], value)
+return value`;
+    try {
+      const raw = await luaEval(this.redis, lua, 3, this.queueKey, this.timeoutKey, dest);
+      return raw === null || raw === undefined ? null : (this.decodeValue(String(raw)) as V);
+    } catch {
+      const raw: any = (this.redis as any).rpopBuffer
+        ? await (this.redis as any).rpopBuffer(this.queueKey)
+        : await this.redis.rpop(this.queueKey);
+      if (raw === null || raw === undefined) return null;
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'latin1');
+      await this.redis.zrem(this.timeoutKey, buf);
+      const u = unpackDelayedMember(buf);
+      const payload = u ? u.enc : buf.toString('utf8');
+      await this.redis.lpush(dest, payload);
+      return this.decodeValue(payload) as V;
+    }
   }
   async clear(): Promise<void> {
     await this.redis.del(this.queueKey, this.timeoutKey);

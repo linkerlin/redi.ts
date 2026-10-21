@@ -107,7 +107,7 @@ pattern `getActiveTopics`, `StatusListener` callbacks,
 `removeListener(handler)`),
 `RStream` (JSON field names; groups/claim/pending/nack, `fastClaim`/
 `fastAutoClaim` JUSTID, `readMany`/`readGroupMany` multi-stream reads
-(per-stream groups supported), `addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`),
+(per-stream groups supported), `addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`, negative-delay validation, `pollLastAndOfferFirstTo`, no-arg `remove`),
 `RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, batch `get`/`set`/`asBitSet`, Redis 8 `BITOP`

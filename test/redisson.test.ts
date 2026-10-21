@@ -1984,3 +1984,19 @@ describe('phase 53: atomic listener registration (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 54: delayed queue 4.6.1 surface (mock)', () => {
+  it('rejects unsupported add/single-arg offer/indexOf and supports remove()', async () => {
+    const r = make();
+    const dq = r.getDelayedQueue<string>('p54:dq');
+    await expect(dq.offer('x')).rejects.toThrow(/offer/);
+    await expect(dq.offer('x', -1)).rejects.toThrow(/negative/);
+    await expect(dq.add('x')).rejects.toThrow(/offer/);
+    await expect(dq.indexOf('x')).rejects.toThrow(/Unsupported/);
+    await expect(dq.remove()).rejects.toThrow(/NoSuchElement/);
+    await dq.offer('y', 1000);
+    expect(await dq.remove()).toBe('y');
+    expect(await dq.remove('missing')).toBe(false);
+    await r.shutdown();
+  });
+});

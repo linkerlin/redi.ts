@@ -75,7 +75,7 @@
 
 **`RMultimapCache`**：可选周期清扫 ✅ (2.1.0，`enablePeriodicEviction(intervalMs)` / `evictExpired()` / `disablePeriodicEviction()`；默认仍为 `checkExpiry` 惰性)。
 
-**`RDelayedQueue`**：`size()` 已对齐 Java（staging LLEN）✅、`delete()` 不再误删目标队列 ✅ (1.1.0)；**后台迁移调度器 ✅ (2.0.0)**：`start()/stop()/destroy()`（Java `QueueTransferTask`/`QueueTransferService` 移植——channel 订阅走 `duplicate()` 连接、deadline 定时器 >10ms 定时否则立即、5s 错误重试、迁移 Lua 返回下一表头 deadline 重臂；`destroy()` = 摘除任务不删数据），单机 + 集群实测；仍缺 `readAll/poll(limit)/move/addListener`、负延迟校验。
+**`RDelayedQueue`**：`size()` 已对齐 Java（staging LLEN）✅、`delete()` 不再误删目标队列 ✅ (1.1.0)；**后台迁移调度器 ✅ (2.0.0)**：`start()/stop()/destroy()`（Java `QueueTransferTask`/`QueueTransferService` 移植——channel 订阅走 `duplicate()` 连接、deadline 定时器 >10ms 定时否则立即、5s 错误重试、迁移 Lua 返回下一表头 deadline 重臂；`destroy()` = 摘除任务不删数据），单机 + 集群实测；`readAll/poll(count)` ✅ (2.12.0)、负延迟校验、`add`/单参 `offer`/`indexOf` 拒绝、无参 `remove()`、`pollLastAndOfferFirstTo` ✅ (2.32.0)；4.6.1 面已收口（`move` 仅存在于新版源码，记为版本外）。
 
 **`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；`delete()` override 已补 ✅ (1.1.0，容量 key 与 LIST 一并清理；`clear()` 保持 Java 只删 LIST)。
 

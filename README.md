@@ -70,7 +70,7 @@ const redisson = Redisson.create({ client: redis });
 - 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
 - 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`；每实例单组、publish 返回订阅者数、自动 XTRIM）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除
 - 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany`/`readGroupMany`（支持每流独立 group）、`addListener`（keyspace xadd/xdel/xgroup-*））
-- 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`；`readAll`/`poll(count)`）
+- 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`；`readAll`/`poll(count)`、负延迟校验、`pollLastAndOfferFirstTo`、无参 `remove()`）
 - 环形缓冲：`RRingBuffer`
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
 - 去重计数：`RHyperLogLog`

@@ -1,3 +1,21 @@
+## 2.32.0 — 2026-10-21
+
+Phase 54: RDelayedQueue 4.6.1 surface. Full suite:
+**284 tests / 57 files**.
+
+- `offer(value, delayMs)` now rejects negative delays
+  (`Delay can't be negative`).
+- `add(value)` and single-argument `offer(value)` throw the Java
+  "Use 'offer' method with timeout param" error; `indexOf` throws
+  UnsupportedOperationException.
+- `remove()` (no argument) polls the destination or throws
+  NoSuchElementException; `remove(value)` still removes staged members.
+- `pollLastAndOfferFirstTo(dest)`: atomic staging RPOP + timeout ZREM +
+  destination LPUSH (Lua, Buffer-safe), decodes the moved value.
+- Tests: 1 mock (validation/remove) + `test/live-phase54.test.ts` 1/1
+  (negative delay, staged move to destination, pending/size updates,
+  ready-after-delay poll, empty remove throws).
+
 ## 2.31.0 — 2026-10-21
 
 Phase 53: atomic keyspace listeners. Full suite:
