@@ -1,3 +1,18 @@
+## 2.40.0 — 2026-10-21
+
+Phase 62: RSetCache listeners + newCondition parity. Full suite:
+**298 tests / 65 files**.
+
+- `RSetCache.addListener` / `removeListener`: `onAdd` → `zadd`,
+  `onRemove` → `zrem` via keyspace notifications; `SetExpiredListener` is not
+  implemented (Java uses a local expiry scheduler).
+- `newCondition()` now exists on `RLock`, `RFairLock`, RW read/write views,
+  `RMultiLock` and `RRedLock`, throwing `UnsupportedOperationException` — the
+  exact Java 4.6.1 behavior (RedissonBaseLock has a TODO).
+- Tests: 1 mock (SetCache registration + newCondition everywhere) +
+  `test/live-phase62.test.ts` 1/1 (zadd/zrem delivery, removal silence,
+  condition errors; config uses the shared lock).
+
 ## 2.39.0 — 2026-10-21
 
 Phase 61: IncrementArgs via Lua-CAS. Full suite:

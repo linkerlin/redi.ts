@@ -674,6 +674,10 @@ export class RLock extends RedisDataStructure {
   async isHeldByCurrentThread(threadId: number | string = 1): Promise<boolean> {
     return this.isHeldByThread(threadId);
   }
+  /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +952,10 @@ export class RFairLock extends RedisDataStructure {
     for (const t of this.timers.values()) clearInterval(t);
     this.timers.clear();
   }
+  /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
 }
 
 export class RNonReentrantFairLock extends RFairLock {
@@ -1030,6 +1038,10 @@ class RWBase extends RedisDataStructure {
       await waitForWake(this.redis, this.channel, Math.min(remain, 1000));
       if (Date.now() >= deadline) return false;
     }
+  }
+  /** Java 4.6.1 read/write lock `newCondition()` is unimplemented. */
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
   }
 }
 
@@ -1463,6 +1475,10 @@ export class RMultiLock {
     }
     if (first) throw first;
   }
+  /** Java 4.6.1 MultiLock `newCondition()` throws. */
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
 }
 
 export class RRedLock {
@@ -1532,5 +1548,9 @@ export class RRedLock {
         // ignore not-held (quorum rollback parity)
       }
     }
+  }
+  /** Java 4.6.1 RedLock `newCondition()` throws. */
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
   }
 }

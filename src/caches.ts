@@ -998,12 +998,14 @@ return 1`;
 export class RSetCache<V = any> extends RedisKeyedStructure<V> {
   private idleKey: string;
   private touchKey: string;
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.idleKey = prefixName('redisson__idle__set', name);
     // TS extension (Redisson has no SetCache maxIdle): last-touch timestamps.
     // Java never reads this key, so cross-language presence is unaffected.
     this.touchKey = suffixName(name, 'redisson_touch');
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onAdd: 'zadd', onRemove: 'zrem' });
   }
   // NOTE on idle semantics: idle ZSET holds the DURATION; last-touch rides in
   // touchKey. contains() enforces now-lastTouch<=duration and refreshes the
@@ -1118,6 +1120,14 @@ export class RSetCache<V = any> extends RedisKeyedStructure<V> {
   // Java RSetCache.clear() delegates to delete(). The idle/touch pair is a TS
   // extension, so delete() must remove it explicitly (main ZSET alone would
   // leave orphaned sliding-window metadata behind).
+  /** Java `addListener(ObjectListener)`: SetAddListener → zadd,
+   *  SetRemoveListener → zrem. SetExpiredListener is not implemented. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
+  }
   override async delete(): Promise<boolean> {
     return this.deleteKeys([this.name, this.idleKey, this.touchKey]);
   }

@@ -36,7 +36,7 @@
 
 | Structure | Redis layout | Status |
 |-----------|--------------|--------|
-| RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim; Spin 默认指数退避 1→128ms×2+jitter（`BackOff` 可配，`getSpinLock(name, backOff?)`）；`lockInterruptibly(lease?, signal?, threadId?)` 以 AbortSignal 模拟线程中断（等待中 abort → `AbortError`，不获取锁）；unlock-latch 为按请求幂等键，跨语言无影响 | WIRE_OK + live mutual exclusion both directions ✅ + live phase 28 (contended abort ✅) |
+| RLock / Spin / NonReentrant | HASH `{name}` field=`uuid:thread`, channel `redisson_lock__channel:{name}`; Lua acquire/renew/unlock/force verbatim; Spin 默认指数退避 1→128ms×2+jitter（`BackOff` 可配，`getSpinLock(name, backOff?)`）；`lockInterruptibly(lease?, signal?, threadId?)` 以 AbortSignal 模拟线程中断（等待中 abort → `AbortError`，不获取锁）；unlock-latch 为按请求幂等键，跨语言无影响；`newCondition()` 与 Java 4.6.1 一致抛 UnsupportedOperationException（含 Fair/RW/Multi/Red） | WIRE_OK + live mutual exclusion both directions ✅ + live phase 28 (contended abort ✅) + live phase 62（newCondition 拒绝 ✅） |
 | RFairLock / NonReentrantFair | + LIST `redisson_lock_queue:{name}` + ZSET `redisson_lock_timeout:{name}`, per-waiter `channel:field`, FIFO Lua verbatim; `delete()/unlink()` clears all three keys + local watchdog timers | WIRE_OK + live phase 16 (capacity/keys re-init ✅) |
 | RReadWriteLock | single HASH + `mode`, `redisson_rwlock:{name}`; unlock/forceUnlock wake constants follow Java `LockPubSub` (read → `UNLOCK_MESSAGE` 0 wake-one, write → `READ_UNLOCK_MESSAGE` 1 wake-all), downgrade parity; read locks create per-acquisition `<tagged>:<field>:rwlock_timeout:<n>` keys (SET 1 + PX), delete them on unlock and recompute the HASH TTL from the remaining keys' max PTTL; watchdog renews every timeout key + HASH; views: `isLocked` (read: `mode=='read' or (mode=='write' and hlen>2)`), `isHeldByThread`, `getHoldCount`, `forceUnlock` | WIRE_OK + live phase 3 (互斥双向+共享读） + live phase 19 (视图/强解 ✅) + live phase 29 (Java 读锁与 TS 读锁混部存活 ✅) |
 | RFencedLock | RLock HASH + `redisson_lock_token:{name}` (`INCR` incl. re-entry, returns `{-1,token}`); `tryLockAndGetToken(waitTimeMs?, leaseTimeMs?, threadId?)` follows 4.6.1 (omitted wait = non-blocking, otherwise waits); `delete()` clears token so the next acquire restarts at 1 | WIRE_OK + live phase 3 (token 跨语言单调） + live phase 16 (token reset ✅) + live phase 22 (TS/Java token 序列 n→n+1→n+2 ✅) |
@@ -55,7 +55,7 @@
 | RIdGenerator | counter + `{name}:allocation` interval cache | WIRE_OK |
 | RMapCache | HASH packed `<dQ` + `redisson__timeout__set:{name}`/`redisson__idle__set:{name}`/`last_access`/`redisson_options` + `redisson_map_cache_*:{name}` events（明令 +Buffer 传输：Lua 传参无法承载二进制，容量淘汰为尽力而为；`updated` 为 `[key,new,old]` 三段）; `putAll(mapping,ttl,maxIdle)` per-key、`expireEntry`（拒已过期条目、重写 maxIdle 打包）、`expireEntries` 批量、`remainTimeToLive`（`-2` 缺失/已过期、`-1` 无过期）、`getWithTTLOnly`（不刷新 idle/access）、`getMaxSize`/`setMaxSize`、`compute`/`computeIfAbsent`（per-key 锁 + TTL）; `addListener`/`removeListener` 走独立连接 + `messageBuffer`（u64LE 长度前缀字节保真），写 `has-listeners=1` 使 Java 写端也发布，事件负载以 Buffer 发送; `unlink()` clears all companions | WIRE_OK + live bidirectional ✅ + live phase 6（四类事件进 Java 监听 ✅） + live phase 19（双向事件 ✅、过期语义 ✅） + live phase 28（批量 TTL/only-read/max-size ✅） + live phase 30（compute + Java mc-get ✅） |
 | RMapCacheNative | plain HASH + `HPEXPIRE`/`HPEXPIREAT` + `HPERSIST`/`HPTTL` `FIELDS` (≥7.4); `put`/`putIfAbsent`/`fastPut`/`fastPutIfAbsent`/`putIfExist`/`fastPutIfExist`（`fastPutIfExist` 为 TS 扩展；4.6.1 jar 仅到 `fastPutIfAbsent`） 接受毫秒或 **绝对 `Date`**（HPEXPIRE/HPEXPIREAT）、`putIfAllKeysExist`/`putIfAllKeysAbsent`（全字段条件 Lua，含逐字段 TTL；结构化 PutArgs 走 HSETEX FXX/FNX）、`putAll`（HSETEX KEEPTTL/PX/PXAT，回退逐字段）、`compute`/`computeIfAbsent`（per-key 分布式锁 + 字段 TTL）、`addListener/removeListener`（put/incr/remove + expired/clearExpire，field 为 null），`expireEntry(IfNotSet/IfGreater/IfLess)`、`expireEntries(IfNotSet/IfGreater/IfLess)` 批量、`clearExpire`（HPERSIST，单键/批量/整 HASH）、`remainTimeToLive`（HPTTL，单键/批量，`-2` 缺失）；4.6.1 Java 对 HPERSIST `-2` 返回 `null`，TS 统一 `false` | NATIVE_OK + live phase 6（TTL 跨语言过期 ✅） + live phase 19（条件过期/HPERSIST/putIfAbsent 双向 ✅） + live phase 33（Date/HPEXPIREAT ✅） + live phase 40（条件批量/批量过期 + Java 读 ✅） + live phase 42（fastPut 家族 + 字段 TTL/Java 读 ✅） + live phase 51（HSETEX 结构化批量/compute ✅） + live phase 58（批量 TTL ✅） + live phase 59（字段监听 ✅） |
-| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable); `delete()/clear()` removes idle + touch | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) + live phase 16 (zero residue ✅) |
+| RSetCache | ZSET(abs expiry/`MaxInt64`) + `redisson__idle__set:{name}` durations + `{name}:redisson_touch` last-touch (TS extension — Redisson has TTL-only SetCache; touch key is Java-invisible, presence stays cross-readable); `delete()/clear()` removes idle + touch; `addListener/removeListener` for zadd/zrem (SetExpiredListener not implemented) | WIRE_OK + live bidirectional ✅ + live phase 5 (idle expiry ✅) + live phase 16 (zero residue ✅) + live phase 62（zadd/zrem 监听 ✅） |
 | RMultimap (Set/List) | HASH field→id + `{name}:{id}` collections, Highway internal ids; `delete()/clear()` reads the HASH first and removes every child collection | WIRE_OK + live phase 16 (Java reads empty after delete ✅) |
 | RSet/ListMultimapCache (+Native) | + per-key TTL ZSET / `HPEXPIRE`; `delete()/clear()`/`unlink()` also removes the TTL ZSET and (Native) child collections; opt-in `enablePeriodicEviction(intervalMs)` / `evictExpired()` sweeps child + HASH field + TTL member (default lazy) | WIRE_OK / NATIVE_OK + live phase 16 (zero residue ✅) + live phase 22 (周期清扫 ✅) |
 | RLocalCachedMap | data = RMap wire (live phase 9 Java 直读/直写 ✅); invalidation = local JSON broadcast, UPDATE 带值 / INVALIDATE 语义均有对照测试; near-cache honours `timeToLiveMs`/`maxIdleMs`/`maxSize` + `evictionPolicy` LRU/LFU (entries track expiry, last access and hit count; local reads await subscription ack); `getCachedMap()` snapshot; bounded `preloadCache(count)` (HSCAN) ✅ (2.16.0); Java binary protocol not ported — disable near-cache for mixed deploys; `loader/writer` deliberately not ported (external-store semantics, no wire impact) | PARTIAL + live phase 16 (TTL/idle ✅) + mock phase 22 (LRU/LFU + view ✅) + live phase 38 (preload count ✅) |
@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 296 tests / 64 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 298 tests / 65 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
@@ -95,8 +95,8 @@
   phase-52 set count/listeners, phase-53 atomic listeners, phase-54 delayed
   queue surface, phase-55 VectorSet iterators, phase-56 batched putAll,
   phase-57 SVS-VAMANA vectors, phase-58 batch TTLs, phase-59 map field
-  listeners, phase-60 conditional compareAndDelete and phase-61 IncrementArgs),
-  `interop`
+  listeners, phase-60 conditional compareAndDelete, phase-61 IncrementArgs and
+  phase-62 SetCache listeners/newCondition), `interop`
   (live python codec/hash), `live-interop`
   (bidirectional vs Redisson 4.6.1: 20 Java→TS reads + 28 TS→Java reads,
   all PASS), `live-sync` (mutual exclusion both directions, shared semaphore
@@ -201,6 +201,8 @@
   1/1 PASS),
   `live-phase61` (IncrementArgs bounds/saturation/BigInt/TTL, 20 concurrent
   CAS increments, 1/1 PASS),
+  `live-phase62` (SetCache zadd/zrem listeners and newCondition rejection,
+  1/1 PASS),
   `live-cluster` (3-master cluster on 7100-7102: bucket/map/atomic/lock with a
   second client contending through slot routing, MapCache TTL + events over the
   cluster bus, delayed-queue migrator end-to-end, rate limiter + topic, 4/4 PASS).

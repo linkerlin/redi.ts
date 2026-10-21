@@ -2113,3 +2113,28 @@ describe('phase 61: IncrementArgs emulation (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 62: SetCache listeners + newCondition (mock)', () => {
+  it('registers SetCache listeners and rejects newCondition everywhere', async () => {
+    const r = make();
+    const sc = r.getSetCache<string>('p62:sc');
+    const id = await sc.addListener({ onAdd: () => undefined, onRemove: () => undefined });
+    expect(id).toBeGreaterThan(0);
+    await sc.removeListener(id);
+    await sc.removeListener(id);
+    await sc.removeListener(999999);
+
+    const lock = r.getLock('p62:l');
+    const fair = r.getFairLock('p62:f');
+    const rw = r.getReadWriteLock('p62:rw');
+    const multi = r.getMultiLock(lock);
+    const red = r.getRedLock(lock);
+    expect(() => lock.newCondition()).toThrow(/Unsupported/);
+    expect(() => fair.newCondition()).toThrow(/Unsupported/);
+    expect(() => rw.readLock.newCondition()).toThrow(/Unsupported/);
+    expect(() => rw.writeLock.newCondition()).toThrow(/Unsupported/);
+    expect(() => multi.newCondition()).toThrow(/Unsupported/);
+    expect(() => red.newCondition()).toThrow(/Unsupported/);
+    await r.shutdown();
+  });
+});

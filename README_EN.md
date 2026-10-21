@@ -83,7 +83,7 @@ KEEPTTL/PX/PXAT, batch `remainTimeToLive`/`clearExpire`, field listeners,
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
 (`countIntersection` with LIMIT, sadd/srem/spop/store keyspace listeners,
-lazy `iterator`/`stream`),
+SetCache zadd/zrem listeners, lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE, variadic adds/`*IfExists`/`poll(count)`/
 `RPOPLPUSH`, `subscribeOnElements`/`unsubscribe`, BRPOP-with-name), `RScoredSortedSet` (score
