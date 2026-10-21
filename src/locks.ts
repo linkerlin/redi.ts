@@ -15,6 +15,7 @@
 import type { Redis } from 'ioredis';
 import { RedisDataStructure } from './base.js';
 import { LockNotHeldError, NonReentrantError, luaEval, prefixName, serverNowMs, sleep, suffixName, toNumber } from './util.js';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 import { randomBytes } from 'node:crypto';
 
 export const UNLOCK_MSG = '0';
@@ -543,12 +544,14 @@ export class RLock extends RedisDataStructure {
   protected clientId: string;
   protected watchdogMs: number;
   private timers = new Map<string, any>();
+  private listenerHub: KeyspaceListenerHub;
 
   constructor(redis: Redis, name: string, clientId: string, watchdogMs = 30000) {
     super(redis, name);
     this.channel = prefixName('redisson_lock__channel', name);
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
 
   getChannel(): string {
@@ -673,6 +676,14 @@ export class RLock extends RedisDataStructure {
   /** Back-compat alias. */
   async isHeldByCurrentThread(threadId: number | string = 1): Promise<boolean> {
     return this.isHeldByThread(threadId);
+  }
+  /** Java `RObservable.addListener`: expired/deleted key events for the lock
+   *  HASH. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
   /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
   newCondition(): never {
@@ -806,6 +817,7 @@ export class RFairLock extends RedisDataStructure {
   protected watchdogMs: number;
   private timers = new Map<string, any>();
   protected reentrant: boolean;
+  private listenerHub: KeyspaceListenerHub;
 
   constructor(redis: Redis, name: string, clientId: string, watchdogMs = 30000, reentrant = true) {
     super(redis, name);
@@ -815,6 +827,7 @@ export class RFairLock extends RedisDataStructure {
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
     this.reentrant = reentrant;
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
 
   protected field(threadId: number | string = 1): string {
@@ -952,6 +965,14 @@ export class RFairLock extends RedisDataStructure {
     for (const t of this.timers.values()) clearInterval(t);
     this.timers.clear();
   }
+  /** Java `RObservable.addListener`: expired/deleted key events for the lock
+   *  HASH. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
+  }
   /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
   newCondition(): never {
     throw new Error('UnsupportedOperationException');
@@ -990,11 +1011,13 @@ class RWBase extends RedisDataStructure {
   protected watchdogMs: number;
   protected channel: string;
   private timers = new Map<string, any>();
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, clientId: string, watchdogMs: number, channel: string) {
     super(redis, name);
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
     this.channel = channel;
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
   protected primary(tid: number | string): string {
     return `${this.clientId}:${tid}`;
@@ -1038,6 +1061,13 @@ class RWBase extends RedisDataStructure {
       await waitForWake(this.redis, this.channel, Math.min(remain, 1000));
       if (Date.now() >= deadline) return false;
     }
+  }
+  /** Java `RObservable.addListener`: expired/deleted key events for the RW HASH. */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
   /** Java 4.6.1 read/write lock `newCondition()` is unimplemented. */
   newCondition(): never {

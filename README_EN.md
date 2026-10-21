@@ -66,8 +66,8 @@ work on a Cluster out of the box; `test/live-cluster.test.ts` exercises a real
 
 ## Coverage
 
-60+ structures: locks (`RLock` with `lockInterruptibly` + AbortSignal/`Fair`/
-`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`
+60+ structures: locks (`RLock` with `lockInterruptibly` + AbortSignal and
+expired/del keyspace listeners/`Fair`/`ReadWrite`/`Spin`/`NonReentrant`/`Fenced`
 with `tryLockAndGetToken` wait/non-blocking forms/`Multi`/`Red`, plus Java-style
 key synchronizers through
 `map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/

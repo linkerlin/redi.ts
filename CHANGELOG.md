@@ -1,3 +1,16 @@
+## 2.43.0 — 2026-10-21
+
+Phase 65: lock keyspace listeners. Full suite:
+**304 tests / 68 files**.
+
+- `RLock`, `RFairLock` and RW read/write views expose
+  `addListener` / `removeListener` mapped to `expired`/`del` keyspace events,
+  matching Java's inherited `RedissonObject.addListener` (ExpiredObjectListener
+  / DeletedObjectListener).
+- Tests: 1 mock (registration/removal on all lock types) +
+  `test/live-phase65.test.ts` 1/1 (lease expiry → expired, unlock → deleted,
+  removal silence; config uses the shared lock).
+
 ## 2.42.0 — 2026-10-21
 
 Phase 64: local cached map expiration events. Full suite:

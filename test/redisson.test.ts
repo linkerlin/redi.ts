@@ -2168,3 +2168,25 @@ describe('phase 64: local cached map expiration policy (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 65: lock keyspace listeners (mock)', () => {
+  it('registers/removes expired/deleted listeners on lock types', async () => {
+    const r = make();
+    const lock = r.getLock('p65:l');
+    const fair = r.getFairLock('p65:f');
+    const rw = r.getReadWriteLock('p65:rw');
+    const ids = [
+      await lock.addListener({ onExpired: () => undefined, onDeleted: () => undefined }),
+      await fair.addListener({ onExpired: () => undefined, onDeleted: () => undefined }),
+      await rw.readLock.addListener({ onExpired: () => undefined }),
+      await rw.writeLock.addListener({ onDeleted: () => undefined }),
+    ];
+    expect(ids.every((id) => id > 0)).toBe(true);
+    await lock.removeListener(ids[0]);
+    await fair.removeListener(ids[1]);
+    await rw.readLock.removeListener(ids[2]);
+    await rw.writeLock.removeListener(ids[3]);
+    await lock.removeListener(ids[0]);
+    await r.shutdown();
+  });
+});
