@@ -1,3 +1,13 @@
+## 2.34.0 — 2026-10-21
+
+Phase 56: RMap batched putAll. Full suite:
+**287 tests / 59 files**.
+
+- `RMap.putAll(map[, batchSize])`: HSET in field batches (default 1000,
+  Java 4.6.1's overload); `batchSize` must be a positive integer.
+- Tests: 1 mock (5 fields batch 2, Map input, validation, empty map) +
+  `test/live-phase56.test.ts` 1/1 (field batching, Java `map-get` read).
+
 ## 2.33.0 — 2026-10-21
 
 Phase 55: RVectorSet iterator/stream. Full suite:

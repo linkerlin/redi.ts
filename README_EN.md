@@ -73,7 +73,8 @@ key synchronizers through
 `map.getLock(key)`/`getFairLock`/`getReadWriteLock`/`getSemaphore`/
 `getCountDownLatch`/`getPermitExpirableSemaphore` with byte-identical companion
 names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
-`readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
+`readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`, batched
+`putAll(map, batchSize)`)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry, conditional
 `putIfAllKeysExist`/`Absent` batches, structured `PutArgs` HSETEX with

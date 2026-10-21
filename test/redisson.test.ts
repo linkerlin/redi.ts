@@ -2000,3 +2000,20 @@ describe('phase 54: delayed queue 4.6.1 surface (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 56: RMap putAll batchSize (mock)', () => {
+  it('writes field batches and validates batchSize', async () => {
+    const r = make();
+    const m = r.getMap<string, string>('p56:m');
+    await m.putAll({ a: '1', b: '2', c: '3', d: '4', e: '5' }, 2);
+    expect(await m.size()).toBe(5);
+    expect(await m.get('c')).toBe('3');
+    await m.putAll(new Map([['f', '6']]), 1);
+    expect(await m.get('f')).toBe('6');
+    await expect(m.putAll({ x: '1' }, 0)).rejects.toThrow(/batchSize/);
+    await expect(m.putAll({ x: '1' }, 1.5)).rejects.toThrow(/batchSize/);
+    await m.putAll(new Map(), 2);
+    expect(await m.size()).toBe(6);
+    await r.shutdown();
+  });
+});

@@ -33,7 +33,7 @@
 
 **`RStream`**：组运维 ✅ (1.8.6) + 读/写全选项 ✅ (1.8.7：`addWithOptions`/`readGroupWith`/`nack`/`ackWithDelete`，参数顺序与源码逐字对齐)；`fastClaim`/`fastAutoClaim`（JUSTID）与 `readMany`/`readGroupMany`（多流 XREAD/XREADGROUP）✅ (2.5.0/2.10.0)；`addListener(ObjectListener)` ✅ (2.10.0，keyspace `xadd|xdel|xgroup-*`，需服务端 `notify-keyspace-events` K+E；未配置时订阅静默)；`readGroupMany` 每流独立 group/consumer ✅ (2.11.0，按 group+consumer 分桶各发一条 XREADGROUP)。
 
-**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace` ✅ (2.6.0)；仍缺 `putAllWithTTL`（在 `RMapCache.putAll`）、`remove` 联合返回的类型收窄（TS 以重载返回 `V|null|boolean`）。
+**`RMap`**：`put`/单键 `remove`/`putIfAbsent` 已改为单 Lua 原子旧值返回 ✅ (1.8.3)；`getLockByKey` 六件套 ✅ (1.4.0，命名与 Java 4.6.1 逐字节一致)；惰性 HSCAN 已补 ✅ (1.5.0：`keysIterator/valuesIterator/entriesIterator(pattern, count)` 异步迭代器、`randomKeys/randomEntries`（HRANDFIELD [WITHVALUES]）、`valueSize`（HSTRLEN））；物化视图 `keySet/values/entrySet(pattern?, count?)`、`readAllEntrySet` 与三参 `replace` ✅ (2.6.0)；`putAll(map[, batchSize])`（字段分批 HSET）✅ (2.34.0)；4.6.1 RMap 无 `putAllWithTTL`（对应 `RMapCache.putAll`，已实现）；`remove` 联合返回类型收窄属 TS 设计差异。
 
 **`RMapCache`**：`expireEntry`（单条目，拒已过期）、`expireEntries`（批量）、`remainTimeToLive`（`-2/-1/ms`）、`getWithTTLOnly`（不刷新 idle/access）、`getMaxSize`/`setMaxSize`、`putAll`（TTL 批量）、`compute`/`computeIfAbsent`（per-key 锁 + TTL）、事件订阅双向 ✅ (1.4.0/2.7.0/2.9.0)；`RLeasedMap` 归 PRO（开源 jar 无 `RedissonLeasedMap` 实现），不再作为开源缺口。
 

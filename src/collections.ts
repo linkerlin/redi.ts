@@ -374,14 +374,20 @@ if cur == ARGV[2] then return redis.call('hdel', KEYS[1], ARGV[1]) else return 0
       cursor = next;
     } while (cursor !== '0');
   }
-  async putAll(mapping: Record<string, V> | Map<K, V>): Promise<void> {
+  /** Java `putAll(Map)` / `putAll(Map, batchSize)`: HSET in field batches. */
+  async putAll(mapping: Record<string, V> | Map<K, V>, batchSize?: number): Promise<void> {
+    if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize <= 0)) {
+      throw new Error('batchSize must be a positive integer');
+    }
     const entries = mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping);
     if (entries.length === 0) return;
-    const flat: string[] = [];
-    for (const [k, v] of entries as any[]) flat.push(this.encodeKey(k), this.encodeValue(v));
-    // chunk to avoid oversized commands
-    for (let i = 0; i < flat.length; i += 2000) {
-      await this.redis.hset(this.name, ...flat.slice(i, i + 2000) as [string, string]);
+    const size = batchSize ?? 1000;
+    for (let i = 0; i < entries.length; i += size) {
+      const flat: string[] = [];
+      for (const [k, v] of entries.slice(i, i + size) as [K, V][]) {
+        flat.push(this.encodeKey(k), this.encodeValue(v));
+      }
+      await this.redis.hset(this.name, ...flat as [string, string]);
     }
   }
   async addAndGet(key: K, delta: number): Promise<number> {
