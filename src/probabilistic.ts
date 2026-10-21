@@ -1541,20 +1541,88 @@ export class RBloomFilterNative extends RedisDataStructure {
   }
 }
 
+export interface TDigestMergeArgs {
+  keys: string[];
+  compression?: number;
+  override?: boolean;
+}
+
+/** TS shape of Java's static `TDigestMergeArgs` factories. */
+export const TDigestMergeArgs = {
+  keys: (...keys: string[]): TDigestMergeArgs => ({ keys }),
+};
+
+export interface CuckooFilterInitArgs {
+  capacity: number;
+  bucketSize?: number;
+  maxIterations?: number;
+  expansion?: number;
+}
+
+export const CuckooFilterInitArgs = {
+  capacity: (capacity: number): CuckooFilterInitArgs => ({ capacity }),
+};
+
+export interface CuckooFilterAddArgs<V = string> {
+  items: V[];
+  capacity?: number;
+  noCreate?: boolean;
+}
+
+export const CuckooFilterAddArgs = {
+  items: <V>(items: V[]): CuckooFilterAddArgs<V> => ({ items }),
+};
+
+export interface TopKInitArgs {
+  topK: number;
+  width?: number;
+  depth?: number;
+  decay?: number;
+}
+
+export const TopKInitArgs = {
+  topK: (topK: number): TopKInitArgs => ({ topK }),
+};
+
 export class RCuckooFilter extends RedisDataStructure {
   async reserve(capacity: number): Promise<void> {
     await tryDo(this.redis, 'CF.RESERVE', this.name, capacity);
   }
-  /** Java `init(long)`: CF.RESERVE. */
-  async init(capacity: number): Promise<void> {
-    return this.reserve(capacity);
+  /** Java `init(long)` / `init(CuckooFilterInitArgs)`: CF.RESERVE. */
+  async init(capacity: number): Promise<void>;
+  async init(args: CuckooFilterInitArgs): Promise<void>;
+  async init(a: number | CuckooFilterInitArgs): Promise<void> {
+    if (typeof a === 'number') return this.reserve(a);
+    const args: (string | number)[] = [this.name, a.capacity];
+    if (a.bucketSize !== undefined) args.push('BUCKETSIZE', a.bucketSize);
+    if (a.maxIterations !== undefined) args.push('MAXITERATIONS', a.maxIterations);
+    if (a.expansion !== undefined) args.push('EXPANSION', a.expansion);
+    await tryDo(this.redis, 'CF.RESERVE', ...args);
   }
-  async add(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'CF.ADD', this.name, element)) === 1;
+
+  private async insert(mode: 'CF.INSERT' | 'CF.INSERTNX', args: CuckooFilterAddArgs<string>): Promise<string[]> {
+    if (args.items.length === 0) return [];
+    const params: (string | number)[] = [this.name];
+    if (args.capacity !== undefined) params.push('CAPACITY', args.capacity);
+    if (args.noCreate) params.push('NOCREATE');
+    params.push('ITEMS', ...args.items);
+    const r: any = await tryDo(this.redis, mode, ...params);
+    const arr = (r ?? []) as any[];
+    return args.items.filter((_, i) => toNumber(arr[i]) === 1);
   }
-  /** Java `addIfAbsent(V)`: CF.ADDNX. */
-  async addIfAbsent(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'CF.ADDNX', this.name, element)) === 1;
+
+  async add(element: string): Promise<boolean>;
+  async add(args: CuckooFilterAddArgs<string>): Promise<string[]>;
+  async add(a: string | CuckooFilterAddArgs<string>): Promise<boolean | string[]> {
+    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADD', this.name, a)) === 1;
+    return this.insert('CF.INSERT', a);
+  }
+  /** Java `addIfAbsent(V)` / `addIfAbsent(CuckooFilterAddArgs)`. */
+  async addIfAbsent(element: string): Promise<boolean>;
+  async addIfAbsent(args: CuckooFilterAddArgs<string>): Promise<string[]>;
+  async addIfAbsent(a: string | CuckooFilterAddArgs<string>): Promise<boolean | string[]> {
+    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADDNX', this.name, a)) === 1;
+    return this.insert('CF.INSERTNX', a);
   }
   async exists(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'CF.EXISTS', this.name, element)) === 1;
@@ -1584,8 +1652,21 @@ export class RTopK extends RedisDataStructure {
     await tryDo(this.redis, 'TOPK.RESERVE', this.name, k);
   }
   /** Java `init(int)` / `init(TopKInitArgs)`: TOPK.RESERVE with optional
-   *  width/depth/decay. */
-  async init(k: number, width?: number, depth?: number, decay?: number): Promise<void> {
+   *  width/depth/decay (all three are sent together, defaults 8/7/0.9). */
+  async init(k: number, width?: number, depth?: number, decay?: number): Promise<void>;
+  async init(args: TopKInitArgs): Promise<void>;
+  async init(a: number | TopKInitArgs, width?: number, depth?: number, decay?: number): Promise<void> {
+    let k: number;
+    if (typeof a === 'number') {
+      k = a;
+    } else {
+      k = a.topK;
+      if (a.width !== undefined || a.depth !== undefined || a.decay !== undefined) {
+        width = a.width ?? 8;
+        depth = a.depth ?? 7;
+        decay = a.decay ?? 0.9;
+      }
+    }
     if (width === undefined) return this.reserve(k);
     const args: (string | number)[] = [this.name, k, width];
     if (depth !== undefined) args.push(depth);
@@ -1599,18 +1680,46 @@ export class RTopK extends RedisDataStructure {
     return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : String(x)));
   }
   /** Java `incrementBy(V, int)`: TOPK.INCRBY → evicted item or null. */
-  async incrementBy(element: string, increment: number): Promise<string | null> {
-    const r: any = await tryDo(this.redis, 'TOPK.INCRBY', this.name, element, increment);
-    const v = Array.isArray(r) ? r[0] : r;
-    return v === null || v === undefined ? null : String(v);
+  async incrementBy(element: string, increment: number): Promise<string | null>;
+  /** Java `incrementBy(Map<V, Integer>)`: evicted item per entry. */
+  async incrementBy(counts: Map<string, number> | Record<string, number>): Promise<(string | null)[]>;
+  async incrementBy(
+    a: string | Map<string, number> | Record<string, number>,
+    increment?: number,
+  ): Promise<string | null | (string | null)[]> {
+    if (typeof a === 'string') {
+      const r: any = await tryDo(this.redis, 'TOPK.INCRBY', this.name, a, increment ?? 1);
+      const v = Array.isArray(r) ? r[0] : r;
+      return v === null || v === undefined ? null : String(v);
+    }
+    const entries = a instanceof Map ? [...a.entries()] : Object.entries(a);
+    if (entries.length === 0) return [];
+    const args: (string | number)[] = [this.name];
+    for (const [item, count] of entries) args.push(item, count);
+    const r: any = await tryDo(this.redis, 'TOPK.INCRBY', ...args);
+    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : String(x)));
   }
-  async contains(element: string): Promise<boolean> {
-    const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, element);
-    return toNumber(Array.isArray(r) ? r[0] : r) === 1;
+  async contains(element: string): Promise<boolean>;
+  async contains(elements: string[]): Promise<boolean[]>;
+  async contains(a: string | string[]): Promise<boolean | boolean[]> {
+    if (typeof a === 'string') {
+      const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, a);
+      return toNumber(Array.isArray(r) ? r[0] : r) === 1;
+    }
+    if (a.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, ...a);
+    return ((r ?? []) as any[]).map((x) => toNumber(x) === 1);
   }
-  async count(element: string): Promise<number> {
-    const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, element);
-    return toNumber(Array.isArray(r) ? r[0] : r);
+  async count(element: string): Promise<number>;
+  async count(elements: string[]): Promise<number[]>;
+  async count(a: string | string[]): Promise<number | number[]> {
+    if (typeof a === 'string') {
+      const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, a);
+      return toNumber(Array.isArray(r) ? r[0] : r);
+    }
+    if (a.length === 0) return [];
+    const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, ...a);
+    return ((r ?? []) as any[]).map((x) => toNumber(x));
   }
   async list(): Promise<string[]> {
     return (await tryDo(this.redis, 'TOPK.LIST', this.name)) as string[];
@@ -1640,8 +1749,24 @@ export class RTDigest extends RedisDataStructure {
     await tryDo(this.redis, 'TDIGEST.ADD', this.name, ...values.map(String));
   }
   /** Java `mergeWith(String...)`: TDIGEST.MERGE dest numkeys src... */
-  async mergeWith(...names: string[]): Promise<void> {
-    await tryDo(this.redis, 'TDIGEST.MERGE', this.name, names.length, ...names);
+  async mergeWith(...names: string[]): Promise<void>;
+  /** Java `mergeWith(TDigestMergeArgs)`: optional COMPRESSION/OVERRIDE. */
+  async mergeWith(args: TDigestMergeArgs): Promise<void>;
+  async mergeWith(a: string | TDigestMergeArgs, ...rest: string[]): Promise<void> {
+    let keys: string[];
+    let compression: number | undefined;
+    let override = false;
+    if (typeof a === 'string') {
+      keys = [a, ...rest];
+    } else {
+      keys = a.keys;
+      compression = a.compression;
+      override = a.override ?? false;
+    }
+    const args: (string | number)[] = [this.name, keys.length, ...keys];
+    if (compression !== undefined) args.push('COMPRESSION', compression);
+    if (override) args.push('OVERRIDE');
+    await tryDo(this.redis, 'TDIGEST.MERGE', ...args);
   }
   async quantile(...qs: number[]): Promise<number[]> {
     if (qs.length === 0) return [];

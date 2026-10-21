@@ -1,3 +1,18 @@
+## 2.44.0 — 2026-10-21
+
+Phase 66: probabilistic advanced argument objects. Full suite:
+**305 tests / 69 files**.
+
+- **`TDigestMergeArgs`** (keys/compression/override) accepted by
+  `RTDigest.mergeWith` alongside the variadic form.
+- **`CuckooFilterInitArgs`** (capacity/bucketSize/maxIterations/expansion) and
+  **`CuckooFilterAddArgs`** (items/capacity/noCreate) for
+  `init`/`add`/`addIfAbsent` (CF.INSERT/CF.INSERTNX; returns the added subset).
+- **`TopKInitArgs`** (topK/width/depth/decay, defaults 8/7/0.9) plus batch
+  `incrementBy(Map)`, `contains(list)`, `count(list)`.
+- Tests: `test/live-phase66.test.ts` 1/1 (TDigest merge replace semantics,
+  Cuckoo init/add/insertnx, TopK init/batches; command-gated).
+
 ## 2.43.0 — 2026-10-21
 
 Phase 65: lock keyspace listeners. Full suite:

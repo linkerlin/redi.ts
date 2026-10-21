@@ -120,8 +120,9 @@ DIFF/DIFF1/ANDOR/ONE),
 poll families, forward/reversed ranges with limits, `getAndRemove`,
 `remove`/`removeRange`, `stream`/`iterator` paging over values, `addListener`
 keyspace zadd/zrem events, lazy TTL filtering), `RBloomFilter` (HighwayHash-128, verified vectors),
-`RCuckooFilter` (addIfAbsent/existsMany/count/info), `RTopK` (dropped
-items/incrementBy/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge/
+`RCuckooFilter` (init/add argument objects, addIfAbsent/existsMany/count/
+info), `RTopK` (init args, dropped items, incrementBy Map, batch
+contains/count/listWithCount), `RTDigest` (min/max/cdf/rank/byRank/merge args/
 info/reset),
 `RKeys` (expire/expireAt single+multi, clearExpire, remainTimeToLive, getSlot,
 move, unlinkByPattern, migrate/MigrateArgs, remote copy, swapdb, parallel
