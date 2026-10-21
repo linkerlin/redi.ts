@@ -1941,3 +1941,29 @@ describe('phase 48: queue last-from-any + limited key scans (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('phase 52: RSet countIntersection + listeners (mock)', () => {
+  it('counts intersections with limit and registers removable listeners', async () => {
+    const r = make();
+    const s1 = r.getSet<string>('p52:s1');
+    const s2 = r.getSet<string>('p52:s2');
+    await s1.add('a', 'b', 'c');
+    await s2.add('b', 'c', 'd');
+    expect(await s1.countIntersection('p52:s2')).toBe(2);
+    expect(await s1.countIntersection(1, 'p52:s2')).toBe(1);
+    expect(await s1.countIntersection()).toBe(3);
+    expect(await s1.countIntersection('p52:missing')).toBe(0);
+
+    const id = await s1.addListener({
+      onAdd: () => undefined,
+      onRemove: () => undefined,
+      onRandomRemove: () => undefined,
+      onStore: () => undefined,
+    });
+    expect(id).toBeGreaterThan(0);
+    await s1.removeListener(id);
+    await s1.removeListener(id);
+    await s1.removeListener(999999);
+    await r.shutdown();
+  });
+});

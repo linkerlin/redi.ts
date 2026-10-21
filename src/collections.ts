@@ -8,6 +8,7 @@ import { RedisKeyedStructure } from './synchronizers.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import { luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
+import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 export class RBucket<V = any> extends RedisDataStructure {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
@@ -401,8 +402,15 @@ return tostring(n)`;
 }
 
 export class RSet<V = any> extends RedisKeyedStructure<V> {
+  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, {
+      onAdd: 'sadd',
+      onRemove: 'srem',
+      onRandomRemove: 'spop',
+      onStore: ['sinterstore', 'sunionstore', 'sdiffstore'],
+    });
   }
   async add(...values: V[]): Promise<number> {
     if (values.length === 0) return 0;
@@ -496,6 +504,26 @@ export class RSet<V = any> extends RedisKeyedStructure<V> {
   async countUnion(...names: string[]): Promise<number> {
     return toNumber(await this.redis.call('SUNIONCARD', 1 + names.length, this.name, ...names));
   }
+  /** Java `countIntersection(names...)` / `countIntersection(limit, names...)`:
+   *  SINTERCARD with an optional LIMIT (0 = unlimited), with a client-side
+   *  SMEMBERS fallback for mocks/older Redis. */
+  async countIntersection(...names: string[]): Promise<number>;
+  async countIntersection(limit: number, ...names: string[]): Promise<number>;
+  async countIntersection(a?: string | number, ...rest: string[]): Promise<number> {
+    const limit = typeof a === 'number' ? a : 0;
+    const names = a === undefined ? [] : (typeof a === 'number' ? rest : [a, ...rest]);
+    const keys = [this.name, ...names];
+    const args: (string | number)[] = [keys.length, ...keys];
+    if (limit > 0) args.push('LIMIT', limit);
+    try {
+      return toNumber(await (this.redis as any).call('SINTERCARD', ...args));
+    } catch {
+      const sets = await Promise.all(keys.map((k) => this.redis.smembers(k)));
+      const others = sets.slice(1).map((s) => new Set(s));
+      const count = sets[0].filter((m) => others.every((s) => s.has(m))).length;
+      return limit > 0 ? Math.min(count, limit) : count;
+    }
+  }
   async move(dest: string, value: V): Promise<boolean> {
     return ((await this.redis.smove(this.name, dest, this.encodeValue(value))) as number) === 1;
   }
@@ -525,6 +553,15 @@ return 1`;
   }
   async *stream(pattern = '*', count = 100): AsyncGenerator<V> {
     yield* this.iterator(pattern, count);
+  }
+  /** Java `addListener(ObjectListener)`: sadd/srem/spop and store events.
+   *  Requires K/E keyspace notifications (the same server dependency as Java). */
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  /** Java `removeListener(int)`; unknown ids are ignored. */
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
   }
 }
 

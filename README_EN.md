@@ -80,7 +80,8 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 KEEPTTL/PX/PXAT, `fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
-(lazy `iterator`/`stream`),
+(`countIntersection` with LIMIT, sadd/srem/spop/store keyspace listeners,
+lazy `iterator`/`stream`),
 `RList`/`RQueue`/`RDeque`(+Blocking/Bounded; `pollFromAny`/BLMPOP,
 `move`/`moveWithTimeout`/LMOVE/BLMOVE, variadic adds/`*IfExists`/`poll(count)`/
 `RPOPLPUSH`, `subscribeOnElements`/`unsubscribe`, BRPOP-with-name), `RScoredSortedSet` (score

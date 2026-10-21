@@ -27,6 +27,10 @@ export interface ObjectListener {
   onDeleted?(key: string): void;
   /** RKeys: flush event (RESP3 only in Java 4.6.1). */
   onFlush?(address: string): void;
+  /** RSet: SPOP event. */
+  onRandomRemove?(key: string): void;
+  /** RSet: SINTERSTORE/SUNIONSTORE/SDIFFSTORE event. */
+  onStore?(key: string): void;
 }
 
 interface KeyspaceSub {
@@ -42,13 +46,13 @@ export class KeyspaceListenerHub {
   constructor(
     private redis: Redis,
     private name: string,
-    private events: Partial<Record<keyof ObjectListener, string>>,
+    private events: Partial<Record<keyof ObjectListener, string | string[]>>,
     /** false for the global RKeys hub: deliver the message key, not `name`. */
     private filterName = true,
   ) {}
 
   async add(listener: ObjectListener): Promise<number> {
-    const entries = (Object.entries(this.events) as [keyof ObjectListener, string][])
+    const entries = (Object.entries(this.events) as [keyof ObjectListener, string | string[]][])
       .filter(([kind]) => typeof listener[kind] === 'function');
     if (entries.length === 0) return 0;
     const id = this.nextId++;
@@ -61,19 +65,21 @@ export class KeyspaceListenerHub {
     const sub: KeyspaceSub = { conn, patterns: [], handlers: [] };
     try {
       for (const [kind, event] of entries) {
-        const pattern = `__keyevent@*:${event}`;
-        const handler = (pat: string, _ch: string, msg: string) => {
-          if (pat !== pattern) return;
-          if (this.filterName && msg !== this.name) return;
-          try {
-            (listener[kind] as (key: string) => void).call(listener, this.filterName ? this.name : msg);
-          } catch { /* user callback */ }
-        };
-        // Attach before PSUBSCRIBE so no event in the gap is lost.
-        (conn as any).on('pmessage', handler);
-        sub.handlers.push(handler);
-        await (conn as any).psubscribe(pattern);
-        sub.patterns.push(pattern);
+        for (const eventName of (Array.isArray(event) ? event : [event])) {
+          const pattern = `__keyevent@*:${eventName}`;
+          const handler = (pat: string, _ch: string, msg: string) => {
+            if (pat !== pattern) return;
+            if (this.filterName && msg !== this.name) return;
+            try {
+              (listener[kind] as (key: string) => void).call(listener, this.filterName ? this.name : msg);
+            } catch { /* user callback */ }
+          };
+          // Attach before PSUBSCRIBE so no event in the gap is lost.
+          (conn as any).on('pmessage', handler);
+          sub.handlers.push(handler);
+          await (conn as any).psubscribe(pattern);
+          sub.patterns.push(pattern);
+        }
       }
     } catch (e) {
       try {

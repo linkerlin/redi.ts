@@ -1,3 +1,19 @@
+## 2.30.0 — 2026-10-21
+
+Phase 52: RSet countIntersection + keyspace listeners. Full suite:
+**280 tests / 55 files**.
+
+- **`countIntersection(...names)`** and **`countIntersection(limit, ...names)`**:
+  `SINTERCARD numkeys self names [LIMIT n]` (limit 0 = unlimited), with a
+  client-side SMEMBERS fallback for mocks/older servers.
+- **`addListener` / `removeListener`** on `RSet`: `onAdd` → `sadd`,
+  `onRemove` → `srem`, `onRandomRemove` → `spop`, and `onStore` subscribed to
+  `sinterstore`/`sunionstore`/`sdiffstore`. The keyspace hub now supports one
+  callback mapped to multiple event patterns.
+- Tests: 1 mock (count intersection/limit/empty, listener registration) +
+  `test/live-phase52.test.ts` 1/1 (SINTERCARD + LIMIT, all four set events,
+  removal silence; config serialized with the shared keyspace test lock).
+
 ## 2.29.0 — 2026-10-21
 
 Phase 51: RMapCacheNative structured batches + compute. Full suite:
