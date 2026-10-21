@@ -1,3 +1,22 @@
+## 2.29.0 — 2026-10-21
+
+Phase 51: RMapCacheNative structured batches + compute. Full suite:
+**278 tests / 54 files**.
+
+- **`NativePutArgs`** (TS shape of Java `PutArgs`): `entries`, `keepTTL`,
+  `timeToLiveMs`, `expireAt`.
+- **`putAll`**: one atomic `HSETEX` with KEEPTTL/PX/PXAT (per-field HSET
+  fallback on older servers/mock).
+- **`putIfAllKeysExist` / `putIfAllKeysAbsent`**: structured PutArgs via
+  `HSETEX FXX/FNX` (Lua fallback preserved for plain Map + TTL).
+- **`compute` / `computeIfAbsent`**: per-key distributed lock, double-checked
+  reads, async callbacks, null deletes/writes skipped, field TTL applied via
+  fastPut/putIfAbsent.
+- Tests: 1 mock (structured batches, conditional paths, compute null/delete
+  and concurrent computeIfAbsent executes the mapper once) +
+  `test/live-phase51.test.ts` 1/1 (HSETEX TTL/PXAT/KEEPTTL, FXX/FNX atomicity,
+  compute TTL, Java `map-get`; HSETEX capability gate).
+
 ## 2.28.0 — 2026-10-21
 
 Phase 50: RVectorSet deep API. Full suite:

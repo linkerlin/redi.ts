@@ -76,7 +76,8 @@ names), `RMap` (lazy HSCAN iterators, `keySet`/`values`/`entrySet` views,
 `readAllEntrySet`, three-arg `replace`, `HRANDFIELD`/`HSTRLEN`)/
 `MapCache`(+Native; `expireEntries`/`getWithTTLOnly`/`getMaxSize`,
 `compute`/`computeIfAbsent`, absolute `Date` expiry, conditional
-`putIfAllKeysExist`/`Absent` batches, `fastPut`/`fastPutIfAbsent`/`putIfExist`/
+`putIfAllKeysExist`/`Absent` batches, structured `PutArgs` HSETEX with
+KEEPTTL/PX/PXAT, `fastPut`/`fastPutIfAbsent`/`putIfExist`/
 `fastPutIfExist`)/`LocalCachedMap` (LRU/LFU under `maxSize`,
 `getCachedMap()` view, bounded `preloadCache(count)`), `RSet`/`SetCache`
 (lazy `iterator`/`stream`),

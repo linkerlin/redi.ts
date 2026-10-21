@@ -1858,6 +1858,46 @@ describe('phase 45: blocking queue element subscriptions (mock)', () => {
   });
 });
 
+describe('phase 51: native map-cache PutArgs + compute (mock)', () => {
+  it('structured putAll/conditions and compute semantics', async () => {
+    const r = make();
+    const mn = r.getMapCacheNative<string, number>('p51:mn');
+    await mn.putAll(new Map([['a', 1], ['b', 2]]));
+    expect(await mn.get('a')).toBe(1);
+    expect(await mn.get('b')).toBe(2);
+    await mn.putAll({ entries: { c: 3, d: 4 }, timeToLiveMs: 5000 });
+    expect(await mn.get('c')).toBe(3);
+    expect(await mn.get('d')).toBe(4);
+
+    expect(await mn.putIfAllKeysExist({ entries: { a: 10, x: 1 }, timeToLiveMs: 5000 })).toBe(false);
+    expect(await mn.get('a')).toBe(1);
+    expect(await mn.putIfAllKeysExist({ entries: { a: 10, b: 20 } })).toBe(true);
+    expect(await mn.get('a')).toBe(10);
+    expect(await mn.get('b')).toBe(20);
+    expect(await mn.putIfAllKeysAbsent({ entries: { a: 9 } })).toBe(false);
+    expect(await mn.putIfAllKeysAbsent({ entries: { e: 5, f: 6 }, keepTTL: true })).toBe(true);
+    expect(await mn.get('e')).toBe(5);
+
+    expect(await mn.compute('n', 5000, (_k, old) => (old ?? 0) + 1)).toBe(1);
+    expect(await mn.compute('n', 5000, (_k, old) => (old ?? 0) + 1)).toBe(2);
+    expect(await mn.compute('n', 5000, () => null)).toBeNull();
+    expect(await mn.get('n')).toBeNull();
+
+    let mapped = 0;
+    const [v1, v2] = await Promise.all([
+      mn.computeIfAbsent('m', 5000, () => { mapped += 1; return 7; }),
+      mn.computeIfAbsent('m', 5000, () => { mapped += 1; return 8; }),
+    ]);
+    expect(mapped).toBe(1);
+    expect(v1).toBe(7);
+    expect(v2).toBe(7);
+    expect(await mn.computeIfAbsent('m', 5000, () => 9)).toBe(7);
+    expect(await mn.computeIfAbsent('empty', 5000, () => null)).toBeNull();
+    expect(await mn.get('empty')).toBeNull();
+    await r.shutdown();
+  });
+});
+
 describe('phase 47: RKeys keyspace listeners (mock)', () => {
   it('registers/removes through different getKeys facades and rejects flush-only', async () => {
     const r = make();

@@ -537,6 +537,14 @@ export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
   }
 }
 
+/** Structured batch put (TS shape of Java `PutArgs`). */
+export interface NativePutArgs<K = any, V = any> {
+  entries: Map<K, V> | Record<string, V>;
+  keepTTL?: boolean;
+  timeToLiveMs?: number;
+  expireAt?: Date;
+}
+
 export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
@@ -557,6 +565,55 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
         await this.redis.hpexpire(this.name, ttl, 'FIELDS', 1, field);
       }
     } catch { /* server too old */ }
+  }
+
+  private isNativePutArgs(value: any): value is NativePutArgs<K, V> {
+    return value !== null && typeof value === 'object' && !(value instanceof Map) && 'entries' in value;
+  }
+
+  private putEntries(mapping: Map<K, V> | Record<string, V>): [K, V][] {
+    return mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping) as [K, V][];
+  }
+
+  private hsetexOptions(args: NativePutArgs<K, V> | undefined, ttl: number | Date): string[] {
+    if (args?.keepTTL) return ['KEEPTTL'];
+    if (args?.timeToLiveMs !== undefined) return ['PX', String(args.timeToLiveMs)];
+    if (args?.expireAt !== undefined) return ['PXAT', String(args.expireAt.getTime())];
+    if (ttl instanceof Date) return ['PXAT', String(ttl.getTime())];
+    if (typeof ttl === 'number' && ttl > 0) return ['PX', String(ttl)];
+    return [];
+  }
+
+  private async hsetex(fields: string[], values: string[], options: string[], condition?: 'FNX' | 'FXX'): Promise<number> {
+    const args: (string | number)[] = ['HSETEX', this.name];
+    if (condition) args.push(condition);
+    args.push(...options, 'FIELDS', String(fields.length));
+    for (let i = 0; i < fields.length; i++) args.push(fields[i], values[i]);
+    return toNumber(await (this.redis as any).call(...args));
+  }
+
+  /** Java `putAll(Map, Duration|Instant)` / `putAll(PutArgs)`: one HSETEX
+   *  (atomic shared field expiry), falling back to per-field HSET on servers
+   *  without HSETEX (mock/older Redis). */
+  async putAll(mapping: Map<K, V> | Record<string, V>, ttl?: number | Date): Promise<void>;
+  async putAll(args: NativePutArgs<K, V>): Promise<void>;
+  async putAll(a: Map<K, V> | Record<string, V> | NativePutArgs<K, V>, b?: number | Date): Promise<void> {
+    const structured = this.isNativePutArgs(a);
+    const args = structured ? a : undefined;
+    const entries = this.putEntries(structured ? a.entries : a as Map<K, V> | Record<string, V>);
+    if (entries.length === 0) return;
+    const fields = entries.map(([k]) => this.encodeKey(k));
+    const values = entries.map(([, v]) => this.encodeValue(v));
+    const ttl = structured ? 0 : (b ?? 0);
+    const options = this.hsetexOptions(args, ttl);
+    try {
+      await this.hsetex(fields, values, options);
+      return;
+    } catch { /* fall through */ }
+    for (let i = 0; i < fields.length; i++) {
+      await this.redis.hset(this.name, fields[i], values[i]);
+      if (!args?.keepTTL) await this.applyFieldExpiry(fields[i], args?.expireAt ?? args?.timeToLiveMs ?? ttl);
+    }
   }
 
   /** Java `fastPut(K, V[, Duration|Instant])`: HSET without reading the old value.
@@ -621,6 +678,46 @@ return 1`;
    *  only `fastPut`/`fastPutIfAbsent`; newer Redisson adds `fastPutIfExist`). */
   async fastPutIfExist(key: K, value: V, ttl: number | Date = 0): Promise<boolean> {
     return (await this.putIfExist(key, value, ttl)) !== null;
+  }
+
+  /** Java `computeIfAbsent(K, Duration|Instant, Function)`: per-key lock,
+   *  double-checked read, then putIfAbsent with the given field TTL. */
+  async computeIfAbsent(key: K, ttl: number | Date, mappingFunction: (key: K) => V | null | Promise<V | null>): Promise<V | null> {
+    const existing = await this.get(key);
+    if (existing !== null) return existing;
+    const tid = `compute:${randomHex(8)}`;
+    const lock = this.getLock(key);
+    await lock.lock(undefined, tid);
+    try {
+      const current = await this.get(key);
+      if (current !== null) return current;
+      const next = await mappingFunction(key);
+      if (next === null || next === undefined) return null;
+      const raced = await this.putIfAbsent(key, next, ttl);
+      return raced === null ? next : raced;
+    } finally {
+      try { await lock.unlock(tid); } catch { /* noop */ }
+    }
+  }
+
+  /** Java `compute(K, Duration|Instant, BiFunction)`: per-key lock, read,
+   *  apply, fastPut with TTL (or delete when the function returns null). */
+  async compute(key: K, ttl: number | Date, remappingFunction: (key: K, oldValue: V | null) => V | null | Promise<V | null>): Promise<V | null> {
+    const tid = `compute:${randomHex(8)}`;
+    const lock = this.getLock(key);
+    await lock.lock(undefined, tid);
+    try {
+      const old = await this.get(key);
+      const next = await remappingFunction(key, old);
+      if (next === null || next === undefined) {
+        if (old !== null) await this.redis.hdel(this.name, this.encodeKey(key));
+        return null;
+      }
+      await this.fastPut(key, next, ttl);
+      return next;
+    } finally {
+      try { await lock.unlock(tid); } catch { /* noop */ }
+    }
   }
 
   /** Java RedissonMapCacheNative.putIfAbsent(key, value, ttl). With a TTL
@@ -734,14 +831,31 @@ return 1`;
     return this.hpexpireField(key, ttl, 'LT');
   }
 
-  /** Java `putIfAllKeysExist(PutArgs)` / `putIfAllKeysAbsent(PutArgs)`:
-   *  atomic HSET of every field (+ per-field expiry) only when the condition
-   *  holds for all of them. */
-  async putIfAllKeysExist(mapping: Record<string, V> | Map<K, V>, ttl: number | Date = 0): Promise<boolean> {
-    return this.putAllConditional('XX', mapping, ttl);
+  /** Java `putIfAllKeysExist` (Map + TTL or structured PutArgs). */
+  async putIfAllKeysExist(mapping: Record<string, V> | Map<K, V>, ttl?: number | Date): Promise<boolean>;
+  async putIfAllKeysExist(args: NativePutArgs<K, V>): Promise<boolean>;
+  async putIfAllKeysExist(a: Record<string, V> | Map<K, V> | NativePutArgs<K, V>, b?: number | Date): Promise<boolean> {
+    if (this.isNativePutArgs(a)) return this.putAllConditionalArgs('XX', a);
+    return this.putAllConditional('XX', a as Record<string, V> | Map<K, V>, b ?? 0);
   }
-  async putIfAllKeysAbsent(mapping: Record<string, V> | Map<K, V>, ttl: number | Date = 0): Promise<boolean> {
-    return this.putAllConditional('NX', mapping, ttl);
+  async putIfAllKeysAbsent(mapping: Record<string, V> | Map<K, V>, ttl?: number | Date): Promise<boolean>;
+  async putIfAllKeysAbsent(args: NativePutArgs<K, V>): Promise<boolean>;
+  async putIfAllKeysAbsent(a: Record<string, V> | Map<K, V> | NativePutArgs<K, V>, b?: number | Date): Promise<boolean> {
+    if (this.isNativePutArgs(a)) return this.putAllConditionalArgs('NX', a);
+    return this.putAllConditional('NX', a as Record<string, V> | Map<K, V>, b ?? 0);
+  }
+
+  /** HSETEX FXX/FNX path for structured PutArgs (KEEPTTL/PX/PXAT). */
+  private async putAllConditionalArgs(mode: 'XX' | 'NX', args: NativePutArgs<K, V>): Promise<boolean> {
+    const entries = this.putEntries(args.entries);
+    if (entries.length === 0) return false;
+    const fields = entries.map(([k]) => this.encodeKey(k));
+    const values = entries.map(([, v]) => this.encodeValue(v));
+    try {
+      return (await this.hsetex(fields, values, this.hsetexOptions(args, 0), mode === 'XX' ? 'FXX' : 'FNX')) === 1;
+    } catch {
+      return this.putAllConditional(mode, args.entries, args.expireAt ?? args.timeToLiveMs ?? 0);
+    }
   }
   private async putAllConditional(mode: 'XX' | 'NX', mapping: Record<string, V> | Map<K, V>, ttl: number | Date): Promise<boolean> {
     const entries = mapping instanceof Map ? [...mapping.entries()] : Object.entries(mapping) as [K, V][];
