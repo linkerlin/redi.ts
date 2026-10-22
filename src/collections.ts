@@ -7,7 +7,7 @@ import { RedisDataStructure } from './base.js';
 import { RedisKeyedStructure } from './synchronizers.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
-import { isUnsupportedCommand, luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
+import { highwayHash128, isUnsupportedCommand, luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
 import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 /** Java 4.7 `QueueMoveElementsArgs` builder shape: `to(dest)` → `.count(n)` /
@@ -458,6 +458,199 @@ return tostring(n)`;
     return super.delete();
   }
 }
+
+// -- RMaps (Java 4.8 mass map operations) -------------------------------------------------
+//
+// Bulk writer for many same-shaped Map objects: maps sharing one set of field
+// names are written declaring those names once (Redis keeps a single copy).
+// Preferred path is the HIMPORT command (unknown on plain Redis — detected
+// once, then permanently falling back); the fallback is a pipelined
+// DEL + HSET per object, which stores a plain HASH with codec-encoded
+// field names and values — byte-identical to what RMap writes and reads.
+
+/** Java 4.8 `MapsImportArgs`: `fields(...)` with the shared field names, then
+ *  optional `batchSize(n)` (rows buffered before an automatic flush). */
+export class MapsImportArgs<K = any> {
+  private batchSizeValue?: number;
+  private constructor(readonly fields: K[]) {}
+  static fields<K>(...fields: K[]): MapsImportArgs<K> {
+    return new MapsImportArgs<K>(fields);
+  }
+  batchSize(batchSize: number): this {
+    this.batchSizeValue = batchSize;
+    return this;
+  }
+  getBatchSize(): number | undefined {
+    return this.batchSizeValue;
+  }
+}
+
+/** Field-set name: `"rs" + %08x` of the low 32 bits of the HighwayHash-128
+ *  (Redisson key) of the length-prefixed encoded fields — verbatim Java
+ *  `RedissonMapsImport.fieldsetName` / `fieldsHash`. */
+function mapsFieldHashName(encodedFields: string[]): string {
+  const buffers = encodedFields.map((f) => Buffer.from(f, 'utf8'));
+  const lengths = Buffer.alloc(buffers.length * 4);
+  buffers.forEach((b, i) => lengths.writeUInt32BE(b.length, i * 4));
+  const [h1] = highwayHash128(Buffer.concat([lengths, ...buffers]));
+  const low32 = Number(h1 & 0xffffffffn) >>> 0;
+  return 'rs' + low32.toString(16).padStart(8, '0');
+}
+
+/** Java byte[] comparison (unsigned, length as tiebreak) — orders encoded
+ *  fields within one object deterministically, like encodeSortedByField. */
+function compareBuffers(left: Buffer, right: Buffer): number {
+  const n = Math.min(left.length, right.length);
+  for (let i = 0; i < n; i++) {
+    const diff = left[i] - right[i];
+    if (diff !== 0) return diff;
+  }
+  return left.length - right.length;
+}
+
+/** Process-wide mirror of Java ServiceManager.isHashImportDisabled(): once a
+ *  server answers HIMPORT with unknown-command (or the client has no `.call`,
+ *  e.g. ioredis-mock), every import falls back to DEL+HSET. */
+let mapsHashImportDisabled = false;
+
+interface MapsImportRow { name: string; values: string[] }
+
+/** Java 4.8 `RMapsImport`: buffered import session for Map objects sharing
+ *  the field names given at creation. Values are matched to the fields by
+ *  position; rows flush when the buffer reaches batchSize and on flush(). */
+export class RMapsImport<K = any, V = any> {
+  private readonly fieldsetName: string;
+  private buffer: MapsImportRow[] = [];
+  private importedCountValue = 0;
+
+  /** @internal built by RMaps.createImport / RMaps.set — fields are already encoded. */
+  constructor(private redis: Redis, private codec: Codec, private fields: string[], private batchSize = 500) {
+    if (fields.length === 0) throw new Error("redi.ts: fields can't be empty");
+    for (let i = 0; i < fields.length; i++) {
+      for (let j = i + 1; j < fields.length; j++) {
+        if (fields[i] === fields[j]) throw new Error('redi.ts: field name duplication detected');
+      }
+    }
+    this.fieldsetName = mapsFieldHashName(fields);
+  }
+
+  /** Java `add(String, V...)`: encode now, write when the buffer fills. */
+  async add(name: string, ...values: V[]): Promise<void> {
+    if (values.length !== this.fields.length) {
+      throw new Error(`redi.ts: amount of values ${values.length} doesn't match amount of fields ${this.fields.length}`);
+    }
+    this.buffer.push({ name, values: values.map((v) => this.codec.encode(v)) });
+    if (this.buffer.length >= this.batchSize) await this.flush();
+  }
+
+  /** @internal queue pre-encoded values (RMaps.set path). */
+  addEncoded(name: string, values: string[]): void {
+    this.buffer.push({ name, values });
+  }
+
+  /** Java `flush()`: writes every buffered row (batchSize rows per round trip). */
+  async flush(): Promise<void> {
+    while (this.buffer.length > 0) {
+      const rows = this.buffer.slice(0, this.batchSize);
+      this.buffer = this.buffer.slice(rows.length);
+      await this.write(rows);
+      this.importedCountValue += rows.length;
+    }
+  }
+
+  /** Java `getImportedCount()`. */
+  getImportedCount(): number {
+    return this.importedCountValue;
+  }
+
+  private async write(rows: MapsImportRow[]): Promise<void> {
+    if (mapsHashImportDisabled) return this.writeWithHset(rows);
+    try {
+      await this.writeWithHashImport(rows);
+    } catch (e) {
+      // Unknown HIMPORT (plain Redis) or a client without `.call` (ioredis-mock
+      // pipelines) — permanently fall back to the plain-HASH path.
+      if (!isUnsupportedCommand(e)) throw e;
+      mapsHashImportDisabled = true;
+      await this.writeWithHset(rows);
+    }
+  }
+
+  /** HIMPORT PREPARE fieldsetName f...; then HIMPORT SET name fieldsetName v... per row. */
+  private async writeWithHashImport(rows: MapsImportRow[]): Promise<void> {
+    const pipe = (this.redis as any).pipeline?.() ?? (this.redis as any).multi?.();
+    if (!pipe) throw new Error('redi.ts: redis client does not support pipeline');
+    pipe.call('HIMPORT', 'PREPARE', this.fieldsetName, ...this.fields);
+    for (const row of rows) pipe.call('HIMPORT', 'SET', row.name, this.fieldsetName, ...row.values);
+    await pipe.exec();
+  }
+
+  /** DEL name; HSET name f1 v1 f2 v2 ... — one plain HASH per object. */
+  private async writeWithHset(rows: MapsImportRow[]): Promise<void> {
+    const pipe = (this.redis as any).pipeline?.() ?? (this.redis as any).multi?.();
+    if (!pipe) throw new Error('redi.ts: redis client does not support pipeline');
+    for (const row of rows) {
+      pipe.del(row.name);
+      const params: string[] = [row.name];
+      for (let i = 0; i < row.values.length; i++) params.push(this.fields[i], row.values[i]);
+      pipe.hset(...params as [string, string]);
+    }
+    await pipe.exec();
+  }
+}
+
+/** Java 4.8 `RMaps<K, V>`: mass operations with Map objects. Every object is
+ *  stored as a plain HASH under its own name (RMap-compatible wire); objects
+ *  sharing a field set are written in one import group. */
+export class RMaps<K = any, V = any> {
+  private static readonly DEFAULT_BATCH_SIZE = 500;
+
+  constructor(private redis: Redis, private codec: Codec = new JsonCodec()) {}
+
+  /** Java `set(Map<String, Map<K, V>>)` / `set(Map, int)`: each object replaces
+   *  the whole Map stored under the same name; fields within a group are
+   *  sorted by their encoded bytes (encodeSortedByField). */
+  async set(maps: Map<string, Map<K, V>> | Record<string, Record<string, V>>): Promise<void>;
+  async set(maps: Map<string, Map<K, V>> | Record<string, Record<string, V>>, batchSize: number): Promise<void>;
+  async set(maps: Map<string, Map<K, V>> | Record<string, Record<string, V>>, batchSize?: number): Promise<void> {
+    if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize <= 0)) {
+      throw new Error('redi.ts: batchSize should be greater than zero');
+    }
+    const size = batchSize ?? RMaps.DEFAULT_BATCH_SIZE;
+    const objects = maps instanceof Map ? [...maps.entries()] : Object.entries(maps);
+    if (objects.length === 0) return;
+
+    // group objects by their encoded (sorted) field set — insertion ordered
+    const groups = new Map<string, { fields: string[]; rows: MapsImportRow[] }>();
+    for (const [name, map] of objects) {
+      const entries = map instanceof Map ? [...map.entries() as Iterable<[K, V]>] : (Object.entries(map) as [K, V][]);
+      if (entries.length === 0) throw new Error(`redi.ts: Map object ${name} can't be empty`);
+      const encoded = entries.map(([k, v]) => [this.codec.encode(k), this.codec.encode(v)] as [string, string]);
+      encoded.sort((a, b) => compareBuffers(Buffer.from(a[0], 'utf8'), Buffer.from(b[0], 'utf8')));
+      const fields = encoded.map((e) => e[0]);
+      const groupKey = JSON.stringify(fields);
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = { fields, rows: [] };
+        groups.set(groupKey, group);
+      }
+      group.rows.push({ name, values: encoded.map((e) => e[1]) });
+    }
+
+    for (const group of groups.values()) {
+      const imp = new RMapsImport<K, V>(this.redis, this.codec, group.fields, size);
+      for (const row of group.rows) imp.addEncoded(row.name, row.values);
+      await imp.flush();
+    }
+  }
+
+  /** Java `createImport(MapsImportArgs)`: an import session for more objects
+   *  than fit in memory — added one by one, flushed per batchSize/flush(). */
+  createImport(args: MapsImportArgs<K>): RMapsImport<K, V> {
+    return new RMapsImport<K, V>(this.redis, this.codec, args.fields.map((f) => this.codec.encode(f)), args.getBatchSize() ?? RMaps.DEFAULT_BATCH_SIZE);
+  }
+}
+
 
 export class RSet<V = any> extends RedisKeyedStructure<V> {
   private listenerHub: KeyspaceListenerHub;

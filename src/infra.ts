@@ -1726,32 +1726,6 @@ export class RCircularBuffer<V = any> extends RedisDataStructure {
   }
 }
 
-// -- RMaps (mass HASH helpers; HASH readable as Java RMap) ------------------------------
-
-export class RMaps {
-  constructor(private redis: Redis, private codec: Codec = new JsonCodec()) {}
-  async setMap(name: string, mapping: Record<string, unknown>): Promise<void> {
-    const entries = Object.entries(mapping);
-    await this.redis.del(name);
-    if (entries.length === 0) return;
-    const flat: string[] = [];
-    for (const [k, v] of entries) flat.push(this.codec.encode(k), this.codec.encode(v));
-    await this.redis.hset(name, ...flat as [string, string]);
-  }
-  async readAll(name: string): Promise<Map<unknown, unknown>> {
-    const all = await this.redis.hgetall(name);
-    const out = new Map();
-    for (const [k, v] of Object.entries(all)) {
-      try {
-        out.set(this.codec.decode(k), this.codec.decode(v));
-      } catch {
-        out.set(k, v);
-      }
-    }
-    return out;
-  }
-}
-
 // -- RBatch (pipeline; reads return queued placeholders) ---------------------------------
 
 interface Deferred {

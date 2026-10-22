@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { Codec, JsonCodec } from './codec.js';
 import { RBucket, RBuckets } from './collections.js';
 import { RAtomicLong, RAtomicDouble, RLongAdder, RDoubleAdder, RIdGenerator } from './atomic.js';
-import { RMap, RSet, RList, RQueue, RDeque, RBlockingQueue, RBlockingDeque, RBoundedBlockingQueue, RScoredSortedSet, RLexSortedSet } from './collections.js';
+import { RMap, RSet, RList, RQueue, RDeque, RBlockingQueue, RBlockingDeque, RBoundedBlockingQueue, RScoredSortedSet, RLexSortedSet, RMaps } from './collections.js';
 import { RMapCache, RMapCacheNative, RSetCache, RSetMultimap, RListMultimap, RSetMultimapCache, RListMultimapCache, RLocalCachedMap, LocalCachedMapOptions } from './caches.js';
 import {
   RLock, RSpinLock, RNonReentrantLock, RFairLock, RNonReentrantFairLock,
@@ -16,8 +16,8 @@ import {
   RFencedLock, RMultiLock, RRedLock, BackOff, LockLike,
 } from './locks.js';
 import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging.js';
-import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RCountMin, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic.js';
-import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RMaps, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
+import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RCountMin, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RTimeSeriesNative, RTimeSeriesNatives, RRateLimiter, RateType } from './probabilistic.js';
+import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
 
 /**
  * Accepted client shapes: a single ioredis connection or an ioredis Cluster.
@@ -108,8 +108,11 @@ export class Redisson {
   getRMap<K, V>(name: string, codec?: Codec): RMap<K, V> {
     return this.getMap<K, V>(name, codec);
   }
-  getMaps(): RMaps {
-    return new RMaps(this.redis, this.codec);
+  getMaps<K, V>(): RMaps<K, V> {
+    return new RMaps<K, V>(this.redis, this.codec);
+  }
+  getRMaps<K, V>(): RMaps<K, V> {
+    return this.getMaps<K, V>();
   }
   getMapCache<K, V>(name: string, codec?: Codec): RMapCache<K, V> {
     return new RMapCache<K, V>(this.redis, name, codec ?? this.codec).attachOwner(this.id, this.watchdog);
@@ -311,6 +314,21 @@ export class Redisson {
   }
   getTimeSeries<V>(name: string, codec?: Codec): RTimeSeries<V> {
     return new RTimeSeries<V>(this.redis, name, codec ?? this.codec);
+  }
+  /** Java 4.8 `RTimeSeriesNative`: RedisTimeSeries module TS.* binding
+   *  (module-gated; distinct from the ZSET-based RTimeSeries above). */
+  getTimeSeriesNative(name: string): RTimeSeriesNative {
+    return new RTimeSeriesNative(this.redis, name, this.codec);
+  }
+  getRTimeSeriesNative(name: string): RTimeSeriesNative {
+    return this.getTimeSeriesNative(name);
+  }
+  /** Java 4.8 `RTimeSeriesNatives`: TS.* operations spanning several series. */
+  getTimeSeriesNatives(): RTimeSeriesNatives {
+    return new RTimeSeriesNatives(this.redis);
+  }
+  getRTimeSeriesNatives(): RTimeSeriesNatives {
+    return this.getTimeSeriesNatives();
   }
 
   // -- infra ----------------------------------------------------------------------

@@ -1,3 +1,50 @@
+## 2.50.0 — 2026-10-23
+
+Phase 71: Redisson 4.8 OSS additions — RTimeSeriesNative(+Natives) and RMaps.
+
+- **`RTimeSeriesNative`** (new structure, Java 4.8): thin binding over the
+  RedisTimeSeries module's `TS.*` commands — distinct from the ZSET-based
+  `RTimeSeries` (no codec; a sample is a ms timestamp + double, labels index
+  the series). `create/createIfAbsent` (EXISTS-guarded Lua, creation options
+  RETENTION/ENCODING/CHUNK_SIZE/DUPLICATE_POLICY/IGNORE/LABELS via
+  `TSCreateArgs`), `alter`, `add(ts,v)`/`addCurrent`/`add(TSAddArgs)` with
+  ON_DUPLICATE, `addAll` (TS.MADD), `incrementBy`/`decrementBy`
+  (`TSIncrArgs` TIMESTAMP + creation options), `removeRange`, `first`,
+  `size`/`firstTimestamp`/`lastTimestamp` (TS.INFO projections), `get`/
+  `getLatest` (TS.GET [LATEST]), `range`/`rangeReversed` (longs or
+  `TSRangeArgs`: LATEST/FILTER_BY_TS/FILTER_BY_VALUE/COUNT/ALIGN/AGGREGATION
+  multi-agg comma join/BUCKETTIMESTAMP/EMPTY with Java's align validations),
+  `read` (TS.READ BLOCK/MAX_COUNT), `createRule`/`deleteRule`, paged
+  `iterator`/`stream`, `getLabels`/`getInfo`/`getDebugInfo`.
+- **`RTimeSeriesNatives`** (new, Java 4.8): cross-series TS.* — `addAll`
+  (TS.MADD, reply split per key by sample count), `getAll` (TS.MGET),
+  `range`/`rangeReversed` (TS.MRANGE/MREVRANGE incl. GROUPBY/REDUCE and
+  EXCLUDEEMPTY with Java's mutual-exclusion checks), `groupedRange(+Reversed)`
+  (TS.NRANGE/NREVRANGE), `queryIndex`, `labelNames`/`labelValues`
+  (TS.QUERYLABELS). Arg classes `TSMultiGetArgs`/`TSMultiRangeArgs`/
+  `TSGroupedRangeArgs` follow the Java factories 1:1. Everything is
+  module-gated: no TS.* command is issued on plain Redis or ioredis-mock.
+- **`RMaps`** (rebuilt, Java 4.8): mass writes of same-shaped Map objects —
+  `set(maps[, batchSize])` groups objects by their encoded (byte-sorted)
+  field set, `createImport(MapsImportArgs.fields(...).batchSize(n))` returns
+  an `RMapsImport` session (`add(name, values...)` positional, buffer
+  auto-flush at batchSize, `flush()`, `getImportedCount()`). Write path
+  prefers Java's `HIMPORT PREPARE/SET` with the identical fieldsetName
+  (`rs%08x` of HighwayHash-128 over length-prefixed encoded fields); servers
+  without HIMPORT (plain Redis; ioredis-mock pipelines) are detected once and
+  permanently use the pipelined DEL+HSET fallback, which stores a plain HASH
+  with RMap's exact JSON field/value encoding — Java `RMap` reads it
+  directly. Replaces the older infra.ts RMaps stand-in (setMap/readAll);
+  factories `getMaps()`/`getRMaps()`.
+- Factories: `getTimeSeriesNative`/`getRTimeSeriesNative`,
+  `getTimeSeriesNatives`/`getRTimeSeriesNatives`, `getMaps`/`getRMaps`.
+- Tests: +3 mock (RMaps fallback writes read back through RMap, import
+  batching/guards, TS-native args wire shapes vs Java's
+  appendCreationOptions/appendRangeOptions), +3 live
+  (`live-phase71.test.ts`; TS.* groups gated per command via COMMAND INFO,
+  RMaps raw-HASH wire checks — local Redis offline, exercised by CI's
+  redis:8 job).
+
 ## 2.49.0 — 2026-10-23
 
 Phase 70 (part 2): RStream read 4.7 params.

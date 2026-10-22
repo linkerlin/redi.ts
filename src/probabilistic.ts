@@ -3644,3 +3644,920 @@ export class RGcra extends RedisDataStructure {
     }
   }
 }
+
+// -- Native TimeSeries (RedisTimeSeries module TS.* commands; Java 4.8) ------------------
+//
+// Thin binding over the module, mirroring Java's RTimeSeriesNative: a sample is
+// a millisecond timestamp plus a double, labels index the whole series, and the
+// wire format is the module's own (StringCodec on the Java side — no Redisson
+// codec). Every TS.* command is module-gated (absent on plain Redis and on
+// ioredis-mock); tests probe COMMAND INFO before use.
+//
+// Durations are plain millisecond numbers (repo convention), so Java
+// `Duration.ofMinutes(5)` is `300000`.
+
+/** Java `TSEncoding` (wire token == enum name). */
+export type TSEncoding = 'COMPRESSED' | 'UNCOMPRESSED';
+
+/** Java `TSDuplicatePolicy` (wire token == enum name). */
+export type TSDuplicatePolicy = 'BLOCK' | 'FIRST' | 'LAST' | 'MIN' | 'MAX' | 'SUM';
+
+/** Java `TSAggregation`; wire tokens that differ from the name are mapped in
+ *  TS_AGGREGATION_TOKEN (std.p / std.s / var.p / var.s / countNaN / countAll). */
+export type TSAggregation =
+  | 'AVG' | 'SUM' | 'MIN' | 'MAX' | 'RANGE' | 'COUNT' | 'COUNT_NAN' | 'COUNT_ALL'
+  | 'FIRST' | 'LAST' | 'STD_POPULATION' | 'STD_SAMPLE' | 'VAR_POPULATION'
+  | 'VAR_SAMPLE' | 'TWA';
+
+const TS_AGGREGATION_TOKEN: Record<TSAggregation, string> = {
+  AVG: 'avg', SUM: 'sum', MIN: 'min', MAX: 'max', RANGE: 'range', COUNT: 'count',
+  COUNT_NAN: 'countNaN', COUNT_ALL: 'countAll', FIRST: 'first', LAST: 'last',
+  STD_POPULATION: 'std.p', STD_SAMPLE: 'std.s', VAR_POPULATION: 'var.p',
+  VAR_SAMPLE: 'var.s', TWA: 'twa',
+};
+
+/** Java `TSReducer` — TSAggregation minus the tokens the server rejects as
+ *  reducers (first/last/twa). */
+export type TSReducer = Exclude<TSAggregation, 'FIRST' | 'LAST' | 'TWA'>;
+
+/** Java `TSBucketTimestamp`. */
+export type TSBucketTimestamp = 'START' | 'END' | 'MID';
+
+const TS_BUCKET_TIMESTAMP_TOKEN: Record<TSBucketTimestamp, string> = {
+  START: 'start', END: 'end', MID: 'mid',
+};
+
+/** One point in time: millisecond timestamp plus the values reported for it
+ *  (one for a plain sample, one per aggregator / per queried series otherwise;
+ *  NaN where nothing was reported). Java `TSSample`. */
+export interface TSSample {
+  timestamp: number;
+  values: number[];
+}
+
+/** One row of a TS.MGET reply: reported labels and the last sample (null when
+ *  the series is empty). Java `TSSeriesSample`. */
+export interface TSSeriesSample {
+  labels: Record<string, string | null>;
+  sample: TSSample | null;
+}
+
+/** One row of a TS.MRANGE/TS.MREVRANGE reply. Java `TSSeriesSamples`. */
+export interface TSSeriesSamples {
+  labels: Record<string, string | null>;
+  samples: TSSample[];
+}
+
+/** Compaction rule reported by TS.INFO. Java `TSRule` (bucketDuration in ms). */
+export interface TSRule {
+  destinationKey: string;
+  bucketDurationMs: number;
+  aggregation: TSAggregation | null;
+  alignTimestamp: number;
+}
+
+/** Per-chunk detail of TS.INFO DEBUG. Java `TSChunkInfo`. */
+export interface TSChunkInfo {
+  startTimestamp: number;
+  endTimestamp: number;
+  samples: number;
+  size: number;
+  bytesPerSample: number;
+}
+
+/** TS.INFO snapshot. Java `TSInfo` (durations as ms numbers). */
+export interface TSInfo {
+  totalSamples: number;
+  memoryUsage: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  retentionTimeMs: number;
+  chunkCount: number;
+  chunkSize: number;
+  chunkType: TSEncoding | null;
+  duplicatePolicy: TSDuplicatePolicy | null;
+  labels: Record<string, string>;
+  sourceKey: string | null;
+  rules: TSRule[];
+  ignoreMaxTimeDiffMs: number;
+  ignoreMaxValueDiff: number;
+  /** keySelfName/chunks are set only by getDebugInfo(). */
+  keySelfName: string | null;
+  chunks: TSChunkInfo[];
+}
+
+/** Shared RETENTION/ENCODING/CHUNK_SIZE/DUPLICATE_POLICY/IGNORE/LABELS block
+ *  (Java `TSCreationParams`, appended by `appendCreationOptions`). */
+abstract class TSCreationOptions {
+  protected retentionMsValue?: number;
+  protected encodingValue?: TSEncoding;
+  protected chunkSizeValue?: number;
+  protected duplicatePolicyValue?: TSDuplicatePolicy;
+  protected ignoreMaxTimeDiffMsValue?: number;
+  protected ignoreMaxValueDiffValue?: number;
+  protected labelsValue?: [string, string][];
+
+  /** Java `retention(Duration)` — ms here; 0 keeps samples forever. */
+  retention(retentionMs: number): this {
+    if (!Number.isInteger(retentionMs) || retentionMs < 0) {
+      throw new Error(`redi.ts: retention must be a non-negative whole number of ms: ${retentionMs}`);
+    }
+    this.retentionMsValue = retentionMs;
+    return this;
+  }
+  encoding(encoding: TSEncoding): this {
+    this.encodingValue = encoding;
+    return this;
+  }
+  chunkSize(chunkSize: number): this {
+    this.chunkSizeValue = chunkSize;
+    return this;
+  }
+  duplicatePolicy(duplicatePolicy: TSDuplicatePolicy): this {
+    this.duplicatePolicyValue = duplicatePolicy;
+    return this;
+  }
+  ignore(maxTimeDiffMs: number, maxValueDiff: number): this {
+    this.ignoreMaxTimeDiffMsValue = maxTimeDiffMs;
+    this.ignoreMaxValueDiffValue = maxValueDiff;
+    return this;
+  }
+  labels(labels: Record<string, string>): this {
+    this.labelsValue = Object.entries(labels);
+    return this;
+  }
+  label(name: string, value: string): this {
+    if (!this.labelsValue) this.labelsValue = [];
+    this.labelsValue.push([name, value]);
+    return this;
+  }
+
+  /** Verbatim Java `RedissonTimeSeriesNative.appendCreationOptions`.
+   *  @internal wire assembly. */
+  appendCreationOptions(cmdArgs: (string | number)[]): void {
+    if (this.retentionMsValue !== undefined) cmdArgs.push('RETENTION', this.retentionMsValue);
+    if (this.encodingValue !== undefined) cmdArgs.push('ENCODING', this.encodingValue);
+    if (this.chunkSizeValue !== undefined) cmdArgs.push('CHUNK_SIZE', this.chunkSizeValue);
+    if (this.duplicatePolicyValue !== undefined) cmdArgs.push('DUPLICATE_POLICY', this.duplicatePolicyValue);
+    if (this.ignoreMaxTimeDiffMsValue !== undefined) {
+      cmdArgs.push('IGNORE', this.ignoreMaxTimeDiffMsValue, this.ignoreMaxValueDiffValue!);
+    }
+    if (this.labelsValue !== undefined) {
+      cmdArgs.push('LABELS');
+      for (const [name, value] of this.labelsValue) cmdArgs.push(name, value);
+    }
+  }
+}
+
+/** Java `TSCreateArgs`. */
+export class TSCreateArgs extends TSCreationOptions {
+  static defaults(): TSCreateArgs {
+    return new TSCreateArgs();
+  }
+}
+
+/** Java `TSAlterArgs`. */
+export class TSAlterArgs extends TSCreationOptions {}
+
+/** Java `TSAddArgs`: a sample plus per-call options. */
+export class TSAddArgs extends TSCreationOptions {
+  private onDuplicateValue?: TSDuplicatePolicy;
+  private constructor(readonly timestamp: number | null, readonly value: number) {
+    super();
+  }
+  static sample(timestamp: number, value: number): TSAddArgs {
+    return new TSAddArgs(timestamp, value);
+  }
+  static currentSample(value: number): TSAddArgs {
+    return new TSAddArgs(null, value);
+  }
+  /** Per-sample policy override — distinct from the series' own (duplicatePolicy). */
+  onDuplicate(duplicatePolicy: TSDuplicatePolicy): this {
+    this.onDuplicateValue = duplicatePolicy;
+    return this;
+  }
+  /** @internal wire assembly (key first, then timestamp/value, then options). */
+  appendArgs(cmdArgs: (string | number)[]): void {
+    cmdArgs.push(this.timestamp === null ? '*' : this.timestamp, this.value);
+    if (this.onDuplicateValue !== undefined) cmdArgs.push('ON_DUPLICATE', this.onDuplicateValue);
+    this.appendCreationOptions(cmdArgs);
+  }
+}
+
+/** Java `TSIncrArgs`. */
+export class TSIncrArgs extends TSCreationOptions {
+  private timestampValue?: number;
+  private constructor(readonly value: number) {
+    super();
+  }
+  static value(value: number): TSIncrArgs {
+    return new TSIncrArgs(value);
+  }
+  timestamp(timestamp: number): this {
+    this.timestampValue = timestamp;
+    return this;
+  }
+  /** @internal [key, value, TIMESTAMP?, ts?, creation...] */
+  appendArgs(key: string): (string | number)[] {
+    const cmdArgs: (string | number)[] = [key, this.value];
+    if (this.timestampValue !== undefined) cmdArgs.push('TIMESTAMP', this.timestampValue);
+    this.appendCreationOptions(cmdArgs);
+    return cmdArgs;
+  }
+}
+
+/** Shared range bound/filter/aggregation state (Java `TSBaseRangeParams`).
+ *  from/to are the module's tokens: a number string, or the '-'/'+' sentinels. */
+abstract class TSBaseRangeState {
+  protected static readonly EARLIEST = '-';
+  protected static readonly LATEST = '+';
+  protected fromToken = '-';
+  protected toToken = '+';
+  protected latestValue = false;
+  protected filterByTimestampsValue?: number[];
+  protected filterByMinValueValue?: number;
+  protected filterByMaxValueValue?: number;
+  protected countValue?: number;
+  protected alignValue?: string;
+  protected bucketDurationMsValue?: number;
+  protected aggregationsValue?: TSAggregation[][];
+  protected bucketTimestampValue?: TSBucketTimestamp;
+  protected emptyValue = false;
+
+  setRange(from: number, to: number): void {
+    this.fromToken = String(from);
+    this.toToken = String(to);
+  }
+  setFrom(from: number): void {
+    this.fromToken = String(from);
+    this.toToken = '+';
+  }
+  setTo(to: number): void {
+    this.fromToken = '-';
+    this.toToken = String(to);
+  }
+  setAll(): void {
+    this.fromToken = '-';
+    this.toToken = '+';
+  }
+  latest(): this {
+    this.latestValue = true;
+    return this;
+  }
+  filterByTimestamp(...timestamps: number[]): this {
+    this.filterByTimestampsValue = timestamps;
+    return this;
+  }
+  filterByValue(min: number, max: number): this {
+    this.filterByMinValueValue = min;
+    this.filterByMaxValueValue = max;
+    return this;
+  }
+  count(count: number): this {
+    this.countValue = count;
+    return this;
+  }
+  alignStart(): this {
+    this.alignValue = '-';
+    return this;
+  }
+  alignEnd(): this {
+    this.alignValue = '+';
+    return this;
+  }
+  align(timestamp: number): this {
+    this.alignValue = String(timestamp);
+    return this;
+  }
+  setAggregations(bucketMs: number, aggregations: TSAggregation[][]): this {
+    this.bucketDurationMsValue = bucketMs;
+    this.aggregationsValue = aggregations;
+    return this;
+  }
+  bucketTimestamp(bucketTimestamp: TSBucketTimestamp): this {
+    this.bucketTimestampValue = bucketTimestamp;
+    return this;
+  }
+  empty(): this {
+    this.emptyValue = true;
+    return this;
+  }
+
+  /** Verbatim Java `RedissonTimeSeriesNative.appendRangeOptions` (selection
+   *  goes between FILTER_BY_VALUE and COUNT).
+   *  @internal wire assembly. */
+  appendRangeOptions(cmdArgs: (string | number)[], selection: (string | number)[]): void {
+    cmdArgs.push(this.fromToken, this.toToken);
+    if (this.latestValue) cmdArgs.push('LATEST');
+    if (this.filterByTimestampsValue !== undefined) {
+      cmdArgs.push('FILTER_BY_TS', ...this.filterByTimestampsValue);
+    }
+    if (this.filterByMinValueValue !== undefined) {
+      cmdArgs.push('FILTER_BY_VALUE', this.filterByMinValueValue, this.filterByMaxValueValue!);
+    }
+    cmdArgs.push(...selection);
+    if (this.countValue !== undefined) cmdArgs.push('COUNT', this.countValue);
+    if (this.alignValue !== undefined) {
+      if (this.aggregationsValue === undefined) {
+        throw new Error('redi.ts: align() requires aggregation() — the module rejects ALIGN on its own');
+      }
+      if (this.alignValue === '-' && this.fromToken === '-') {
+        throw new Error('redi.ts: alignStart() requires a range with an explicit start');
+      }
+      if (this.alignValue === '+' && this.toToken === '+') {
+        throw new Error('redi.ts: alignEnd() requires a range with an explicit end');
+      }
+    }
+    if (this.aggregationsValue !== undefined) {
+      if (this.alignValue !== undefined) cmdArgs.push('ALIGN', this.alignValue);
+      cmdArgs.push('AGGREGATION');
+      for (const perKey of this.aggregationsValue) {
+        cmdArgs.push(perKey.map((a) => TS_AGGREGATION_TOKEN[a]).join(','));
+      }
+      cmdArgs.push(this.bucketDurationMsValue!);
+      if (this.bucketTimestampValue !== undefined) {
+        cmdArgs.push('BUCKETTIMESTAMP', TS_BUCKET_TIMESTAMP_TOKEN[this.bucketTimestampValue]);
+      }
+      if (this.emptyValue) cmdArgs.push('EMPTY');
+    }
+  }
+}
+
+/** Java `TSRangeArgs` (single series). */
+export class TSRangeArgs extends TSBaseRangeState {
+  static range(fromTimestamp: number, toTimestamp: number): TSRangeArgs {
+    const a = new TSRangeArgs();
+    a.setRange(fromTimestamp, toTimestamp);
+    return a;
+  }
+  static from(fromTimestamp: number): TSRangeArgs {
+    const a = new TSRangeArgs();
+    a.setFrom(fromTimestamp);
+    return a;
+  }
+  static to(toTimestamp: number): TSRangeArgs {
+    const a = new TSRangeArgs();
+    a.setTo(toTimestamp);
+    return a;
+  }
+  static all(): TSRangeArgs {
+    return new TSRangeArgs();
+  }
+  aggregation(bucketMs: number, ...aggregations: TSAggregation[]): this {
+    return this.setAggregations(bucketMs, [aggregations]);
+  }
+}
+
+/** Java `TSReadArgs`. */
+export class TSReadArgs {
+  private blockTimeoutMsValue?: number;
+  private blockMinCountValue?: number;
+  private maxCountValue?: number;
+  private constructor(readonly timestamp: string) {}
+  static from(timestamp: number): TSReadArgs {
+    return new TSReadArgs(String(timestamp));
+  }
+  static fromEarliest(): TSReadArgs {
+    return new TSReadArgs('-');
+  }
+  static fromLast(): TSReadArgs {
+    return new TSReadArgs('+');
+  }
+  static fromNext(): TSReadArgs {
+    return new TSReadArgs('$');
+  }
+  block(timeoutMs: number, minCount: number): this {
+    if (timeoutMs < 1) {
+      throw new Error('redi.ts: block timeout under 1ms would mean forever on the wire');
+    }
+    this.blockTimeoutMsValue = timeoutMs;
+    this.blockMinCountValue = minCount;
+    return this;
+  }
+  maxCount(maxCount: number): this {
+    this.maxCountValue = maxCount;
+    return this;
+  }
+  getBlockTimeoutMs(): number | undefined {
+    return this.blockTimeoutMsValue;
+  }
+  getMinCount(): number | undefined {
+    return this.blockMinCountValue;
+  }
+  getMaxCount(): number | undefined {
+    return this.maxCountValue;
+  }
+}
+
+/** Java `TSRuleArgs` (TS.CREATERULE). */
+export class TSRuleArgs {
+  private alignTimestampValue?: number;
+  private constructor(
+    readonly destinationKey: string,
+    readonly aggregation: TSAggregation,
+    readonly bucketDurationMs: number,
+  ) {}
+  static destination(destinationKey: string, aggregation: TSAggregation, bucketDurationMs: number): TSRuleArgs {
+    return new TSRuleArgs(destinationKey, aggregation, bucketDurationMs);
+  }
+  alignTimestamp(timestamp: number): this {
+    this.alignTimestampValue = timestamp;
+    return this;
+  }
+  getAlignTimestamp(): number | undefined {
+    return this.alignTimestampValue;
+  }
+}
+
+/** Java label-selection block shared by TS.MGET / TS.MRANGE. */
+function tsLabelSelection(withLabels: boolean, selectedLabels?: string[]): (string | number)[] {
+  if (selectedLabels !== undefined && withLabels) {
+    throw new Error('redi.ts: withLabels() and selectedLabels() are mutually exclusive');
+  }
+  if (selectedLabels !== undefined) {
+    if (selectedLabels.length === 0) throw new Error('redi.ts: selectedLabels() requires at least one label');
+    return ['SELECTED_LABELS', ...selectedLabels];
+  }
+  if (withLabels) return ['WITHLABELS'];
+  return [];
+}
+
+function tsRequireFilters(filters: string[]): void {
+  if (!filters || filters.length === 0) {
+    throw new Error('redi.ts: at least one filter expression is required');
+  }
+}
+
+/** Java `TSMultiGetArgs` (TS.MGET). */
+export class TSMultiGetArgs {
+  private latestValue = false;
+  private withLabelsValue = false;
+  private selectedLabelsValue?: string[];
+  private constructor(readonly filters: string[]) {}
+  static filter(...filters: string[]): TSMultiGetArgs {
+    return new TSMultiGetArgs(filters);
+  }
+  latest(): this {
+    this.latestValue = true;
+    return this;
+  }
+  withLabels(): this {
+    this.withLabelsValue = true;
+    return this;
+  }
+  selectedLabels(...labels: string[]): this {
+    this.selectedLabelsValue = labels;
+    return this;
+  }
+  /** @internal */
+  appendArgs(): (string | number)[] {
+    tsRequireFilters(this.filters);
+    const cmdArgs: (string | number)[] = [];
+    if (this.latestValue) cmdArgs.push('LATEST');
+    cmdArgs.push(...tsLabelSelection(this.withLabelsValue, this.selectedLabelsValue));
+    cmdArgs.push('FILTER', ...this.filters);
+    return cmdArgs;
+  }
+}
+
+/** Java `TSMultiRangeArgs` (TS.MRANGE / TS.MREVRANGE). */
+export class TSMultiRangeArgs extends TSBaseRangeState {
+  private withLabelsValue = false;
+  private selectedLabelsValue?: string[];
+  private groupByLabelValue?: string;
+  private reducerValue?: TSReducer;
+  private excludeEmptyValue = false;
+  private constructor(readonly filters: string[]) {
+    super();
+  }
+  static filter(...filters: string[]): TSMultiRangeArgs {
+    return new TSMultiRangeArgs(filters);
+  }
+  range(fromTimestamp: number, toTimestamp: number): this {
+    this.setRange(fromTimestamp, toTimestamp);
+    return this;
+  }
+  from(fromTimestamp: number): this {
+    this.setFrom(fromTimestamp);
+    return this;
+  }
+  to(toTimestamp: number): this {
+    this.setTo(toTimestamp);
+    return this;
+  }
+  all(): this {
+    this.setAll();
+    return this;
+  }
+  withLabels(): this {
+    this.withLabelsValue = true;
+    return this;
+  }
+  selectedLabels(...labels: string[]): this {
+    this.selectedLabelsValue = labels;
+    return this;
+  }
+  aggregation(bucketMs: number, ...aggregations: TSAggregation[]): this {
+    return this.setAggregations(bucketMs, [aggregations]);
+  }
+  groupBy(label: string, reducer: TSReducer): this {
+    this.groupByLabelValue = label;
+    this.reducerValue = reducer;
+    return this;
+  }
+  excludeEmpty(): this {
+    this.excludeEmptyValue = true;
+    return this;
+  }
+  /** @internal (EXCLUDEEMPTY/FILTER/GROUPBY trail appendRangeOptions). */
+  appendArgs(): (string | number)[] {
+    tsRequireFilters(this.filters);
+    if (this.groupByLabelValue !== undefined) {
+      if (this.excludeEmptyValue) {
+        throw new Error('redi.ts: groupBy() and excludeEmpty() are mutually exclusive');
+      }
+      if (this.aggregationsValue !== undefined && this.aggregationsValue[0].length > 1) {
+        throw new Error('redi.ts: groupBy() is mutually exclusive with an aggregation() of more than one aggregator');
+      }
+    }
+    const cmdArgs: (string | number)[] = [];
+    this.appendRangeOptions(cmdArgs, tsLabelSelection(this.withLabelsValue, this.selectedLabelsValue));
+    if (this.excludeEmptyValue) cmdArgs.push('EXCLUDEEMPTY');
+    cmdArgs.push('FILTER', ...this.filters);
+    if (this.groupByLabelValue !== undefined) {
+      cmdArgs.push('GROUPBY', this.groupByLabelValue, 'REDUCE', TS_AGGREGATION_TOKEN[this.reducerValue!]);
+    }
+    return cmdArgs;
+  }
+}
+
+/** Java `TSGroupedRangeArgs` (TS.NRANGE / TS.NREVRANGE). */
+export class TSGroupedRangeArgs extends TSBaseRangeState {
+  private constructor(readonly keys: string[]) {
+    super();
+  }
+  static keys(...keys: string[]): TSGroupedRangeArgs {
+    return new TSGroupedRangeArgs(keys);
+  }
+  range(fromTimestamp: number, toTimestamp: number): this {
+    this.setRange(fromTimestamp, toTimestamp);
+    return this;
+  }
+  from(fromTimestamp: number): this {
+    this.setFrom(fromTimestamp);
+    return this;
+  }
+  to(toTimestamp: number): this {
+    this.setTo(toTimestamp);
+    return this;
+  }
+  all(): this {
+    this.setAll();
+    return this;
+  }
+  /** Same aggregation repeated for every key (server wants one spec per key). */
+  aggregation(bucketMs: number, ...aggregations: TSAggregation[]): this {
+    return this.setAggregations(bucketMs, this.keys.map(() => aggregations));
+  }
+  /** One aggregator list per key, in key order. */
+  aggregations(bucketMs: number, aggregations: TSAggregation[][]): this {
+    return this.setAggregations(bucketMs, aggregations);
+  }
+  /** @internal */
+  appendArgs(): (string | number)[] {
+    if (this.keys.length === 0) throw new Error('redi.ts: at least one key is required');
+    if (this.aggregationsValue !== undefined && this.aggregationsValue.length !== this.keys.length) {
+      throw new Error(`redi.ts: aggregations must hold one entry per key: ${this.keys.length} expected, ${this.aggregationsValue.length} given`);
+    }
+    const cmdArgs: (string | number)[] = [this.keys.length, ...this.keys];
+    this.appendRangeOptions(cmdArgs, []);
+    return cmdArgs;
+  }
+}
+
+// TS.* reply decoders (RESP shapes as ioredis returns them) ------------------------------
+
+function tsToSample(raw: any): TSSample | null {
+  if (!raw || !Array.isArray(raw) || raw.length === 0) return null;
+  const values = Array.isArray(raw[1]) ? (raw[1] as any[]) : [raw[1]];
+  return { timestamp: Number(raw[0]), values: values.map((v) => Number(v)) };
+}
+
+function tsToSamples(raw: any): TSSample[] {
+  const arr = (raw ?? []) as any[];
+  return arr.map((s) => tsToSample(s)!).filter((s) => s !== null);
+}
+
+function tsToLabels(raw: any): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const pair of (raw ?? []) as any[]) {
+    if (Array.isArray(pair) && pair.length >= 2) out[String(pair[0])] = String(pair[1]);
+  }
+  return out;
+}
+
+const TS_AGGREGATION_BY_TOKEN = new Map<string, TSAggregation>(
+  (Object.keys(TS_AGGREGATION_TOKEN) as TSAggregation[]).map((k) => [TS_AGGREGATION_TOKEN[k], k]),
+);
+
+function tsInfoDecode(flat: any): TSInfo {
+  const info: TSInfo = {
+    totalSamples: 0, memoryUsage: 0, firstTimestamp: null, lastTimestamp: null,
+    retentionTimeMs: 0, chunkCount: 0, chunkSize: 0, chunkType: null, duplicatePolicy: null,
+    labels: {}, sourceKey: null, rules: [], ignoreMaxTimeDiffMs: 0, ignoreMaxValueDiff: 0,
+    keySelfName: null, chunks: [],
+  };
+  const parts = (flat ?? []) as any[];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const name = String(parts[i]);
+    const value = parts[i + 1];
+    if (value === null || value === undefined) continue;
+    switch (name) {
+      case 'totalSamples': info.totalSamples = Number(value); break;
+      case 'memoryUsage': info.memoryUsage = Number(value); break;
+      case 'firstTimestamp': info.firstTimestamp = Number(value); break;
+      case 'lastTimestamp': info.lastTimestamp = Number(value); break;
+      case 'retentionTime': info.retentionTimeMs = Number(value); break;
+      case 'chunkCount': info.chunkCount = Number(value); break;
+      case 'chunkSize': info.chunkSize = Number(value); break;
+      case 'chunkType': info.chunkType = String(value).toUpperCase() as TSEncoding; break;
+      case 'duplicatePolicy': info.duplicatePolicy = String(value).toUpperCase() as TSDuplicatePolicy; break;
+      // TS.INFO labels never carry nulls (only SELECTED_LABELS replies do)
+      case 'labels': info.labels = tsToLabels(value) as Record<string, string>; break;
+      case 'sourceKey': info.sourceKey = String(value); break;
+      case 'rules':
+        info.rules = ((value ?? []) as any[]).map((rule: any[]) => ({
+          destinationKey: String(rule[0]),
+          bucketDurationMs: Number(rule[1][0]),
+          aggregation: TS_AGGREGATION_BY_TOKEN.get(String(rule[1][1]).toLowerCase()) ?? null,
+          alignTimestamp: Number(rule[1][2]),
+        }));
+        break;
+      case 'ignoreMaxTimeDiff': info.ignoreMaxTimeDiffMs = Number(value); break;
+      case 'ignoreMaxValDiff': info.ignoreMaxValueDiff = Number(value); break;
+      case 'keySelfName': info.keySelfName = String(value); break;
+      case 'Chunks':
+        info.chunks = ((value ?? []) as any[]).map((chunk: any[]) => {
+          const c: TSChunkInfo = { startTimestamp: 0, endTimestamp: 0, samples: 0, size: 0, bytesPerSample: 0 };
+          for (let j = 0; j + 1 < chunk.length; j += 2) {
+            const key = String(chunk[j]);
+            if (key === 'startTimestamp') c.startTimestamp = Number(chunk[j + 1]);
+            else if (key === 'endTimestamp') c.endTimestamp = Number(chunk[j + 1]);
+            else if (key === 'samples') c.samples = Number(chunk[j + 1]);
+            else if (key === 'size') c.size = Number(chunk[j + 1]);
+            else if (key === 'bytesPerSample') c.bytesPerSample = Number(chunk[j + 1]);
+          }
+          return c;
+        });
+        break;
+    }
+  }
+  return info;
+}
+
+/** Java 4.8 `RTimeSeriesNative`: single-series binding over the RedisTimeSeries
+ *  module's TS.* commands. All methods require the module (Redis 8.0+, or the
+ *  RedisTimeSeries module loaded); on clients without it they reject. */
+export class RTimeSeriesNative extends RedisDataStructure {
+  /** Java `create()` / `create(TSCreateArgs)`: TS.CREATE. */
+  async create(args?: TSCreateArgs): Promise<void> {
+    const cmdArgs: (string | number)[] = [this.name];
+    args?.appendCreationOptions(cmdArgs);
+    await tryDo(this.redis, 'TS.CREATE', ...cmdArgs);
+  }
+  /** Java `createIfAbsent(...)`: EXISTS-guarded TS.CREATE via Lua — an
+   *  existing key reports false instead of an error. */
+  async createIfAbsent(args?: TSCreateArgs): Promise<boolean> {
+    const argv: (string | number)[] = [];
+    args?.appendCreationOptions(argv);
+    const s = "if redis.call('exists', KEYS[1]) == 0 then " +
+      "redis.call('TS.CREATE', KEYS[1], unpack(ARGV)); return 1; end; return 0;";
+    return toNumber(await luaEval(this.redis, s, 1, this.name, ...argv.map(String))) === 1;
+  }
+  /** Java `alter(TSAlterArgs)`: TS.ALTER (LABELS replace the whole set). */
+  async alter(args: TSAlterArgs): Promise<void> {
+    const cmdArgs: (string | number)[] = [this.name];
+    args.appendCreationOptions(cmdArgs);
+    await tryDo(this.redis, 'TS.ALTER', ...cmdArgs);
+  }
+  /** Java `add(long, double)` / `addCurrent(double)` / `add(TSAddArgs)`: TS.ADD. */
+  async add(timestamp: number, value: number): Promise<number>;
+  async add(args: TSAddArgs): Promise<number>;
+  async add(a: number | TSAddArgs, value?: number): Promise<number> {
+    if (typeof a === 'number') return toNumber(await tryDo(this.redis, 'TS.ADD', this.name, a, value!));
+    const cmdArgs: (string | number)[] = [this.name];
+    a.appendArgs(cmdArgs);
+    return toNumber(await tryDo(this.redis, 'TS.ADD', ...cmdArgs));
+  }
+  /** Java `addCurrent(double)`: TS.ADD key * value (server-stamped). */
+  async addCurrent(value: number): Promise<number> {
+    return toNumber(await tryDo(this.redis, 'TS.ADD', this.name, '*', value));
+  }
+  /** Java `addAll(Map<Long, Double>)`: TS.MADD with this key repeated — the
+   *  module refuses a key that is not already a series. */
+  async addAll(samples: Map<number, number> | Record<number, number>): Promise<number[]> {
+    const entries = samples instanceof Map ? [...samples.entries()] : (Object.entries(samples) as [string, number][]).map(([k, v]) => [Number(k), v]);
+    if (entries.length === 0) return [];
+    const cmdArgs: (string | number)[] = [];
+    for (const [ts, value] of entries) cmdArgs.push(this.name, ts, value);
+    const r = (await tryDo(this.redis, 'TS.MADD', ...cmdArgs)) as any[];
+    return (r ?? []).map((x) => Number(x));
+  }
+  /** Java `incrementBy(double)` / `incrementBy(TSIncrArgs)`: TS.INCRBY. */
+  async incrementBy(addend: number): Promise<number>;
+  async incrementBy(args: TSIncrArgs): Promise<number>;
+  async incrementBy(a: number | TSIncrArgs): Promise<number> {
+    const cmdArgs = typeof a === 'number' ? [this.name, a] : a.appendArgs(this.name);
+    return toNumber(await tryDo(this.redis, 'TS.INCRBY', ...cmdArgs));
+  }
+  /** Java `decrementBy(double)` / `decrementBy(TSIncrArgs)`: TS.DECRBY. */
+  async decrementBy(subtrahend: number): Promise<number>;
+  async decrementBy(args: TSIncrArgs): Promise<number>;
+  async decrementBy(a: number | TSIncrArgs): Promise<number> {
+    const cmdArgs = typeof a === 'number' ? [this.name, a] : a.appendArgs(this.name);
+    return toNumber(await tryDo(this.redis, 'TS.DECRBY', ...cmdArgs));
+  }
+  /** Java `removeRange(long, long)`: TS.DEL (inclusive bounds). */
+  async removeRange(fromTimestamp: number, toTimestamp: number): Promise<number> {
+    return toNumber(await tryDo(this.redis, 'TS.DEL', this.name, fromTimestamp, toTimestamp));
+  }
+  /** Java `first()`: TS.RANGE - + COUNT 1. */
+  async first(): Promise<TSSample | null> {
+    const r = await tryDo(this.redis, 'TS.RANGE', this.name, '-', '+', 'COUNT', 1);
+    return tsToSamples(r)[0] ?? null;
+  }
+  /** Java `size()`: TS.INFO totalSamples. */
+  async size(): Promise<number> {
+    return tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name)).totalSamples;
+  }
+  /** Java `firstTimestamp()`: TS.INFO firstTimestamp (0 on an empty series). */
+  async firstTimestamp(): Promise<number> {
+    return tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name)).firstTimestamp ?? 0;
+  }
+  /** Java `lastTimestamp()`: TS.INFO lastTimestamp. */
+  async lastTimestamp(): Promise<number> {
+    return tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name)).lastTimestamp ?? 0;
+  }
+  /** Java `get()`: TS.GET — the last sample, null when empty. */
+  async get(): Promise<TSSample | null> {
+    return tsToSample(await tryDo(this.redis, 'TS.GET', this.name));
+  }
+  /** Java `getLatest()`: TS.GET LATEST (compacts the open bucket). */
+  async getLatest(): Promise<TSSample | null> {
+    return tsToSample(await tryDo(this.redis, 'TS.GET', this.name, 'LATEST'));
+  }
+  /** Java `range(long, long)` / `range(TSRangeArgs)`: TS.RANGE. */
+  async range(fromTimestamp: number, toTimestamp: number): Promise<TSSample[]>;
+  async range(args: TSRangeArgs): Promise<TSSample[]>;
+  async range(a: number | TSRangeArgs, to?: number): Promise<TSSample[]> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') cmdArgs.push(a, to!);
+    else a.appendRangeOptions(cmdArgs, []);
+    return tsToSamples(await tryDo(this.redis, 'TS.RANGE', ...cmdArgs));
+  }
+  /** Java `rangeReversed(long, long)` / `rangeReversed(TSRangeArgs)`: TS.REVRANGE. */
+  async rangeReversed(fromTimestamp: number, toTimestamp: number): Promise<TSSample[]>;
+  async rangeReversed(args: TSRangeArgs): Promise<TSSample[]>;
+  async rangeReversed(a: number | TSRangeArgs, to?: number): Promise<TSSample[]> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') cmdArgs.push(a, to!);
+    else a.appendRangeOptions(cmdArgs, []);
+    return tsToSamples(await tryDo(this.redis, 'TS.REVRANGE', ...cmdArgs));
+  }
+  /** Java `read(long)` / `read(TSReadArgs)`: TS.READ (BLOCK holds the connection). */
+  async read(timestamp: number): Promise<TSSample[]>;
+  async read(args: TSReadArgs): Promise<TSSample[]>;
+  async read(a: number | TSReadArgs): Promise<TSSample[]> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') {
+      cmdArgs.push(a);
+    } else {
+      cmdArgs.push(a.timestamp);
+      if (a.getBlockTimeoutMs() !== undefined) cmdArgs.push('BLOCK', a.getBlockTimeoutMs()!, a.getMinCount()!);
+      if (a.getMaxCount() !== undefined) cmdArgs.push('MAX_COUNT', a.getMaxCount()!);
+    }
+    return tsToSamples(await tryDo(this.redis, 'TS.READ', ...cmdArgs));
+  }
+  /** Java `createRule(TSRuleArgs)`: TS.CREATERULE (destination must exist). */
+  async createRule(args: TSRuleArgs): Promise<void> {
+    const cmdArgs: (string | number)[] = [
+      this.name, args.destinationKey, 'AGGREGATION', TS_AGGREGATION_TOKEN[args.aggregation], args.bucketDurationMs,
+    ];
+    if (args.getAlignTimestamp() !== undefined) cmdArgs.push(args.getAlignTimestamp()!);
+    await tryDo(this.redis, 'TS.CREATERULE', ...cmdArgs);
+  }
+  /** Java `deleteRule(String)`: TS.DELETERULE. */
+  async deleteRule(destinationKey: string): Promise<void> {
+    await tryDo(this.redis, 'TS.DELETERULE', this.name, destinationKey);
+  }
+  /** Java `iterator()` / `iterator(int)`: paged TS.RANGE from cursor, oldest
+   *  first, `count` samples per round trip (default 10). */
+  async *iterator(count = 10): AsyncGenerator<TSSample> {
+    let from = 0;
+    for (;;) {
+      const batch = await this.range(TSRangeArgs.from(from).count(count));
+      for (const s of batch) yield s;
+      if (batch.length < count) return;
+      from = batch[batch.length - 1].timestamp + 1;
+    }
+  }
+  /** Java `stream()` / `stream(int)` — same walk as iterator(). */
+  stream(count = 10): AsyncGenerator<TSSample> {
+    return this.iterator(count);
+  }
+  /** Java `getLabels()`: TS.INFO labels. */
+  async getLabels(): Promise<Record<string, string>> {
+    const labels = tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name)).labels;
+    return Object.fromEntries(Object.entries(labels).map(([k, v]) => [k, v as string]));
+  }
+  /** Java `getInfo()`: TS.INFO. */
+  async getInfo(): Promise<TSInfo> {
+    return tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name));
+  }
+  /** Java `getDebugInfo()`: TS.INFO DEBUG (per-chunk detail). */
+  async getDebugInfo(): Promise<TSInfo> {
+    return tsInfoDecode(await tryDo(this.redis, 'TS.INFO', this.name, 'DEBUG'));
+  }
+}
+
+/** Java 4.8 `RTimeSeriesNatives`: TS.* operations that span several series
+ *  (TS.MADD / TS.MGET / TS.MRANGE / TS.MREVRANGE / TS.NRANGE / TS.NREVRANGE /
+ *  TS.QUERYINDEX / TS.QUERYLABELS). Module-gated like RTimeSeriesNative. */
+export class RTimeSeriesNatives {
+  constructor(private redis: Redis) {}
+
+  /** Java `addAll(Map<String, Map<Long, Double>>)`: one TS.MADD over every
+   *  key/timestamp/value triple; reply split per key by sample count. */
+  async addAll(samples: Map<string, Map<number, number>> | Record<string, Record<number, number>>): Promise<Map<string, number[]>> {
+    const entries = samples instanceof Map
+      ? [...samples.entries()].map(([k, m]) => [k, m instanceof Map ? [...m.entries()] : Object.entries(m).map(([t, v]) => [Number(t), v] as [number, number])] as [string, [number, number][]])
+      : Object.entries(samples).map(([k, rec]) => [k, Object.entries(rec).map(([t, v]) => [Number(t), v] as [number, number])] as [string, [number, number][]]);
+    const out = new Map<string, number[]>();
+    if (entries.length === 0) return out;
+    const cmdArgs: (string | number)[] = [];
+    for (const [key, list] of entries) {
+      for (const [ts, value] of list) cmdArgs.push(key, ts, value);
+    }
+    const flat = ((await tryDo(this.redis, 'TS.MADD', ...cmdArgs)) as any[]) ?? [];
+    let i = 0;
+    for (const [key, list] of entries) {
+      out.set(key, list.map(() => Number(flat[i++])));
+    }
+    return out;
+  }
+  /** Java `getAll(TSMultiGetArgs)`: TS.MGET — last sample per matching series. */
+  async getAll(args: TSMultiGetArgs): Promise<Map<string, TSSeriesSample>> {
+    const rows = ((await tryDo(this.redis, 'TS.MGET', ...args.appendArgs())) as any[]) ?? [];
+    const out = new Map<string, TSSeriesSample>();
+    for (const row of rows) {
+      // [key, labels, sample] — sample is [] for an empty series
+      out.set(String(row[0]), { labels: tsToLabels(row[1]), sample: tsToSample(row[2]) });
+    }
+    return out;
+  }
+  /** Java `range(TSMultiRangeArgs)`: TS.MRANGE. */
+  async range(args: TSMultiRangeArgs): Promise<Map<string, TSSeriesSamples>> {
+    return this.multiRange('TS.MRANGE', args);
+  }
+  /** Java `rangeReversed(TSMultiRangeArgs)`: TS.MREVRANGE. */
+  async rangeReversed(args: TSMultiRangeArgs): Promise<Map<string, TSSeriesSamples>> {
+    return this.multiRange('TS.MREVRANGE', args);
+  }
+  private async multiRange(command: 'TS.MRANGE' | 'TS.MREVRANGE', args: TSMultiRangeArgs): Promise<Map<string, TSSeriesSamples>> {
+    const rows = ((await tryDo(this.redis, command, ...args.appendArgs())) as any[]) ?? [];
+    const out = new Map<string, TSSeriesSamples>();
+    for (const row of rows) {
+      out.set(String(row[0]), { labels: tsToLabels(row[1]), samples: tsToSamples(row[2]) });
+    }
+    return out;
+  }
+  /** Java `groupedRange(TSGroupedRangeArgs)`: TS.NRANGE — one row per
+   *  timestamp, values in key order (NaN where a key had no sample). */
+  async groupedRange(args: TSGroupedRangeArgs): Promise<TSSample[]> {
+    return tsToSamples(await tryDo(this.redis, 'TS.NRANGE', ...args.appendArgs()));
+  }
+  /** Java `groupedRangeReversed(TSGroupedRangeArgs)`: TS.NREVRANGE. */
+  async groupedRangeReversed(args: TSGroupedRangeArgs): Promise<TSSample[]> {
+    return tsToSamples(await tryDo(this.redis, 'TS.NREVRANGE', ...args.appendArgs()));
+  }
+  /** Java `queryIndex(String...)`: TS.QUERYINDEX. */
+  async queryIndex(...filters: string[]): Promise<string[]> {
+    tsRequireFilters(filters);
+    const r = (await tryDo(this.redis, 'TS.QUERYINDEX', ...filters)) as any[];
+    return (r ?? []).map(String);
+  }
+  /** Java `labelNames(String...)`: TS.QUERYLABELS LABELS [FILTER ...]. */
+  async labelNames(...filters: string[]): Promise<string[]> {
+    const cmdArgs: (string | number)[] = ['LABELS'];
+    if (filters && filters.length > 0) cmdArgs.push('FILTER', ...filters);
+    const r = (await tryDo(this.redis, 'TS.QUERYLABELS', ...cmdArgs)) as any[];
+    return (r ?? []).map(String);
+  }
+  /** Java `labelValues(String, String...)`: TS.QUERYLABELS VALUES label [FILTER ...]. */
+  async labelValues(label: string, ...filters: string[]): Promise<string[]> {
+    const cmdArgs: (string | number)[] = ['VALUES', label];
+    if (filters && filters.length > 0) cmdArgs.push('FILTER', ...filters);
+    const r = (await tryDo(this.redis, 'TS.QUERYLABELS', ...cmdArgs)) as any[];
+    return (r ?? []).map(String);
+  }
+}

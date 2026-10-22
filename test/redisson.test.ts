@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
-import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs, TimeSeriesAddArgs, TimeSeriesAggregationArgs, TimeSeriesReadArgs } from '../src';
+import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs, TimeSeriesAddArgs, TimeSeriesAggregationArgs, TimeSeriesReadArgs, TSAddArgs, TSCreateArgs, TSIncrArgs, TSRangeArgs, TSReadArgs, TSRuleArgs, TSMultiGetArgs, TSMultiRangeArgs, TSGroupedRangeArgs, MapsImportArgs } from '../src';
 import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
@@ -2485,5 +2485,114 @@ describe('phase 70: TimeSeries 4.8 expansion (mock)', () => {
     await expect(ts.aggregate(TimeSeriesAggregationArgs.between(0, 10).count())).rejects.toThrow(/bucket interval/);
     await expect(ts.aggregate(TimeSeriesAggregationArgs.between(0, 10).bucket(10))).rejects.toThrow(/at least one aggregation/);
     await r.shutdown();
+  });
+});
+
+describe('phase 71: RMaps mass writes + TS native args (mock)', () => {
+  // ioredis-mock has neither TS.* nor HIMPORT (its pipeline lacks `.call`), so
+  // RMaps takes its DEL+HSET fallback here and the TS-native surface is pinned
+  // through pure args-shape checks — no TS.* command is issued on the mock.
+  it('RMaps.set writes plain HASHes readable by RMap across many maps', async () => {
+    const r = make();
+    const maps = r.getMaps<string, number>();
+    await maps.set({
+      'p71:m1': { a: 1, b: 2 },
+      'p71:m2': { a: 10, b: 20 },
+      'p71:m3': { other: 3 }, // different field set → its own import group
+    });
+    // RMap reads the same wire (JSON-encoded fields/values)
+    const m1 = r.getMap<string, number>('p71:m1');
+    const m2 = r.getMap<string, number>('p71:m2');
+    const m3 = r.getMap<string, number>('p71:m3');
+    expect(await m1.get('a')).toBe(1);
+    expect(await m2.get('b')).toBe(20);
+    expect(await m3.get('other')).toBe(3);
+    // set replaces the whole object
+    await maps.set({ 'p71:m1': { z: 9 } });
+    expect(await m1.get('a')).toBeNull();
+    expect(await m1.get('z')).toBe(9);
+    // explicit batchSize path (one batch per two objects)
+    await maps.set({ 'p71:m4': { q: 1 }, 'p71:m5': { q: 2 } }, 1);
+    expect(await r.getMap<number, number>('p71:m4').get('q')).toBe(1);
+    // guards match Java
+    await expect(maps.set({ 'p71:empty': {} })).rejects.toThrow(/can't be empty/);
+    await expect(maps.set({ 'p71:x': { a: 1 } }, 0)).rejects.toThrow(/greater than zero/);
+    // Map-typed input works too
+    await maps.set(new Map([['p71:m6', new Map([['k', 6]])]]));
+    expect(await r.getMap<string, number>('p71:m6').get('k')).toBe(6);
+    await r.shutdown();
+  });
+
+  it('RMaps.createImport batches, flushes and counts', async () => {
+    const r = make();
+    const maps = r.getMaps<string, number>();
+    const imp = maps.createImport(MapsImportArgs.fields('f1', 'f2').batchSize(2));
+    await imp.add('p71:i1', 1, 'one'); // buffered (1 < 2)
+    expect(await r.getMap<string, any>('p71:i1').get('f1')).toBeNull();
+    await imp.add('p71:i2', 2, 'two'); // reaches batchSize → auto flush
+    expect(await r.getMap<string, any>('p71:i1').get('f1')).toBe(1);
+    expect(await r.getMap<string, any>('p71:i2').get('f2')).toBe('two');
+    await imp.add('p71:i3', 3, 'three'); // stays buffered until flush()
+    expect(await r.getMap<string, any>('p71:i3').get('f1')).toBeNull();
+    await imp.flush();
+    expect(await r.getMap<string, any>('p71:i3').get('f1')).toBe(3);
+    expect(imp.getImportedCount()).toBe(3);
+    await expect(imp.add('p71:bad', 1)).rejects.toThrow(/amount of values/);
+    expect(() => maps.createImport(MapsImportArgs.fields('dup', 'dup'))).toThrow(/duplication/);
+    await r.shutdown();
+  });
+
+  it('TS native args wire shapes match Java appendCreationOptions/appendRangeOptions', () => {
+    const create: any[] = [];
+    TSCreateArgs.defaults().retention(60000).duplicatePolicy('LAST').encoding('COMPRESSED')
+      .chunkSize(128).ignore(5, 0.5).label('area', '32').appendCreationOptions(create);
+    expect(create).toEqual(['RETENTION', 60000, 'ENCODING', 'COMPRESSED', 'CHUNK_SIZE', 128,
+      'DUPLICATE_POLICY', 'LAST', 'IGNORE', 5, 0.5, 'LABELS', 'area', '32']);
+
+    const add: any[] = [];
+    TSAddArgs.sample(1000, 2.5).onDuplicate('SUM').retention(10).appendArgs(add);
+    expect(add).toEqual([1000, 2.5, 'ON_DUPLICATE', 'SUM', 'RETENTION', 10]);
+    const cur: any[] = [];
+    TSAddArgs.currentSample(1).appendArgs(cur);
+    expect(cur).toEqual(['*', 1]);
+    expect(TSIncrArgs.value(3).timestamp(99).retention(7).appendArgs('k')).toEqual(
+      ['k', 3, 'TIMESTAMP', 99, 'RETENTION', 7],
+    );
+
+    const range: any[] = ['KEY'];
+    TSRangeArgs.range(1, 10).filterByValue(0, 5).aggregation(60000, 'AVG', 'STD_POPULATION').appendRangeOptions(range, []);
+    expect(range).toEqual(['KEY', '1', '10', 'FILTER_BY_VALUE', 0, 5, 'AGGREGATION', 'avg,std.p', 60000]);
+    const whole: any[] = ['KEY'];
+    TSRangeArgs.all().latest().filterByTimestamp(1, 2).count(4).bucketTimestamp('MID').empty()
+      .aggregation(100, 'SUM').align(7).appendRangeOptions(whole, []);
+    expect(whole).toEqual(['KEY', '-', '+', 'LATEST', 'FILTER_BY_TS', 1, 2, 'COUNT', 4,
+      'ALIGN', '7', 'AGGREGATION', 'sum', 100, 'BUCKETTIMESTAMP', 'mid', 'EMPTY']);
+    // align guards (aggregation must exist before the start/end checks, as in Java)
+    expect(() => TSRangeArgs.all().aggregation(10, 'SUM').alignStart().appendRangeOptions([], [])).toThrow(/alignStart/);
+    expect(() => TSRangeArgs.all().aggregation(10, 'SUM').alignEnd().appendRangeOptions([], [])).toThrow(/alignEnd/);
+    expect(() => TSRangeArgs.all().align(1).appendRangeOptions([], [])).toThrow(/requires aggregation/);
+
+    expect(TSMultiGetArgs.filter('a=1').withLabels().appendArgs()).toEqual(['WITHLABELS', 'FILTER', 'a=1']);
+    expect(TSMultiGetArgs.filter('a=1').latest().selectedLabels('x').appendArgs()).toEqual(
+      ['LATEST', 'SELECTED_LABELS', 'x', 'FILTER', 'a=1'],
+    );
+    expect(() => TSMultiGetArgs.filter('a=1').withLabels().selectedLabels('x').appendArgs()).toThrow(/mutually exclusive/);
+
+    const mrange = TSMultiRangeArgs.filter('area=32').from(5).withLabels().aggregation(1000, 'AVG')
+      .groupBy('area', 'SUM').appendArgs();
+    expect(mrange).toEqual(
+      ['5', '+', 'WITHLABELS', 'AGGREGATION', 'avg', 1000, 'FILTER', 'area=32',
+        'GROUPBY', 'area', 'REDUCE', 'sum'],
+    );
+    expect(() => TSMultiRangeArgs.filter('a=1').groupBy('l', 'SUM').excludeEmpty().appendArgs()).toThrow(/mutually exclusive/);
+    expect(() => TSMultiRangeArgs.filter('a=1').aggregation(1, 'AVG', 'SUM').groupBy('l', 'SUM').appendArgs())
+      .toThrow(/more than one aggregator/);
+
+    expect(TSGroupedRangeArgs.keys('k1', 'k2').range(0, 9).aggregation(500, 'COUNT_NAN').appendArgs()).toEqual(
+      [2, 'k1', 'k2', '0', '9', 'AGGREGATION', 'countNaN', 'countNaN', 500],
+    );
+    expect(() => TSGroupedRangeArgs.keys('k1').aggregations(1, [['AVG'], ['SUM']]).appendArgs()).toThrow(/one entry per key/);
+    expect(TSReadArgs.fromNext().block(5000, 1).maxCount(100).timestamp).toBe('$');
+    expect(TSRuleArgs.destination('dst', 'TWA', 60000).alignTimestamp(5).getAlignTimestamp()).toBe(5);
   });
 });
