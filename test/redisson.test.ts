@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
-import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs } from '../src';
+import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs, TimeSeriesAddArgs, TimeSeriesAggregationArgs, TimeSeriesReadArgs } from '../src';
 import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
@@ -2292,5 +2292,198 @@ describe('phase 69: upstream 4.7/4.8 API objects (mock)', () => {
     expect(a).toMatchObject({ dest: 'dest', selector: 'COUNT', count: 3, ordering: 'OBO' });
     const b = QueueMoveElementsArgs.to('d2').exactly(2).bulk() as any;
     expect(b).toMatchObject({ dest: 'd2', selector: 'EXACTLY', count: 2, ordering: 'BULK' });
+  });
+});
+
+describe('phase 70: TimeSeries 4.8 expansion (mock)', () => {
+  // The mock's Lua VM has no `struct` library, so every 4.8 method here takes
+  // its client-side JS fallback (the lua48 pre-gate skips the scripts); these
+  // cases pin the args shapes and the fallback semantics.
+  it('args builder shapes (Java 4.8 org.redisson.api.ts.*)', () => {
+    const a = TimeSeriesAddArgs.entry(1000, 42).label('l1').ttl(5000).retention(60000);
+    expect(a.timestamp).toBe(1000);
+    expect(a.object).toBe(42);
+    expect(a.getLabel()).toBe('l1');
+    expect(a.getTimeToLiveMs()).toBe(5000);
+    expect(a.getRetentionMs()).toBe(60000);
+    expect(TimeSeriesAddArgs.entry(1001, 'x', 'lbl').getLabel()).toBe('lbl');
+    expect(TimeSeriesAddArgs.entry(1002, 1).timeToLive(10).getTimeToLiveMs()).toBe(10);
+
+    const g = TimeSeriesAggregationArgs.between(0, 9000).bucket(3000)
+      .count().sum().avg().min().max().valueRange().first().last()
+      .stdDevPopulation().stdDevSample().variancePopulation().varianceSample();
+    expect(g.startTimestamp).toBe(0);
+    expect(g.endTimestamp).toBe(9000);
+    expect(g.getBucketMs()).toBe(3000);
+    expect(g.getAggregations()).toEqual([
+      'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'VALUE_RANGE', 'FIRST', 'LAST',
+      'STD_DEV_POPULATION', 'STD_DEV_SAMPLE', 'VARIANCE_POPULATION', 'VARIANCE_SAMPLE',
+    ]);
+    const g2 = TimeSeriesAggregationArgs.between(0, 10).bucket(5).alignTo(1).filterByValue(0, 5).label('a');
+    expect(g2.getAlignment()).toBe(1);
+    expect(g2.isValueFiltered()).toBe(true);
+    expect(g2.getMinValue()).toBe(0);
+    expect(g2.getMaxValue()).toBe(5);
+    expect(g2.isLabelFiltered()).toBe(true);
+    expect(g2.getLabel()).toBe('a');
+
+    const rt = TimeSeriesReadArgs.after(100).count(3).label('x');
+    expect(rt.timestamp).toBe(100);
+    expect(rt.getCount()).toBe(3);
+    expect(rt.getLabel()).toBe('x');
+  });
+
+  it('add/addIfAbsent/addOrReplace + getAll family + removeAll fallbacks', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts1');
+    expect(await ts.add(TimeSeriesAddArgs.entry(1000, 10))).toBe(true);
+    expect(await ts.add(TimeSeriesAddArgs.entry(1000, 11))).toBe(true); // plain add stacks
+    expect(await ts.getAll(1000)).toEqual([10, 11]);
+    const entries = await ts.getAllEntries(1000);
+    expect(entries.map((e) => e.value)).toEqual([10, 11]);
+    expect(entries.every((e) => e.timestamp === 1000)).toBe(true);
+
+    expect(await ts.addIfAbsent(TimeSeriesAddArgs.entry(2000, 20))).toBe(true);
+    expect(await ts.addIfAbsent(TimeSeriesAddArgs.entry(2000, 21))).toBe(false);
+    expect(await ts.getAll(2000)).toEqual([20]);
+
+    expect(await ts.addOrReplace(TimeSeriesAddArgs.entry(3000, 30))).toBe(true);
+    expect(await ts.addOrReplace(TimeSeriesAddArgs.entry(3000, 31))).toBe(false);
+    expect(await ts.getAll(3000)).toEqual([31]);
+
+    expect(await ts.removeAll(1000)).toBe(2);
+    expect(await ts.removeAll(1000)).toBe(0);
+    expect(await ts.getAndRemoveAll(2000)).toEqual([20]);
+    expect(await ts.getAll(2000)).toEqual([]);
+    const gone = await ts.getAndRemoveAllEntries(3000);
+    expect(gone.map((e) => e.value)).toEqual([31]);
+    expect(await ts.size()).toBe(0);
+    await r.shutdown();
+  });
+
+  it('addIfLess/addIfGreater/addAndSum numeric folds + addAndGet running total', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts2');
+    expect(await ts.addIfGreater(TimeSeriesAddArgs.entry(100, 5))).toBe(true); // created
+    expect(await ts.addIfGreater(TimeSeriesAddArgs.entry(100, 3))).toBe(false); // loses
+    expect(await ts.addIfLess(TimeSeriesAddArgs.entry(100, 6))).toBe(false); // 6 > 5 loses
+    expect(await ts.addIfLess(TimeSeriesAddArgs.entry(100, 4.5))).toBe(true);
+    expect(await ts.getValue(100)).toBe(4.5);
+
+    expect(await ts.addAndSum(TimeSeriesAddArgs.entry(200, 5))).toBe(true); // created
+    expect(await ts.addAndSum(TimeSeriesAddArgs.entry(200, 7))).toBe(false); // folded into 12
+    expect(await ts.getValue(200)).toBe(12);
+    expect(await ts.getAll(200)).toEqual([12]); // exactly one entry left
+
+    expect(await ts.addAndGet(TimeSeriesAddArgs.entry(300, 5))).toBe(5);
+    expect(await ts.addAndGet(TimeSeriesAddArgs.entry(400, 7))).toBe(12);
+    expect(await ts.getValue(400)).toBe(12);
+    await r.shutdown();
+  });
+
+  it('retention trimming on the fallback path', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts3');
+    await ts.add(TimeSeriesAddArgs.entry(1000, 1));
+    await ts.add(TimeSeriesAddArgs.entry(2000, 2));
+    expect(await ts.add(TimeSeriesAddArgs.entry(5000, 5).retention(2000))).toBe(true);
+    expect(await ts.getAll(1000)).toEqual([]); // below cutoff 5000-2000
+    expect(await ts.getAll(2000)).toEqual([]); // below cutoff (exclusive bound)
+    expect(await ts.getAll(5000)).toEqual([5]);
+    // an entry outside its own window is not written at all
+    expect(await ts.add(TimeSeriesAddArgs.entry(1500, 9).retention(2000))).toBe(false);
+    expect(await ts.getAll(1500)).toEqual([]);
+    expect(await ts.add(TimeSeriesAddArgs.entry(3100, 3).retention(2000))).toBe(true);
+    await r.shutdown();
+  });
+
+  it('readTail fallback: strict cursor, count is a floor', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts4');
+    await ts.add(TimeSeriesAddArgs.entry(1000, 10));
+    await ts.add(TimeSeriesAddArgs.entry(3000, 31));
+    await ts.add(TimeSeriesAddArgs.entry(3000, 32));
+    await ts.add(TimeSeriesAddArgs.entry(4000, 40));
+    await ts.add(TimeSeriesAddArgs.entry(5000, 50));
+    const batch = await ts.readTail(TimeSeriesReadArgs.after(2000).count(2));
+    expect(batch.map((e) => e.value)).toEqual([31, 32]); // whole of timestamp 3000
+    expect(batch.every((e) => e.timestamp === 3000)).toBe(true);
+    expect((await ts.readTail(TimeSeriesReadArgs.after(3000))).map((e) => e.value)).toEqual([40, 50]);
+    expect((await ts.readTail(TimeSeriesReadArgs.after(1000).count(1))).map((e) => e.value)).toEqual([31, 32]);
+    expect(await ts.readTail(TimeSeriesReadArgs.after(1000).count(-1))).toEqual([]);
+    await r.shutdown();
+  });
+
+  it('info fallback fields', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts5');
+    const empty = await ts.info();
+    expect(empty.size).toBe(0);
+    expect(empty.firstTimestamp).toBeNull();
+    expect(empty.lastTimestamp).toBeNull();
+    expect(empty.entriesIssued).toBe(0);
+    await ts.add(TimeSeriesAddArgs.entry(1000, 1, 'a'));
+    await ts.add(TimeSeriesAddArgs.entry(2000, 2, 'b'));
+    const info = await ts.info();
+    expect(info.size).toBe(2);
+    expect(info.totalEntries).toBe(2);
+    expect(info.firstTimestamp).toBe(1000);
+    expect(info.lastTimestamp).toBe(2000);
+    expect(info.entriesIssued).toBeGreaterThanOrEqual(2);
+    expect(info.timeToLive).toBeLessThanOrEqual(-1);
+    await r.shutdown();
+  });
+
+  it('ByLabel filtering + labels() decode both member shapes (legacy and 4.8)', async () => {
+    const r = make();
+    // legacy-shape series written via addAll; the 4.8 readers must decode it too
+    const legacy = r.getTimeSeries<string>('p70:ts6');
+    await legacy.addAll([
+      { timestamp: 100, value: 'a', label: 'legacy' },
+      { timestamp: 200, value: 'b' },
+    ]);
+    expect(await legacy.labels()).toEqual(['legacy']);
+    expect(await legacy.rangeByLabel(0, 1000, 'legacy')).toEqual(['a']);
+    expect(await legacy.rangeByLabel(0, 1000, null)).toEqual(['b']);
+    expect((await legacy.entryRangeByLabel(0, 1000, 'legacy')).map((e) => e.value)).toEqual(['a']);
+    expect((await legacy.entryRangeReversedByLabel(0, 1000, null)).map((e) => e.value)).toEqual(['b']);
+    expect((await legacy.rangeReversedByLabel(0, 1000, 'legacy', 5)).map((v) => v)).toEqual(['a']);
+    expect(await legacy.removeRangeByLabel(0, 1000, 'legacy')).toBe(1);
+    expect(await legacy.removeRangeByLabel(0, 1000, 'legacy')).toBe(0);
+
+    // 4.8-shape series via the args API (fresh key: its seq key is a HASH)
+    const ts = r.getTimeSeries<number>('p70:ts7');
+    await ts.add(TimeSeriesAddArgs.entry(1000, 1, 'alpha'));
+    await ts.add(TimeSeriesAddArgs.entry(2000, 2, 'beta'));
+    await ts.add(TimeSeriesAddArgs.entry(3000, 3, 'alpha'));
+    await ts.add(TimeSeriesAddArgs.entry(4000, 4)); // no label
+    expect((await ts.labels()).sort()).toEqual(['alpha', 'beta']);
+    expect(await ts.rangeByLabel(0, 5000, 'alpha')).toEqual([1, 3]);
+    expect(await ts.rangeReversedByLabel(0, 5000, 'alpha')).toEqual([3, 1]);
+    expect((await ts.entryRangeByLabel(0, 5000, 'beta')).map((e) => e.label)).toEqual(['beta']);
+    expect(await ts.rangeByLabel(0, 5000, null)).toEqual([4]);
+    expect(await ts.removeRangeByLabel(0, 5000, 'alpha')).toBe(2);
+    expect(await ts.size()).toBe(2);
+    await r.shutdown();
+  });
+
+  it('aggregate fallback buckets + validation', async () => {
+    const r = make();
+    const ts = r.getTimeSeries<number>('p70:ts8');
+    await ts.add(TimeSeriesAddArgs.entry(1000, 3));
+    await ts.add(TimeSeriesAddArgs.entry(2000, 5));
+    await ts.add(TimeSeriesAddArgs.entry(3000, 4));
+    const buckets = await ts.aggregate(
+      TimeSeriesAggregationArgs.between(0, 4000).bucket(2000).count().sum().avg().min().max().first().last(),
+    );
+    expect(buckets.length).toBe(2);
+    expect(buckets[0].timestamp).toBe(0);
+    expect(buckets[0].values).toEqual({ COUNT: 1, SUM: 3, AVG: 3, MIN: 3, MAX: 3, FIRST: 3, LAST: 3 });
+    expect(buckets[1].timestamp).toBe(2000);
+    expect(buckets[1].values).toMatchObject({ COUNT: 2, SUM: 9, AVG: 4.5, MIN: 4, MAX: 5, FIRST: 5, LAST: 4 });
+
+    await expect(ts.aggregate(TimeSeriesAggregationArgs.between(0, 10).count())).rejects.toThrow(/bucket interval/);
+    await expect(ts.aggregate(TimeSeriesAggregationArgs.between(0, 10).bucket(10))).rejects.toThrow(/at least one aggregation/);
+    await r.shutdown();
   });
 });

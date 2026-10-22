@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.47.0，2026-10-23：4.8 面第一批判——RCountMin/countDiff/LMOVEM move/RRingBuffer.addAll）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码；阶段 42 起的路线图见根目录演进方案.md §4。
+> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.48.0，2026-10-23：TimeSeries 4.8 全量扩展）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码；阶段 42 起的路线图见根目录演进方案.md §4。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 

@@ -1,3 +1,38 @@
+## 2.48.0 — 2026-10-23
+
+Phase 70: RTimeSeries 4.8 expansion (full port of RedissonTimeSeries 4.8,
+Lua verbatim). Full suite **334 tests / 73 files green with live Redis**.
+Also fixes the CI java-interop job (see 05455e7 below).
+
+- **Add family** (write the 4.8-native member shape: flag byte 4 +
+  server-side zero-padded monotonic id via the seq HASH; legacy
+  add/addAll keep the 4.6.1 flag-2/3 shape — do not mix families on one
+  series): `add(TimeSeriesAddArgs)` with retention trimming,
+  `addIfAbsent` (expired slots cleared and reused), `addOrReplace`,
+  `addIfLess`/`addIfGreater` (fold policies), `addAndSum`, `addAndGet`
+  (running total in the seq HASH with out-of-order increments landing at
+  the higher timestamp).
+- **Reads/aggregation/info**: `aggregate(TimeSeriesAggregationArgs)` →
+  `TimeSeriesBucket[]` (one-Lua pass, Welford variance, 12 aggregations,
+  label/value filters, alignment), `readTail(TimeSeriesReadArgs)` (count
+  is a floor, never ends inside a timestamp), `info()` → `TimeSeriesInfo`,
+  `getAll`/`getAllEntries`/`removeAll`/`getAndRemoveAll(+Entries)`,
+  `rangeByLabel`/`rangeReversedByLabel`/`entryRangeByLabel`/
+  `entryRangeReversedByLabel`/`removeRangeByLabel`, `labels()`.
+- Args follow the repo factory style (`TimeSeriesAddArgs.entry(ts, v)` →
+  `.label/.ttl/.retention`, `TimeSeriesAggregationArgs.between`,
+  `TimeSeriesReadArgs.after`); readers parse both member shapes (flag 2/3
+  legacy and flag 4).
+- Mock safety: a `lua48()` gate routes mock clients (no Lua `struct`)
+  to faithful client-side JS equivalents.
+- **CI fix** (`05455e7`): the java probe classpath hardcoded the Windows
+  `;` separator — on the Linux runner every probe test failed with
+  ClassNotFoundException since the job was introduced; now joined with
+  `path.delimiter`. live-phase69's CMS surface real-verified locally
+  (SDIFFCARD/SUNIONCARD/LMOVEM still 8.10-gated — CI's redis:8 covers).
+- Tests: +8 mock, +9 live (`live-phase70.test.ts` — flag-4 raw-member byte
+  check, expired-slot reuse, aggregate filters on the real Lua path).
+
 ## 2.47.0 — 2026-10-23
 
 Phase 69: upstream 4.8 OSS surface (part 1). Full suite:

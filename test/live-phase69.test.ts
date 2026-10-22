@@ -48,8 +48,15 @@ describe('live phase 69: upstream 4.8 OSS surface', () => {
     }
     const cm = r.getCountMin<string>(`${NS}cm`);
     const cm2 = r.getCountMin<string>(`${NS}cm2`);
-    await cm.init(CountMinInitArgs.byProbability(0.01, 0.99));
+    const cmp = r.getCountMin<string>(`${NS}cmp`);
+    await cm.delete();
+    await cm2.delete();
+    await cmp.delete();
+    // CMS.MERGE requires equal width/depth, so the merge pair shares dims;
+    // the probability initializer is covered on its own sketch.
+    await cm.init(CountMinInitArgs.byDimensions(1000, 5));
     await cm2.init(CountMinInitArgs.byDimensions(1000, 5));
+    await cmp.init(CountMinInitArgs.byProbability(0.01, 0.99));
     expect(await cm.add('a')).toBe(1);
     expect(await cm.add('a', 4)).toBe(5);
     const batch = await cm.add(new Map([['a', 1], ['b', 2]]));
@@ -59,12 +66,15 @@ describe('live phase 69: upstream 4.8 OSS surface', () => {
     const counts = await cm.count(['a', 'b']);
     expect(counts.get('b')).toBe(2);
     await cm2.add('a', 3);
+    // CMS.MERGE overwrites the destination with the merged SOURCES (the
+    // destination's own counts are not included unless listed as a source) —
+    // same overwrite semantics as TDIGEST.MERGE.
     await cm.mergeWith({ keys: [`${NS}cm2`] });
-    expect((await cm.count('a')) as number).toBeGreaterThanOrEqual(6);
+    expect(await cm.count('a')).toBe(3);
     const info = await cm.getInfo();
     expect(Number(info.width)).toBeGreaterThan(0);
     expect(Number(info.depth)).toBeGreaterThan(0);
-    await r.getKeys().unlink(`${NS}cm`, `${NS}cm2`);
+    await r.getKeys().unlink(`${NS}cm`, `${NS}cm2`, `${NS}cmp`);
     raw.disconnect();
     await r.shutdown();
   });
