@@ -1332,7 +1332,23 @@ local value = redis.call('get', KEYS[1])
 if value == false then
     value = rate
 else
-    value = tonumber(value) + returned
+    value = tonumber(value)
+    if returned > 0 then
+        -- Redisson 4.8 recalc branch: when returning expired permits would push
+        -- the counter above rate (rate was lowered, or value drifted), recompute
+        -- from the permits actually still held in the window instead of adding.
+        if value + returned > rate then
+            local values = redis.call('zrange', KEYS[2], 0, -1)
+            local used = 0
+            for i = 1, #values do
+                local rnd, p = struct.unpack('Bc0I', values[i])
+                used = used + p
+            end
+            value = rate - used
+        else
+            value = value + returned
+        end
+    end
 end
 if value >= permits then
     local member = struct.pack('Bc0I', string.len(ARGV[4]), ARGV[4], permits)
@@ -1425,6 +1441,7 @@ export class RRateLimiter extends RedisDataStructure {
     return true;
   }
   async tryAcquire(permits = 1): Promise<boolean> {
+    if (permits < 0) throw new Error("redi.ts: Permits amount can't be negative");
     await this.ensureConfig();
     if (this.rate <= 0) return true;
     const now = await serverNowMs(this.redis);
@@ -1486,7 +1503,26 @@ export class RRateLimiter extends RedisDataStructure {
   async release(permits = 1): Promise<void> {
     await this.ensureConfig();
     if (this.rate <= 0 || permits <= 0) return;
+    // Java 4.8 release: un-acquire oldest permit members first (partial
+    // remainder re-added at the original score), then raise the counter
+    // (capped at rate), then refresh keepAlive TTLs.
     const s = `local rate = tonumber(ARGV[1])
+local toRelease = tonumber(ARGV[2])
+local values = redis.call('zrange', KEYS[2], 0, -1, 'withscores')
+for i = 1, #values - 1, 2 do
+    if toRelease <= 0 then break end
+    local v = values[i]
+    local score = values[i + 1]
+    local random, p = struct.unpack('Bc0I', v)
+    redis.call('zrem', KEYS[2], v)
+    if p <= toRelease then
+        toRelease = toRelease - p
+    else
+        local remained = p - toRelease
+        redis.call('zadd', KEYS[2], score, struct.pack('Bc0I', string.len(random), random, remained))
+        toRelease = 0
+    end
+end
 local current = redis.call('get', KEYS[1])
 if current == false then
     current = rate
@@ -1497,9 +1533,21 @@ local newValue = current + tonumber(ARGV[2])
 if newValue > rate then
     newValue = rate
 end
-redis.call('set', KEYS[1], newValue)`;
+redis.call('set', KEYS[1], newValue)
+local keepAliveTime = redis.call('hget', KEYS[3], 'keepAliveTime')
+if keepAliveTime ~= false and tonumber(keepAliveTime) > 0 then
+    redis.call('pexpire', KEYS[3], keepAliveTime)
+    redis.call('pexpire', KEYS[1], keepAliveTime)
+    redis.call('pexpire', KEYS[2], keepAliveTime)
+else
+    local ttl = redis.call('pttl', KEYS[3])
+    if ttl > 0 then
+        redis.call('pexpire', KEYS[1], ttl)
+        redis.call('pexpire', KEYS[2], ttl)
+    end
+end`;
     try {
-      await luaEval(this.redis, s, 1, this.valueKey(), String(this.rate), String(permits));
+      await luaEval(this.redis, s, 3, this.valueKey(), this.permitsKey(), this.name, String(this.rate), String(permits));
     } catch {
       const cur = toNumber(await this.redis.get(this.valueKey()), this.rate);
       await this.redis.set(this.valueKey(), String(Math.min(this.rate, cur + permits)));

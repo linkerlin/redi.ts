@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.45.2，2026-10-22）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码；阶段 42 起的路线图见根目录演进方案.md §4。
+> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.46.0，2026-10-23：上游 4.7/4.8 互操作对齐）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码；阶段 42 起的路线图见根目录演进方案.md §4。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -59,7 +59,7 @@
 
 **`RBuckets`**：`setIfAllKeysExist/setIfAllKeysAbsent` ✅ (2.2.0，`MSETEX … NX|XX [PX ms]`，Redis 8+；无该命令时显式报错而非降级)。
 
-**`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；`hybridSearch`（KNN/RANGE + RRF/LINEAR）、`profileSearch/profileAggregate`、聚合游标 `readCursor/delCursor`、`alter` ✅ (2.22.0)；`IndexOptions/FieldIndex` 结构化建索引与 `alter` ✅ (2.27.0：TEXT/TAG/NUMERIC/GEO/GEOSHAPE/VECTOR FLAT|HNSW；TS 用普通对象而非 Java builder 类；INDEXEMPTY/INDEXMISSING 需在 SORTABLE 前)；SVS-VAMANA（COMPRESSION/CONSTRUCTION_WINDOW_SIZE/GRAPH_MAX_DEGREE/SEARCH_WINDOW_SIZE/EPSILON/TRAINING_THRESHOLD/LEANVEC_DIM）✅ (2.35.0；TRAINING_THRESHOLD 需 ≥1024)；RSearch 4.6.1 面已收口。注：本机 Redis 8.6 不支持 `YIELD_DISTANCE_AS`，且 FT.HYBRID RANGE 过滤偏宽；参数透传与 Java 4.6.1 一致。
+**`RSearch`**：索引 `getIndexes/hasIndex/info/dropIndexAndDocuments`、别名三件套（4.7 增 `getAliases`/FT.ALIASLIST ✅ 2.46.0）、增强 `search`（sort/return/inKeys/filter/params/dialect/timeout）、`aggregate`（load/groupBy/reduce/apply/sort/limit/rawArgs）、`updateSynonyms/dumpSynonyms`、`addDict/delDict/dumpDict`、`getConfig/setConfig`、`spellcheck` ✅ (2.15.0，Redis 8 内置 RediSearch；缺失时能力门控)；`hybridSearch`（KNN/RANGE + RRF/LINEAR）、`profileSearch/profileAggregate`、聚合游标 `readCursor/delCursor`、`alter` ✅ (2.22.0)；`IndexOptions/FieldIndex` 结构化建索引与 `alter` ✅ (2.27.0：TEXT/TAG/NUMERIC/GEO/GEOSHAPE/VECTOR FLAT|HNSW；TS 用普通对象而非 Java builder 类；INDEXEMPTY/INDEXMISSING 需在 SORTABLE 前)；SVS-VAMANA（COMPRESSION/CONSTRUCTION_WINDOW_SIZE/GRAPH_MAX_DEGREE/SEARCH_WINDOW_SIZE/EPSILON/TRAINING_THRESHOLD/LEANVEC_DIM）✅ (2.35.0；TRAINING_THRESHOLD 需 ≥1024)；RSearch 4.6.1 面已收口。注：本机 Redis 8.6 不支持 `YIELD_DISTANCE_AS`，且 FT.HYBRID RANGE 过滤偏宽；参数透传与 Java 4.6.1 一致。
 
 **`RJsonBucket`**：文档/路径 `get/set/delete`、`setIfAbsent/trySet/setIfExists`、原子 `compareAndSet`（root/路径，`$` 期望值按 RedisJSON match array 包装）、`getAndSet/getAndDelete`、`stringSize/stringAppend`、`arrayAppend/Index/Insert/Size/Pop/PollFirst/PollLast/Trim`、`incrementAndGet`、`merge/clear/countKeys/getKeys/toggle/getType` ✅ (2.13.0；默认纯 JSON，可选 Codec；Redis 8.6 内置 JSON 模块，缺失时能力门控)；`RJsonBuckets.set/get/getWithPath`（MSET/MGET）✅ (2.18.0)；`*Multi` 多匹配族与多路径 `get(codec, paths...)` ✅ (2.21.0；并修正两参 `arrayIndex` 的全数组搜索)；仍缺 `FPHAType`（本机 RedisJSON 不支持 `JSON.SET … FPHA`，版本相关）。
 
@@ -77,7 +77,7 @@
 
 **`RDelayedQueue`**：`size()` 已对齐 Java（staging LLEN）✅、`delete()` 不再误删目标队列 ✅ (1.1.0)；**后台迁移调度器 ✅ (2.0.0)**：`start()/stop()/destroy()`（Java `QueueTransferTask`/`QueueTransferService` 移植——channel 订阅走 `duplicate()` 连接、deadline 定时器 >10ms 定时否则立即、5s 错误重试、迁移 Lua 返回下一表头 deadline 重臂；`destroy()` = 摘除任务不删数据），单机 + 集群实测；`readAll/poll(count)` ✅ (2.12.0)、负延迟校验、`add`/单参 `offer`/`indexOf` 拒绝、无参 `remove()`、`pollLastAndOfferFirstTo` ✅ (2.32.0)；4.6.1 面已收口（`move` 仅存在于新版源码，记为版本外）。
 
-**`RRingBuffer`**：缺 `readNewest/readOldest/peekLast/addAll`；`delete()` override 已补 ✅ (1.1.0，容量 key 与 LIST 一并清理；`clear()` 保持 Java 只删 LIST)。
+**`RRingBuffer`**：`readNewest/readOldest/peekLast` ✅ (2.46.0，4.7 API)；`addAll` 仍缺（4.8 API）；`delete()` override 已补 ✅ (1.1.0，容量 key 与 LIST 一并清理；`clear()` 保持 Java 只删 LIST)。
 
 **`RBatch`**：类型覆盖已补 13 类 ✅ (2.1.0：原 7 类 + `BatchDeque/AtomicDouble/BitSet/Geo/Stream/MapCacheNative`，写排队、读在 `execute()` 后 resolve，对齐 RFuture；`BatchAtomicDouble.getAndAdd` 单 Lua 精确旧值、native map-cache `HPEXPIRE FIELDS` 字段 TTL；Lua 版 ops 走 live 测，mock pipeline 无 `eval`)；仍存读回占位非即时值；pub/sub 不可进 batch（`duplicate()` 真实连接）。
 
@@ -87,7 +87,7 @@
 
 ## §4 明确不做（保持）
 
-`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO-only 全套（工厂抛错，2.45.1 补齐六件）。另建议记名（4.6.1 OSS jar 确无 API）：`RCountMin`、`RTimeSeriesNative`；`RReliablePubSubTopic`/`RLocalCachedMapCache` 的 API 接口在 4.6.1 jar 中**存在**、仅实现为 PRO（原记“版本外”有误），与 `ReliableQueue`/`BitVectorStore`/`LeasedMap`/`ReliableFanout` 一并按 PRO-only 抛错。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）。
+`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO-only 全套（工厂抛错，2.45.1 补齐六件）。另建议记名（4.6.1 OSS jar 确无 API）：`RCountMin`、`RTimeSeriesNative`；`RReliablePubSubTopic`/`RLocalCachedMapCache` 的 API 接口在 4.6.1 jar 中**存在**、仅实现为 PRO（原记“版本外”有误），与 `ReliableQueue`/`BitVectorStore`/`LeasedMap`/`ReliableFanout` 一并按 PRO-only 抛错。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）；4.8 上游新增该 API，已于 2.46.0 实现。
 
 ## §5 路线图
 

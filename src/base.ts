@@ -96,8 +96,16 @@ export class RedisDataStructure {
     (this as any).name = newName;
   }
   async renamenx(newName: string): Promise<boolean> {
-    const ok = await this.redis.renamenx(this.name, newName);
-    if (ok) (this as any).name = newName;
+    // Java 4.8: EXISTS-guarded — a missing source returns false, not an error.
+    const s = "if redis.call('exists', KEYS[1]) == 1 then return redis.call('renamenx', KEYS[1], KEYS[2]) else return 0 end";
+    let ok: number;
+    try {
+      ok = Number(await luaEval(this.redis, s, 2, this.name, newName));
+    } catch {
+      if (!((await this.redis.exists(this.name)) as number)) return false;
+      ok = Number(await this.redis.renamenx(this.name, newName));
+    }
+    if (ok === 1) (this as any).name = newName;
     return ok === 1;
   }
   async isExists(): Promise<boolean> {

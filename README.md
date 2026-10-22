@@ -67,18 +67,18 @@ const redisson = Redisson.create({ client: redis });
 - 排序：`RScoredSortedSet`（分数区间正反向、`addScore` 家族、`addIf*` 与 `addAll*` 条件批量、`random`/`randomEntries`、阻塞 `pollFirst/Last` 与 `FromAny`（BZPOP/BZMPOP）、`iterator`/`stream`/`entriesIterator`、zadd/zrem/zincr/store 监听、按分数/排名删除，区间读取走 Redis 6.2+ `ZRANGE … BYSCORE`）；`RLexSortedSet`（成员不编码，原样放）
 - 单个值：`RBucket`（`set`/`expired`/`del` 监听）、`RBuckets`（NX/XX 条件批量写，Redis 8 `MSETEX`）、`RBinaryStream`、`RJsonBucket`（文档/路径读写、NX/XX/CAS、字符串/数组/数字操作、`*Multi` 多匹配族与多路径 `get`、merge/keys/type/toggle）、`RJsonBuckets`（MSET/MGET 批量）
 - 数字：`RAtomicLong`、`Double`（`getAndIncrement`/`Decrement`、`setIfLess`/`Greater`、`getAndDelete`/`compareAndDelete`（含 `< <= > >= == ~=` 条件）、`IncrementArgs` 边界/饱和/TTL 策略、incrby/incrbyfloat 键空间监听）；`RLongAdder`、`RDoubleAdder`；`RIdGenerator`
-- 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延）
+- 许可和限流：`RSemaphore`、`RPermitExpirableSemaphore`、`RCountDownLatch`、`RRateLimiter`（`keepAlive` 在每次成功获准的 Lua 内顺延；`release` 按最老优先归还许可成员）
 - 发布订阅：`RTopic`、`RPatternTopic`、`RShardedTopic`、`RReliableTopic`（走 Stream，字段名 `m`；每实例单组、publish 返回订阅者数、自动 XTRIM）；管理面 `getChannelNames`/`countListeners`/`countSubscribers`/`getActiveTopics`（Pattern）、`StatusListener`（订阅/退订回调）、`removeListener(handler)` 按回调删除
 - 流：`RStream`（字段名是 JSON；组/claim/pending/nack、`fastClaim`/`fastAutoClaim`（JUSTID）、`readMany`/`readGroupMany`（支持每流独立 group）、`addListener`（keyspace xadd/xdel/xgroup-*））
 - 延迟队列：`RDelayedQueue`（一个 ZSET 加一个 LIST，前缀 `Bc0Lc0`；`readAll`/`poll(count)`、负延迟校验、`pollLastAndOfferFirstTo`、无参 `remove()`）
-- 环形缓冲：`RRingBuffer`
+- 环形缓冲：`RRingBuffer`（`readNewest/readOldest/peekLast`）
 - 地理位置：`RGeo`（成员是 JSON；`GeoSearchArgs` 半径/矩形搜索、距离与坐标结果、`GEOSEARCHSTORE` 落库、`addIfExists`）
 - 去重计数：`RHyperLogLog`
 - 位图：`RBitSet`（位序跟 Redis 原生一致；`BITFIELD` 类型化读写、批量 `get/set`/`asBitSet`、Redis 8 `BITOP` 的 DIFF/DIFF1/ANDOR/ONE）
 - 时间序列：`RTimeSeries`（`BBc0Lc0Lc0`；`addAll`、`getEntry/getValue`、`first/last` 与 `pollFirst/Last` 全族、正/反向 `range`/`entryRange`（可 limit）、`getAndRemove`、`remove/removeRange`、`stream/iterator` 分页取值、`addListener`（keyspace zadd/zrem），TTL 惰性过滤）
 - 布隆过滤器：`RBloomFilter`（HighwayHash-128，测试向量对过）
 - 概率结构：`RCuckooFilter`（init/add 参数对象、addIfAbsent/existsMany/count/info）、`RTopK`（init 参数对象、丢弃项/incrementBy Map/批量 contains/count/listWithCount）、`RTDigest`（min/max/cdf/rank/byRank/merge 参数对象/info/reset，Redis 8 模块）
-- 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、migrate/MigrateArgs、远程 copy、swapdb、并行 flush、`addListener/removeListener` 全局 new/set/expired/del 事件、unlinkByPattern、`getKeysStream` 惰性扫描、`getKeysWithLimit`、`getKeysByPattern`）、`RScript`（含 `scriptKill`/`scriptFlush`）、`RFunction`（list/stats/dump/restore/kill）、`RSearch`（结构化/原始 schema 建索引（含 VECTOR FLAT/HNSW/SVS-VAMANA）、索引 info/别名/排序/params/聚合/同义词/词典/config/spellcheck、`hybridSearch` KNN/RANGE + RRF/LINEAR、`profileSearch/profileAggregate`、全文聚合游标、`alter`）、`RVectorSet`（VADD 高级参数、VEMB/VEMB RAW/VINFO/VLINKS WITHSCORES/VRANDMEMBER/VRANGE、VSIM 名称/分数/属性、属性读写、`iterator`/`stream`）
+- 键、脚本、函数、搜索：`RKeys`（expire/expireAt 单/多键、clearExpire、remainTimeToLive、getSlot、move、migrate/MigrateArgs、远程 copy、swapdb、并行 flush、`addListener/removeListener` 全局 new/set/expired/del 事件、unlinkByPattern、`getKeysStream` 惰性扫描、`getKeysWithLimit`、`getKeysByPattern`、`time()`（4.8））、`RScript`（含 `scriptKill`/`scriptFlush`）、`RFunction`（list/stats/dump/restore/kill）、`RSearch`（结构化/原始 schema 建索引（含 VECTOR FLAT/HNSW/SVS-VAMANA）、索引 info/别名/排序/params/聚合/同义词/词典/config/spellcheck、`hybridSearch` KNN/RANGE + RRF/LINEAR、`profileSearch/profileAggregate`、全文聚合游标、`alter`）、`RVectorSet`（VADD 高级参数、VEMB/VEMB RAW/VINFO/VLINKS WITHSCORES/VRANDMEMBER/VRANGE、VSIM 名称/分数/属性、属性读写、`iterator`/`stream`）
 - 优先级队列（`GO_ONLY`，ZSET 加分数）、`RTransferQueue`（`GO_ONLY`）、`RBatch`（13 类类型化门面），……
 
 细账在 [COMPATIBILITY.md](COMPATIBILITY.md)。

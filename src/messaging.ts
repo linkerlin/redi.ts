@@ -1253,6 +1253,23 @@ end`;
     const m = await this.redis.lrange(this.name, 0, -1);
     return m.map((x) => this.decodeValue(x) as V);
   }
+  /** Java 4.7 `readNewest(count)`: the `count` most recently added elements. */
+  async readNewest(count: number): Promise<V[]> {
+    if (count <= 0) return [];
+    const m = await this.redis.lrange(this.name, -count, -1);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java 4.7 `readOldest(count)`: the `count` oldest elements. */
+  async readOldest(count: number): Promise<V[]> {
+    if (count <= 0) return [];
+    const m = await this.redis.lrange(this.name, 0, count - 1);
+    return m.map((x) => this.decodeValue(x) as V);
+  }
+  /** Java 4.7 `peekLast()`: newest element without removing it. */
+  async peekLast(): Promise<V | null> {
+    const m = await this.redis.lrange(this.name, -1, -1);
+    return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
+  }
   async size(): Promise<number> {
     return this.redis.llen(this.name);
   }

@@ -2233,3 +2233,38 @@ describe('PRO-only factory refusal (mock)', () => {
     }
   });
 });
+
+describe('phase 68: upstream 4.7/4.8 interop fixes (mock)', () => {
+  it('rate limiter rejects negative permits (Java #7383)', async () => {
+    const r = make();
+    const rl = r.getRateLimiter('p68:rl');
+    await rl.trySetRate('OVERALL', 5, 10000);
+    await expect(rl.tryAcquire(-1)).rejects.toThrow(/negative/);
+    await expect(rl.acquire(-1)).rejects.toThrow(/negative/);
+    expect(await rl.availablePermits()).toBe(5);
+    await r.shutdown();
+  });
+  it('renamenx returns false for a missing source (Java 4.8)', async () => {
+    const r = make();
+    expect(await r.getBucket('p68:missing').renamenx('p68:renamed')).toBe(false);
+    const b = r.getBucket<string>('p68:src');
+    await b.set('x');
+    expect(await b.renamenx('p68:dst')).toBe(true);
+    expect(await r.getBucket<string>('p68:dst').get()).toBe('x');
+    expect(await r.getKeys().renamenx('p68:nope', 'p68:other')).toBe(false);
+    await r.shutdown();
+  });
+  it('ring buffer readNewest/readOldest/peekLast (Java 4.7)', async () => {
+    const r = make();
+    const rb = r.getRingBuffer<number>('p68:rb');
+    await rb.delete();
+    await rb.trySetCapacity(3);
+    for (const v of [1, 2, 3, 4]) await rb.add(v); // 4 evicts 1
+    expect(await rb.readOldest(2)).toEqual([2, 3]);
+    expect(await rb.readNewest(2)).toEqual([3, 4]);
+    expect(await rb.peekLast()).toBe(4);
+    expect(await rb.readNewest(0)).toEqual([]);
+    expect(await rb.readOldest(-1)).toEqual([]);
+    await r.shutdown();
+  });
+});

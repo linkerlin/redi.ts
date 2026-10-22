@@ -103,7 +103,19 @@ export class RKeys {
     await this.redis.rename(oldKey, newKey);
   }
   async renamenx(oldKey: string, newKey: string): Promise<boolean> {
-    return ((await this.redis.renamenx(oldKey, newKey)) as number) === 1;
+    // Java 4.8: EXISTS-guarded — a missing source returns false, not an error.
+    const s = "if redis.call('exists', KEYS[1]) == 1 then return redis.call('renamenx', KEYS[1], KEYS[2]) else return 0 end";
+    try {
+      return Number(await luaEval(this.redis, s, 2, oldKey, newKey)) === 1;
+    } catch {
+      if (!((await this.redis.exists(oldKey)) as number)) return false;
+      return ((await this.redis.renamenx(oldKey, newKey)) as number) === 1;
+    }
+  }
+  /** Java 4.8 `RKeys.time()`: server TIME as { seconds, microseconds }. */
+  async time(): Promise<{ seconds: number; microseconds: number }> {
+    const r = await this.redis.time();
+    return { seconds: Number(r[0]), microseconds: Number(r[1]) };
   }
   /** Java `expire(String, long, TimeUnit)`: single key. */
   async expire(key: string, ttlMs: number): Promise<boolean>;
@@ -714,6 +726,11 @@ export class RSearch {
   /** Java `hasIndex(String)`. */
   async hasIndex(name: string): Promise<boolean> {
     return (await this.getIndexes()).includes(name);
+  }
+  /** Java 4.7 `getAliases(String)`: aliases pointing at an index (FT.ALIASLIST). */
+  async getAliases(indexName: string): Promise<string[]> {
+    const r = await this.call('FT.ALIASLIST', indexName);
+    return Array.isArray(r) ? r.map(String) : [];
   }
   /** Java `info(String)`: FT.INFO flat field/value record. */
   async info(name: string): Promise<Record<string, any>> {

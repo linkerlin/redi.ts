@@ -1,3 +1,37 @@
+## 2.46.0 — 2026-10-23
+
+Phase 68: upstream Redisson 4.7/4.8 interop alignment (local checkout
+4.8.1-SNAPSHOT as source; 4.6.1 wire compat unchanged). Full suite:
+**313 tests / 71 files** (live Redis incl. TS↔Java shared rate window).
+
+- **`RRateLimiter` release/acquire Lua realigned with Java** (largest
+  divergence found): `release()` now un-acquires permit members oldest-first
+  (partial remainder re-added at the original score) instead of only bumping
+  the counter, and the acquire script gains the 4.8 recalc branch — when
+  returning expired permits would push the counter above rate, value is
+  recomputed from the permits actually held in the window. Negative permits
+  rejected (upstream #7383). Live drift scenario asserts available = 2 where
+  the old shape yielded 7.
+- `renamenx` (RObject + RKeys): EXISTS-guarded — a missing source returns
+  false instead of an error (Java 4.8).
+- `RFairLock` tryLock/lockWait: ambiguous response timeouts now run the
+  waiter cleanup (`redisson_lock_queue`/`redisson_lock_timeout`) and return
+  false instead of leaving zombie waiters (upstream #5019).
+- New APIs from 4.7/4.8: `RKeys.time()` (server TIME as
+  {seconds, microseconds}), `RRingBuffer.readNewest/readOldest/peekLast`,
+  `RSearch.getAliases(index)` (FT.ALIASLIST passthrough — throws where the
+  server lacks the command; gated in tests).
+- Audited and NOT affected (verified against our shapes): RSetCache no-TTL
+  visibility (we score MaxInt64), RMapCache putIfAbsent maxIdle=0 (guarded
+  zrem), RSearch.hasIndex (FT._LIST based), RMap.entrySet().contains (tuple
+  arrays), RBinaryStream read position (no client cursor), RTimeSeries
+  same-timestamp reads (already filter-then-limit).
+- Kept 4.6.1-parity limitation: RTimeSeries writes stay on the flag-2/3
+  member shape — 4.8's flag-4 server-side monotonic ids would break 4.6.1
+  readers (AGENTS.md law 12); >1e17 timestamps share Redis double-score
+  precision limits with 4.6.1.
+- Tests: +3 mock, +2 live (`test/live-phase68.test.ts`).
+
 ## 2.45.2 — 2026-10-22
 
 Review follow-ups (2): duplication collapse, no behavior change. Full suite

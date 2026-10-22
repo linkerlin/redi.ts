@@ -103,7 +103,8 @@ multi-path `get(codec, paths...)`, merge/keys/type/toggle)/
 `IncrementArgs` bounds/saturate/TTL, incrby/incrbyfloat keyspace listeners),
 `RLongAdder`/`RDoubleAdder`, `RIdGenerator`,
 `RSemaphore`/`RPermitExpirableSemaphore`/`RCountDownLatch`/`RRateLimiter`
-(keepAlive renewed inside the acquire Lua),
+(keepAlive renewed inside the acquire Lua; release un-acquires permit
+members oldest-first),
 `RTopic`/`RPatternTopic`/`RShardedTopic`/`RReliableTopic` (Stream, field `m`;
 one group per instance, publish returns subscriber count, automatic XTRIM;
 management: `getChannelNames`/`countListeners`/`countSubscribers`,
@@ -112,7 +113,7 @@ pattern `getActiveTopics`, `StatusListener` callbacks,
 `RStream` (JSON field names; groups/claim/pending/nack, `fastClaim`/
 `fastAutoClaim` JUSTID, `readMany`/`readGroupMany` multi-stream reads
 (per-stream groups supported), `addListener` keyspace xadd/xdel/xgroup events), `RDelayedQueue` (dual ZSET+LIST, `Bc0Lc0`, negative-delay validation, `pollLastAndOfferFirstTo`, no-arg `remove`),
-`RRingBuffer`, `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
+`RRingBuffer` (readNewest/readOldest/peekLast), `RGeo` (JSON members; `GeoSearchArgs` radius/box search,
 distance/position results, `GEOSEARCHSTORE`), `RHyperLogLog`, `RBitSet`
 (native bit order; `BITFIELD`, batch `get`/`set`/`asBitSet`, Redis 8 `BITOP`
 DIFF/DIFF1/ANDOR/ONE),
@@ -128,7 +129,7 @@ info/reset),
 move, unlinkByPattern, migrate/MigrateArgs, remote copy, swapdb, parallel
 flushes, global keyspace listeners (`onNew`/`onSet`/`onExpired`/`onDeleted`),
 `getKeysWithLimit`/`getKeysByPattern`,
-lazy `getKeysStream`), `RScript` (+scriptKill/
+lazy `getKeysStream`, `time()` (Java 4.8)), `RScript` (+scriptKill/
 scriptFlush), `RFunction` (list/stats/dump/restore/kill), `RSearch` (structured
 or raw schemas incl. VECTOR FLAT/HNSW/SVS-VAMANA, index info/aliases/sort/
 params/aggregate/synonyms/dicts/config/
@@ -157,7 +158,7 @@ wrappers, so bare JSON from redi.py and raw strings also read fine.
 ## Tests
 
 ```sh
-npm test             # 308 tests: wire vectors, mock functional, live python
+npm test             # 313 tests: wire vectors, mock functional, live python
                      # interop, live bidirectional suites vs Redisson 4.6.1
 npm run build        # dual output: dist/cjs + dist/esm
 npm run pack-smoke   # npm pack → temp consumer: CJS and ESM both resolve

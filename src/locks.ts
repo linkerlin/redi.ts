@@ -861,7 +861,16 @@ export class RFairLock extends LockObservable {
     const useWatchdog = !leaseTimeMs || leaseTimeMs <= 0;
     const lease = useWatchdog ? this.watchdogMs : leaseTimeMs!;
     const now = await serverNowMs(this.redis);
-    const first = await this.runTryOnly(lease, threadId, now);
+    let first: any;
+    try {
+      first = await this.runTryOnly(lease, threadId, now);
+    } catch (e) {
+      // Java 4.8 (#5019): an ambiguous response timeout must still remove the
+      // waiter from redisson_lock_queue/redisson_lock_timeout — best effort.
+      if (!isAmbiguousResponseError(e)) throw e;
+      await this.cleanupWaiter(threadId);
+      return false;
+    }
     this.checkReentrant(first);
     if (first === null || first === undefined) {
       if (useWatchdog) this.startWatchdog(threadId);
@@ -888,7 +897,14 @@ export class RFairLock extends LockObservable {
     const deadline = waitMs === Infinity ? Infinity : Date.now() + waitMs;
     for (;;) {
       const now = await serverNowMs(this.redis);
-      const r = await this.runAcquire(lease, threadId, now);
+      let r: any;
+      try {
+        r = await this.runAcquire(lease, threadId, now);
+      } catch (e) {
+        if (!isAmbiguousResponseError(e)) throw e;
+        await this.cleanupWaiter(threadId);
+        return false;
+      }
       this.checkReentrant(r);
       if (r === null || r === undefined) {
         if (useWatchdog) this.startWatchdog(threadId);
@@ -1446,6 +1462,12 @@ export class RFencedLock extends RLock {
 export interface LockLike {
   tryLock(waitTimeMs?: number, leaseTimeMs?: number, threadId?: number | string): Promise<boolean>;
   unlock(threadId?: number | string): Promise<void>;
+}
+
+/** Connection-level failures where the script may or may not have run
+ *  server-side (Java 4.8 maps these to RedisResponseTimeoutException). */
+function isAmbiguousResponseError(e: unknown): boolean {
+  return /timeout|connection|ECONNRESET|closed|aborted/i.test(String((e as any)?.message ?? e));
 }
 
 /** MultiLock-family composites reject the Condition/listener surface
