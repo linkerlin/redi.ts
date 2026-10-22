@@ -25,6 +25,7 @@ async function redisUp(): Promise<boolean> {
 
 const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 54: delayed queue surface', () => {
   it('validates delays, moves staged members and removes from the destination', async () => {

@@ -33,6 +33,7 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
 const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<boolean> => {
   const start = Date.now();

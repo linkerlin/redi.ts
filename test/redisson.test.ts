@@ -2220,3 +2220,16 @@ describe('phase 67: bucket/zset listeners + MultiLock rejection (mock)', () => {
     await r.shutdown();
   });
 });
+
+describe('PRO-only factory refusal (mock)', () => {
+  it('all six PRO structures throw on factory call', () => {
+    const r = make();
+    const factories = [
+      'getReliableQueue', 'getLocalCachedMapCache', 'getReliablePubSubTopic',
+      'getBitVectorStore', 'getReliableFanout', 'getLeasedMap',
+    ] as const;
+    for (const f of factories) {
+      expect(() => (r as any)[f]('x')).toThrow(/PRO-only/);
+    }
+  });
+});

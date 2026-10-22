@@ -23,6 +23,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 41: queue/deque surface', () => {
   it('poll counts, indexOf, RPOPLPUSH, variadic writes and LMOVE', async () => {

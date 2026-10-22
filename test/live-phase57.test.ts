@@ -29,6 +29,7 @@ function vec(a: number, b: number): Buffer {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 57: SVS-VAMANA indexes', () => {
   it('creates SVS fields with compression/build options and runs KNN', async () => {

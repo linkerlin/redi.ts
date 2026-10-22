@@ -40,6 +40,7 @@ async function hasCmd(r: Redisson, name: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 14: stream add/read options, nack, ackdel', () => {
   it('add NOMKSTREAM/MINID/strict/IDMP + noAck/claim reads', async () => {

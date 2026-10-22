@@ -50,6 +50,7 @@ function slot(key: string): number {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('phase 9 static: slot parity + mock contention (no Redis needed)', () => {
   it('every companion key lands in the same slot as its main key', () => {

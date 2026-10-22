@@ -33,6 +33,7 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 55: VectorSet iterator/stream', () => {
   it('pages through members lexicographically with small batches', async () => {

@@ -83,7 +83,7 @@ const redisson = Redisson.create({ client: redis });
 
 细账在 [COMPATIBILITY.md](COMPATIBILITY.md)。
 
-有些东西故意不做，跟 redi.go 一样。`RSortedSet` 要 LIST 再加比较器。`RTransaction` 要快照回滚。`LiveObject`、reactive / Rx 不做。`RRemoteService` 和 `RExecutorService` 的线上协议也不做。PRO 才有的 `RReliableQueue`、`RLocalCachedMapCache`、`RReliablePubSubTopic`、`RBitVectorStore`，这里没有。
+有些东西故意不做，跟 redi.go 一样。`RSortedSet` 要 LIST 再加比较器。`RTransaction` 要快照回滚。`LiveObject`、reactive / Rx 不做。`RRemoteService` 和 `RExecutorService` 的线上协议也不做。PRO 才有的 `RReliableQueue`、`RLocalCachedMapCache`、`RReliablePubSubTopic`、`RBitVectorStore`、`RLeasedMap`、`RReliableFanout`，这里没有（工厂方法直接抛错）。
 
 ## 值是怎么写进去的
 

@@ -28,6 +28,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 19: key synchronizers + mapcache depth', () => {
   it('TS and Java derive identical companion names for all six synchronizers', async () => {

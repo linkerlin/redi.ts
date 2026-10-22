@@ -34,6 +34,7 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 66: probabilistic argument objects', () => {
   it('supports TDigest merge, Cuckoo init/add and TopK init/batches', async () => {

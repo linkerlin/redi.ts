@@ -27,6 +27,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 23: keys ops + conditionals + atomics', () => {
   it('RKeys expire family/remainTTL/getSlot (vs Java)/move/unlinkByPattern', async () => {

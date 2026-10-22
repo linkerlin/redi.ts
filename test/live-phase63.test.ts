@@ -33,6 +33,7 @@ const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 5000
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 63: local cached map reconnection strategies', () => {
   it('clears or reloads the near cache on reconnect', async () => {

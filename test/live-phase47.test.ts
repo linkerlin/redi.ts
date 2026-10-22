@@ -35,6 +35,7 @@ const waitFor = async (check: () => boolean, timeoutMs = 5000): Promise<boolean>
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 47: RKeys keyspace listeners', () => {
   it('delivers new/set/expired/del and stops after removeListener', async () => {

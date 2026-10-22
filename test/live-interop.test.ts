@@ -49,6 +49,7 @@ async function mvnProbe(args: string): Promise<{ ok: boolean; out: string }> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop TS <-> Java Redisson (real Redis)', () => {
   beforeAll(async () => {

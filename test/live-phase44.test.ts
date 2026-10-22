@@ -39,6 +39,7 @@ function vec(a: number, b: number): Buffer {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 44: RSearch hybrid/profile/cursor/alter', () => {
   it('hybrid KNN/RANGE with RRF/LINEAR, profiles, cursors and alter', async () => {

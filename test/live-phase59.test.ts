@@ -34,6 +34,7 @@ const waitFor = async (check: () => boolean, timeoutMs = 5000): Promise<boolean>
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 59: map field listeners', () => {
   it('delivers put/incr/remove and native expired/clear-expire events', async () => {

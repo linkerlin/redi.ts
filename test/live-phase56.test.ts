@@ -23,6 +23,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 56: RMap putAll batchSize', () => {
   it('writes all batches and leaves a Java-readable hash', async () => {

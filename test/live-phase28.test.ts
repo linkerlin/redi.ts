@@ -25,6 +25,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 28: interruptible lock + mapcache remainder', () => {
   it('lockInterruptibly aborts while contended and acquires when free', async () => {

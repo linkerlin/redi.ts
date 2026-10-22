@@ -32,6 +32,7 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 51: native map-cache PutArgs + compute', () => {
   it('structured batches keep field TTLs and compute serializes', async () => {

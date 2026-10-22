@@ -24,6 +24,7 @@ async function up(url: string): Promise<boolean> {
 }
 
 const hasRedis = await up(REDIS_URL);
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 const hasTarget = hasRedis ? await up(TARGET_URL) : false;
 
 describe('live phase 46: RKeys migrate/copy/swapdb/parallel flush', () => {

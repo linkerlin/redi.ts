@@ -89,7 +89,7 @@ npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # �
   阻塞握手（本库为队列迁移 `GO_ONLY`）、`RPriority*` Comparator 协议
   （本库 ZSET+score `GO_ONLY`）。
 - PRO-only：`RReliableQueue`、`RLocalCachedMapCache`、`RReliablePubSubTopic`、
-  `RBitVectorStore`、`RLeasedMap`（抛错）。
+  `RBitVectorStore`、`RLeasedMap`、`RReliableFanout`（抛错）。
 - `RClientSideCaching`：PARTIAL（ioredis 直通，无 Java EvictionPolicy）。
 - `RLocalCachedMap`：数据层 WIRE_OK，失效为本地 JSON 广播；混部请
   `disableNearCache`。

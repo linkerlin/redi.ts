@@ -30,6 +30,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('phase 10 static: priority self-consistency on mock', () => {
   it('zset-score priority queue is FIFO by score (GO_ONLY, not Comparator)', async () => {

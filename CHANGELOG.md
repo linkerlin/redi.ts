@@ -1,3 +1,28 @@
+## 2.45.1 — 2026-10-22
+
+Review follow-ups from the two-axis audit of the full 2-week history
+(root → 2.45.0). No wire-format changes.
+
+- PRO-only refusal completed: `getLocalCachedMapCache` /
+  `getReliablePubSubTopic` / `getReliableFanout` / `getLeasedMap` factory
+  stubs now throw like the existing two (previously missing → raw
+  `TypeError`). Verified against the 4.6.1 OSS jar: all six PRO interfaces
+  exist there, only the implementations are PRO.
+- Fallback catches narrowed: `RMapCacheNative.putAll` (HSETEX→HSET) and
+  `RSet.countIntersection` (SINTERCARD→SMEMBERS) now re-throw unless the
+  error is an unsupported-command failure (`isUnsupportedCommand` moved to
+  `util.ts` and shared) — WRONGTYPE-class errors no longer silently take
+  the slow path. Mock fallbacks unaffected (`call is not a function`
+  matches the guard).
+- Live tests log their skip when Redis is unreachable (AGENTS.md 带日志
+  skip，绝不静默过): one `console.warn` per live-*.test.ts file (66 files).
+- Docs: GAP_ANALYSIS §4 corrected — `RReliablePubSubTopic` /
+  `RLocalCachedMapCache` are 4.6.1-present interfaces with PRO impls, not
+  "版本外" (only `RCountMin` / `RTimeSeriesNative` are truly absent from
+  the jar); README / COMPATIBILITY / AGENTS PRO lists completed with
+  `RLeasedMap` / `RReliableFanout`.
+- Tests: +1 mock (`PRO-only factory refusal`, all six stubs).
+
 ## 2.45.0 — 2026-10-22
 
 Phase 67: bucket/zset listeners + MultiLock rejection. Full suite:

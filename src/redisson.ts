@@ -361,6 +361,18 @@ export class Redisson {
   getBitVectorStore(_name: string): never {
     throw new Error('redi.ts: RBitVectorStore is Redisson PRO-only');
   }
+  getLocalCachedMapCache(_name: string): never {
+    throw new Error('redi.ts: RLocalCachedMapCache is Redisson PRO-only');
+  }
+  getReliablePubSubTopic(_name: string): never {
+    throw new Error('redi.ts: RReliablePubSubTopic is Redisson PRO-only');
+  }
+  getReliableFanout(_name: string): never {
+    throw new Error('redi.ts: RReliableFanout is Redisson PRO-only');
+  }
+  getLeasedMap(_name: string): never {
+    throw new Error('redi.ts: RLeasedMap is Redisson PRO-only');
+  }
 
   async shutdown(): Promise<void> {
     try {

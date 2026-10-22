@@ -40,6 +40,7 @@ async function waitUntil(fn: () => boolean | Promise<boolean>, timeoutMs = 10000
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 17: bounded semaphore / blocking isolation / topics', () => {
   it('bounded queue permits are shared with Java (offer/poll/take)', async () => {

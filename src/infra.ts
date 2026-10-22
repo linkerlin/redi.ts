@@ -26,7 +26,8 @@ export interface MigrateArgs {
 }
 
 export class RKeys {
-  constructor(private redis: Redis) {}  async count(): Promise<number> {
+  constructor(private redis: Redis) {}
+  async count(): Promise<number> {
     return this.redis.dbsize();
   }
   async countExists(...names: string[]): Promise<number> {

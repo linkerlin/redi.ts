@@ -22,6 +22,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 58: native map-cache batch TTLs', () => {
   it('reads and clears field TTLs in one batch', async () => {

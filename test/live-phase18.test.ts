@@ -29,6 +29,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 18: 64-bit precision + atomic drainTo', () => {
   it('Long.MAX_VALUE / Long.MIN_VALUE buckets round-trip with BigInt codec', async () => {

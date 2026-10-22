@@ -27,6 +27,7 @@ async function cleanKeys(r: Redisson, ...names: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 3: rwlock/fenced/delayed/topic/ts/adder/pes', () => {
   it('rw: TS-held write blocks Java read+write', async () => {

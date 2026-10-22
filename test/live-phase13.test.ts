@@ -27,6 +27,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 13: stream groups/pending/claim', () => {
   it('group lifecycle + pending + claim across languages', async () => {

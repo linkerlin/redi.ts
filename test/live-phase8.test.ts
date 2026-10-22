@@ -30,6 +30,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 8: lcm/deque-list-set/atomicdouble-bucket-cas/pes-multi/rate-update/downgrade/watchdog/zset-drain', () => {
   it('localcachedmap data layer is RMap wire + TS-TS invalidation', async () => {

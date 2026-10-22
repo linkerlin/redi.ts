@@ -34,6 +34,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 7: bstream/fanout/mc-maxsize/mmcache/zset+/trim/fn-reload/bbq-take/dq-fifo', () => {
   it('binary stream shares raw bytes', async () => {

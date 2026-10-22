@@ -27,6 +27,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
 
 async function clean(r: ReturnType<typeof Redisson.create>, name: string): Promise<void> {

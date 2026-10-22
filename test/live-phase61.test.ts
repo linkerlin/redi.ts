@@ -23,6 +23,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 61: IncrementArgs', () => {
   it('applies bounds, saturation, exact BigInt and TTL policies', async () => {

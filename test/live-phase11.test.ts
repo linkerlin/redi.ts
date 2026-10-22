@@ -29,6 +29,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 11: zset union/intersection/diff', () => {
   it('store ops land in Java reads (incl. WEIGHTS position)', async () => {

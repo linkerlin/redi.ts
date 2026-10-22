@@ -7,7 +7,7 @@ import { RedisDataStructure } from './base.js';
 import { RedisKeyedStructure } from './synchronizers.js';
 import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
-import { luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
+import { isUnsupportedCommand, luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
 import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
 export class RBucket<V = any> extends RedisDataStructure {
@@ -552,7 +552,8 @@ export class RSet<V = any> extends RedisKeyedStructure<V> {
     if (limit > 0) args.push('LIMIT', limit);
     try {
       return toNumber(await (this.redis as any).call('SINTERCARD', ...args));
-    } catch {
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
       const sets = await Promise.all(keys.map((k) => this.redis.smembers(k)));
       const others = sets.slice(1).map((s) => new Set(s));
       const count = sets[0].filter((m) => others.every((s) => s.has(m))).length;
@@ -806,11 +807,6 @@ export class RDeque<V = any> extends RQueue<V> {
     const raw = await (this.redis as any).lmove(this.name, dest, from, to);
     return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
   }
-}
-
-function isUnsupportedCommand(e: unknown): boolean {
-  const msg = String((e as any)?.message ?? e);
-  return /unsupported command|unknown command|is not a function/i.test(msg);
 }
 
 interface ChannelWaker {

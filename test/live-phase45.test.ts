@@ -34,6 +34,7 @@ const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 5000
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 45: blocking queue element subscriptions', () => {
   it('delivers in order, cancels BLPOP promptly and restores bounded capacity', async () => {

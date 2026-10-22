@@ -34,6 +34,7 @@ const waitFor = async (check: () => boolean, timeoutMs = 5000): Promise<boolean>
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 53: atomic listeners', () => {
   it('delivers incrby/incrbyfloat events and stops after removal', async () => {

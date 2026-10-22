@@ -34,6 +34,7 @@ async function cleanExact(r: Redisson, ...keys: string[]): Promise<void> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 6: mc-events/stream-ack/dq-remove/rate-release/ts-label/bitop/hll/mcnative/buckets/fn/order', () => {
   it('mapcache events reach Java listeners', async () => {

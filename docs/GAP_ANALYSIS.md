@@ -87,7 +87,7 @@
 
 ## §4 明确不做（保持）
 
-`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO 四件套。另建议记名（4.6.1 无，本属版本外）：`RCountMin`、`RTimeSeriesNative`、`RReliablePubSubTopic`、`RLocalCachedMapCache`。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）。
+`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO-only 全套（工厂抛错，2.45.1 补齐六件）。另建议记名（4.6.1 OSS jar 确无 API）：`RCountMin`、`RTimeSeriesNative`；`RReliablePubSubTopic`/`RLocalCachedMapCache` 的 API 接口在 4.6.1 jar 中**存在**、仅实现为 PRO（原记“版本外”有误），与 `ReliableQueue`/`BitVectorStore`/`LeasedMap`/`ReliableFanout` 一并按 PRO-only 抛错。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）。
 
 ## §5 路线图
 

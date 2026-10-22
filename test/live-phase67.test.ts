@@ -33,6 +33,7 @@ const waitFor = async (check: () => boolean, timeoutMs = 5000): Promise<boolean>
 };
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 67: bucket/zset listeners', () => {
   it('delivers set/expired/del and zadd/zrem/zincr/store events', async () => {

@@ -33,6 +33,7 @@ async function hasCmd(redis: Redis, cmd: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 const sleep = (ms: number) => new Promise<void>((x) => setTimeout(x, ms));
 
 describe('live interop phase 37: RSearch', () => {

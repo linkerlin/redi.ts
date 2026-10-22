@@ -66,6 +66,7 @@ async function hasCmd(r: Redisson, name: string): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 15: plain-set store ops', () => {
   it('union store lands in Java reads (SELF is only the destination)', async () => {

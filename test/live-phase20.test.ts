@@ -25,6 +25,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 /** Parses `m=1.5;n=2` payloads into a Map. */
 function javaEntries(out: string, prefix: string): Map<string, number> {

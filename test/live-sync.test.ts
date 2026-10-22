@@ -23,6 +23,7 @@ async function redisUp(): Promise<boolean> {
 
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 2: locks/semaphore/ratelimiter', () => {
   it('TS-held lock blocks Java, release lets Java in', async () => {

@@ -24,6 +24,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live phase 48: last-from-any + limited scans', () => {
   it('BRPOP returns the source queue and key scans honour limits', async () => {

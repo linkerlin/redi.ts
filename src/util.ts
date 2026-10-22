@@ -132,6 +132,14 @@ export function toNumber(v: any, dflt = 0): number {
   return Number.isNaN(n) ? dflt : n;
 }
 
+/** "Command unavailable" from the server, or a missing method TypeError from
+ *  ioredis-mock — callers may fall back to a slower path; anything else must
+ *  propagate (blanket catches would mask WRONGTYPE-class errors). */
+export function isUnsupportedCommand(e: unknown): boolean {
+  const msg = String((e as any)?.message ?? e);
+  return /unsupported command|unknown command|is not a function/i.test(msg);
+}
+
 // ---------------------------------------------------------------------------
 // HighwayHash-128 (Redisson fixed KEY). BigInt-based, ported from
 // redi.py highway_hash.py / Go minio/highwayhash with Redisson KEY.

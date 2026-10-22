@@ -26,6 +26,7 @@ async function redisUp(): Promise<boolean> {
 }
 
 const hasRedis = await redisUp();
+if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cases in this file no-op`);
 
 describe('live interop phase 27: map views + time-series stream', () => {
   it('map views match Java HSCAN and conditional replace/remove', async () => {

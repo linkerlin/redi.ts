@@ -11,6 +11,7 @@ import {
   decodeMapCacheEvent,
   duplicateRedis,
   encodeMapCacheEvent,
+  isUnsupportedCommand,
   luaEval,
   multimapInternalId,
   packMapCacheValue,
@@ -618,7 +619,9 @@ export class RMapCacheNative<K = any, V = any> extends RedisKeyedStructure<K> {
     try {
       await this.hsetex(fields, values, options);
       return;
-    } catch { /* fall through */ }
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+    }
     for (let i = 0; i < fields.length; i++) {
       await this.redis.hset(this.name, fields[i], values[i]);
       if (!args?.keepTTL) await this.applyFieldExpiry(fields[i], args?.expireAt ?? args?.timeToLiveMs ?? ttl);
