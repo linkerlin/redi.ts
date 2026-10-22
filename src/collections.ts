@@ -719,6 +719,12 @@ export class RQueue<V = any> extends RedisDataStructure {
   async add(value: V): Promise<boolean> {
     return this.offer(value);
   }
+  /** Java `Collection.addAll(Collection)`: batch RPUSH; false for empty input. */
+  async addAll(values: V[]): Promise<boolean> {
+    if (values.length === 0) return false;
+    await this.redis.rpush(this.name, ...values.map((v) => this.encodeValue(v)));
+    return true;
+  }
   async poll(): Promise<V | null>;
   async poll(count: number): Promise<V[]>;
   async poll(count?: number): Promise<V | null | V[]> {
