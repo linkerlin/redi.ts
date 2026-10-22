@@ -58,19 +58,23 @@ describe('live phase 71: TimeSeries native (TS.*) + RMaps', () => {
     await ts.create(TSCreateArgs.defaults().retention(600000).duplicatePolicy('LAST')
       .label('area', '32').label('sensor', 'n1'));
     expect(await ts.createIfAbsent(TSCreateArgs.defaults())).toBe(false); // already exists
-    expect(await ts.add(1000, 1)).toBe(1000);
-    expect(await ts.add(TSAddArgs.sample(2000, 2.5))).toBe(2000);
+    // timestamps must sit inside the retention window — newer TimeSeries
+    // modules trim out-of-retention samples on write, so fixed 1970-era
+    // values would vanish on up-to-date servers
+    const t0 = Date.now() - 60000;
+    expect(await ts.add(t0, 1)).toBe(t0);
+    expect(await ts.add(TSAddArgs.sample(t0 + 1000, 2.5))).toBe(t0 + 1000);
     const serverTs = await ts.addCurrent(3.5);
-    expect(serverTs).toBeGreaterThan(2000);
+    expect(serverTs).toBeGreaterThan(t0 + 1000);
     const last = await ts.get();
     expect(last!.values).toEqual([3.5]);
     expect(last!.timestamp).toBe(serverTs);
-    const samples = await ts.range(TSRangeArgs.range(1000, 2000));
+    const samples = await ts.range(TSRangeArgs.range(t0, t0 + 1000));
     expect(samples.map((s) => s.values[0])).toEqual([1, 2.5]);
-    expect((await ts.rangeReversed(0, 2000)).map((s) => s.timestamp)).toEqual([2000, 1000]);
-    expect((await ts.first())!.timestamp).toBe(1000);
+    expect((await ts.rangeReversed(0, t0 + 1000)).map((s) => s.timestamp)).toEqual([t0 + 1000, t0]);
+    expect((await ts.first())!.timestamp).toBe(t0);
     expect(await ts.size()).toBe(3);
-    expect(await ts.firstTimestamp()).toBe(1000);
+    expect(await ts.firstTimestamp()).toBe(t0);
     expect(await ts.lastTimestamp()).toBe(serverTs);
     expect(await ts.getLabels()).toEqual({ area: '32', sensor: 'n1' });
     const info = await ts.getInfo();
@@ -78,7 +82,7 @@ describe('live phase 71: TimeSeries native (TS.*) + RMaps', () => {
     expect(info.retentionTimeMs).toBe(600000);
     expect(info.labels).toEqual({ area: '32', sensor: 'n1' });
     expect(info.chunkType).toBe('COMPRESSED');
-    expect(await ts.removeRange(1000, 1000)).toBe(1);
+    expect(await ts.removeRange(t0, t0)).toBe(1);
     expect(await ts.size()).toBe(2);
     // raw wire: TS.RANGE replies [ts, [value]] pairs
     const rawReply: any = await raw.call('TS.RANGE', `${NS}n1`, '-', '+');
