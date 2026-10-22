@@ -57,18 +57,18 @@ npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # �
 10. **TTL 余量按最坏抖动给**：全量套件多文件并行、JVM 逐个冷启，JVM→TS 交接
     抖动可达数秒。`visible-before` 断言（先见到再消失）的 TTL 取 ≥5s；
     `gone-after` 方向天然抗抖。1.5s 量级只在空载单测里成立。
-10. **探针命令先对 Java 4.6.1 javap 再写**：同名 API 在 4.x/5.x 形状不同
+11. **探针命令先对 Java 4.6.1 javap 再写**：同名 API 在 4.x/5.x 形状不同
     （`ReturnType.INTEGER`→`LONG` 无别名、`StreamCreateGroupArgs` 须 `makeStream`；
     新增命令的 `args[i]` 个数守卫逐个核对，`mcnative-put` 曾差一位吞掉 TTL）。
     exec 插件按空格切参——含空格参数换无空格写法（`return(40+2)`）；新命令先冒烟再进用例。
     Function 须 `WRITE` 模式（`FCALL_RO` 拒无 no-writes 标记函数）。
-11. **TimeSeries label 是 codec 编码载荷、无 mark 前缀（4.6.1 形状）**：
+12. **TimeSeries label 是 codec 编码载荷、无 mark 前缀（4.6.1 形状）**：
     blob = 编码后 label 原样（`"jlbl"` 带引号），n=2/3 即 flag 本身；新版
     n=4+flag 前缀形状会破坏 4.6.1 读，反之被 DECODE_LABEL 显式兼容——
     写侧一律用 4.6.1 形状。读侧按 DECODE_LABEL 分支（n==4 看首字节 flag；
     n==2 无；其他取整段），再 codec 解码。4.6.1 真实 Lua 以 jar 常量池为准
     （`C:/GitHub/redisson` 是新版源码）。
-12. **全局命名空间也要按文件隔离**：vitest 多文件并行，Redis Functions 按库名
+13. **全局命名空间也要按文件隔离**：vitest 多文件并行，Redis Functions 按库名
     全局共享——phase6/phase7 同名 `p6lib/p6answer` 曾互相 REPLACE 覆盖致假失败；
     函数库/函数名加阶段后缀（`p6lib7/p6answer7`），跨文件共享键一律阶段前缀。
 

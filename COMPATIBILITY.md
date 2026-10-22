@@ -79,7 +79,7 @@
 
 ## Verification
 
-- `npm test`: 307 tests / 70 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
+- `npm test`: 308 tests / 70 files — `wire` (codec/names/hash-vectors/struct/map-cache events),
   mock functional (incl. phase-21 delayed-queue migrator lifecycle, phase-22
   §3 leftovers, phase-23 keys/atomic remainder, phase-24 zset remainder,
   phase-25 time-series family, phase-26 topic/set surfaces, phase-27
