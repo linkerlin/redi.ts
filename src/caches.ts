@@ -998,10 +998,30 @@ return 1`;
   }
 }
 
+export interface SetExpiredListener<V = any> {
+  /** Invoked with the decoded value of an entry evicted by the expiry sweep
+   *  (Java `SetExpiredListener.onExpired(V)`, Redisson 4.7). */
+  onExpired(value: V): void;
+}
+
 export class RSetCache<V = any> extends RedisKeyedStructure<V> {
   private idleKey: string;
   private touchKey: string;
   private listenerHub: KeyspaceListenerHub;
+  // -- SetExpiredListener state (Java 4.7 SetCacheEvictionTask + RTopic) ----
+  // Java's client-side EvictionScheduler sweeps the expiry-scored ZSET every
+  // minCleanUpDelay seconds (default 5), removes expired members and PUBLISHes
+  // each one to `redisson_set_cache_expired` (SetCacheEvictionTask). Listeners
+  // are plain RTopic subscribers on that channel.
+  private expiredChannel: string;
+  private expiredListeners = new Map<number, SetExpiredListener<V>>();
+  private expiredSub: Redis | null = null;
+  private expiredTimer: ReturnType<typeof setInterval> | null = null;
+  private expiredPolling = false;
+  /** Expired-listener ids sit far above the keyspace-hub id space so the
+   *  single removeListener(id) can route both kinds without collisions. */
+  private static readonly EXPIRED_ID_OFFSET = 1_000_000;
+  private nextExpiredId = RSetCache.EXPIRED_ID_OFFSET;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.idleKey = prefixName('redisson__idle__set', name);
@@ -1009,6 +1029,8 @@ export class RSetCache<V = any> extends RedisKeyedStructure<V> {
     // Java never reads this key, so cross-language presence is unaffected.
     this.touchKey = suffixName(name, 'redisson_touch');
     this.listenerHub = new KeyspaceListenerHub(redis, name, { onAdd: 'zadd', onRemove: 'zrem' });
+    // Java RedissonSetCache.getExpiredChannelName() verbatim.
+    this.expiredChannel = prefixName('redisson_set_cache_expired', name);
   }
   // NOTE on idle semantics: idle ZSET holds the DURATION; last-touch rides in
   // touchKey. contains() enforces now-lastTouch<=duration and refreshes the
@@ -1124,13 +1146,171 @@ export class RSetCache<V = any> extends RedisKeyedStructure<V> {
   // extension, so delete() must remove it explicitly (main ZSET alone would
   // leave orphaned sliding-window metadata behind).
   /** Java `addListener(ObjectListener)`: SetAddListener → zadd,
-   *  SetRemoveListener → zrem. SetExpiredListener is not implemented. */
-  async addListener(listener: ObjectListener): Promise<number> {
-    return this.listenerHub.add(listener);
+   *  SetRemoveListener → zrem, SetExpiredListener (4.7) → the client-side
+   *  expiry sweep + `redisson_set_cache_expired` topic. The expired kind is
+   *  detected by the `onExpired(value)` handler and starts a ref-counted,
+   *  `unref()`ed 5s poll timer plus a dedicated subscription connection,
+   *  running only while at least one expired-listener is registered. */
+  async addListener(listener: ObjectListener | SetExpiredListener<V>): Promise<number> {
+    if (typeof (listener as SetExpiredListener<V>).onExpired === 'function') {
+      const id = this.nextExpiredId++;
+      this.expiredListeners.set(id, listener as SetExpiredListener<V>);
+      try {
+        await this.ensureExpiredWatch();
+      } catch (e) {
+        this.expiredListeners.delete(id);
+        throw e;
+      }
+      return id;
+    }
+    return this.listenerHub.add(listener as ObjectListener);
   }
   async removeListener(listenerId: number): Promise<void> {
+    if (this.expiredListeners.has(listenerId)) {
+      this.expiredListeners.delete(listenerId);
+      if (this.expiredListeners.size === 0) this.stopExpiredWatch();
+      return;
+    }
     await this.listenerHub.remove(listenerId);
   }
+
+  private async ensureExpiredWatch(): Promise<void> {
+    if (!this.expiredSub) {
+      const conn = await duplicateRedis(this.redis);
+      if (conn) {
+        // messageBuffer only: the u64LE length prefix can contain non-UTF-8
+        // bytes; 'message' would re-encode it (AGENTS.md rule 6).
+        const onMessage = (ch: Buffer | string, payload: Buffer) => {
+          if (String(ch) !== this.expiredChannel) return;
+          const value = this.decodeExpiredPayload(payload);
+          if (value !== undefined) this.fireExpired(value);
+        };
+        (conn as any).on('messageBuffer', onMessage);
+        try {
+          await conn.subscribe(this.expiredChannel);
+        } catch (e) {
+          try {
+            (conn as any).off?.('messageBuffer', onMessage);
+            (conn as any).disconnect?.();
+          } catch { /* noop */ }
+          throw e;
+        }
+        this.expiredSub = conn;
+      }
+    }
+    if (!this.expiredTimer) {
+      // Fixed 5s interval: Java's EvictionScheduler starts at minCleanUpDelay
+      // (default 5s) and only adapts upward when sweeps keep coming up empty,
+      // so 5s matches the best-case Java delivery latency.
+      const t = setInterval(() => {
+        void this.pollExpiry().catch(() => undefined);
+      }, 5000);
+      t.unref?.();
+      this.expiredTimer = t;
+    }
+  }
+
+  private stopExpiredWatch(): void {
+    if (this.expiredTimer) {
+      clearInterval(this.expiredTimer);
+      this.expiredTimer = null;
+    }
+    const conn = this.expiredSub;
+    this.expiredSub = null;
+    if (conn) {
+      try { void conn.unsubscribe(this.expiredChannel).catch(() => undefined); } catch { /* noop */ }
+      try { (conn as any).disconnect?.(); } catch { /* noop */ }
+    }
+  }
+
+  /** Decode an expired-channel payload: u64LE length prefix + codec-encoded
+   *  member bytes — exactly what Java's SetCacheEvictionTask Lua publishes
+   *  (`struct.pack('Lc0', ...)`) and SetCacheEventCodec reads back
+   *  (readLongLE + value decoder), so Java listeners on a Linux/nonstop-less
+   *  server decode TS-published events and vice versa. */
+  private decodeExpiredPayload(payload: Buffer | string): V | undefined {
+    try {
+      const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'latin1');
+      if (buf.length < 8) return undefined;
+      const len = Number(buf.readBigUInt64LE(0));
+      if (len > buf.length - 8) return undefined;
+      const enc = buf.subarray(8, 8 + len).toString('utf8');
+      try {
+        return this.decodeValue(enc) as V;
+      } catch {
+        return enc as unknown as V;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  private fireExpired(value: V): void {
+    for (const [, l] of this.expiredListeners) {
+      try { l.onExpired(value); } catch { /* user callback */ }
+    }
+  }
+
+  /** One EvictionScheduler sweep (Java SetCacheEvictionTask.execute()): claim
+   *  expired members from the expiry-scored ZSET (zrem-first so concurrent
+   *  pollers — other TS clients or Java's scheduler — publish each value at
+   *  most once), drop their idle/touch metadata, then PUBLISH each member to
+   *  `redisson_set_cache_expired`. Delivery to local listeners happens through
+   *  the channel subscription (our own publish loops back), except when no
+   *  duplicated connection exists (mock without pub/sub), where the value is
+   *  dispatched directly. Returns the number of expired entries processed.
+   *  Internal; exposed for tests that prefer a manual sweep over timer waits. */
+  async pollExpiry(): Promise<number> {
+    if (this.expiredPolling) return 0; // timer + manual poll must not overlap
+    this.expiredPolling = true;
+    try {
+      let now: number;
+      let expired: string[] = [];
+      try {
+        now = await serverNowMs(this.redis);
+        expired = await this.redis.zrangebyscore(this.name, '0', String(now));
+      } catch {
+        return 0; // server unreachable / command unsupported: never crash callers
+      }
+      let n = 0;
+      for (const enc of expired) {
+        let claimed = 0;
+        try {
+          claimed = await this.redis.zrem(this.name, enc);
+        } catch {
+          continue;
+        }
+        if (claimed === 0) continue;
+        try {
+          await this.redis.zrem(this.idleKey, enc);
+          await this.redis.hdel(this.touchKey, enc);
+        } catch { /* noop */ }
+        const body = Buffer.from(enc, 'utf8');
+        const msg = Buffer.alloc(8 + body.length);
+        msg.writeBigUInt64LE(BigInt(body.length), 0);
+        body.copy(msg, 8);
+        try {
+          // Buffer arg is mandatory: a string arg is UTF-8 encoded and the
+          // length-prefix bytes may be >= 0x80 (AGENTS.md rule 6).
+          await this.redis.publish(this.expiredChannel, msg);
+        } catch { /* best-effort */ }
+        if (!this.expiredSub) {
+          let value: V;
+          try {
+            value = this.decodeValue(enc) as V;
+          } catch {
+            value = enc as unknown as V;
+          }
+          this.fireExpired(value);
+        }
+        n += 1;
+      }
+      return n;
+    } finally {
+      this.expiredPolling = false;
+    }
+  }
+
   override async delete(): Promise<boolean> {
     return this.deleteKeys([this.name, this.idleKey, this.touchKey]);
   }

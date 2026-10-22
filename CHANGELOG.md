@@ -1,3 +1,46 @@
+## 2.51.0 — 2026-10-23
+
+Phase 72: the last two Redisson 4.7/4.8 items — `SetExpiredListener` and
+`NameMapper` — plus the RGcra config surface and a final 4.8-gap audit.
+
+- **`SetExpiredListener` for `RSetCache`** (Java 4.7): `addListener({ onExpired(value) })`
+  starts a ref-counted, `unref()`ed 5s poll (Java EvictionScheduler
+  minCleanUpDelay ballpark) plus a dedicated subscription on
+  `redisson_set_cache_expired:{name}` (Java channel name verbatim), alive only
+  while an expired-listener is registered. Each sweep claims expired members
+  zrem-first (at-most-once across concurrent pollers, including Java's own
+  scheduler), drops idle/touch metadata and PUBLISHes `u64LE(len) +
+  codec-encoded member` — byte-identical to the Java SetCacheEvictionTask Lua
+  (`struct.pack('Lc0', ...)`) and SetCacheEventCodec (readLongLE + value
+  decoder), so Java listeners on non-Windows servers decode TS events and vice
+  versa. `pollExpiry()` stays public for tests / manual sweeps; the read-path
+  `purge()` still evicts silently without events (same as Java read paths).
+  Mock-safe: without pub/sub the sweep dispatches locally.
+- **`NameMapper` / `PrefixNameMapper`** (Java 4.8): config-level
+  `Redisson.create({ nameMapper })` maps every structure name inside the getXxx
+  factories (65 sites, mechanical `mapped(name)`); companion keys derive from
+  the mapped name — Java parity. `PrefixNameMapper(prefix)` never double-prefixes
+  and `unmap` round-trips; `getPatternTopic` patterns and `RKeys` methods are
+  not mapped/unmapped (documented limitation, matching Java users' primary use).
+- **`RGcra` config surface** (Java 4.7): `trySetRate`/`setRate`/`getConfig` over
+  the `{name}:config` hash (StringCodec fields `maxBurst`/`rate`/`period`;
+  periods ms↔seconds with Java `toSeconds` shape), `tryAcquire([tokens])`
+  returning the decoded 5-element `GcraResult` (limited/maxTokens/
+  availableTokens/retryAfterSeconds/fullBurstAfterSeconds; TOKENS arg when
+  tokens≠1), the Java Lua assert message when the rate is unset, and `delete()`
+  clearing raw + config keys. The legacy `acquire(limit, periodMs)` stays.
+- Tests: +3 mock (expired dispatch + stop-after-remove, prefix mapping +
+  companion/lock/topic keys, Gcra config hash shape) and
+  `live-phase72.test.ts` (+3: TS-only expired delivery with a raw
+  `messageBuffer` subscriber asserting the u64LE wire payload, PrefixNameMapper
+  against live keys, RGcra gated by COMMAND INFO — local Redis 8.6.0 ships no
+  GCRA command, so the gated-skip path ran).
+- Final 4.6.1→4.8.0 api audit: everything else portable is either already
+  covered (phases 68-71), module-gated (full AR.* surface of RArray /
+  RCircularBuffer; RBatch `getCountMin`/`getTimeSeriesNative` wrappers), PRO/AI,
+  or Java-framework-only (codecs, Valkey AZ affinity, StorageMemoryUsageListener,
+  Spring/Hibernate). Post-4.8.0 HEAD adds only `RBatch.getMap(name, MapOptions)`.
+
 ## 2.50.0 — 2026-10-23
 
 Phase 71: Redisson 4.8 OSS additions — RTimeSeriesNative(+Natives) and RMaps.

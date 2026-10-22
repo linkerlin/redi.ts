@@ -3634,7 +3634,40 @@ export class RCountMin<V = any> extends RedisDataStructure {
   }
 }
 
+/** Java `GcraConfig`: maxBurst / tokensPerPeriod / period. Periods are plain
+ *  millisecond numbers here (repo convention); the wire stores seconds. */
+export interface GcraConfig {
+  maxBurst: number;
+  tokensPerPeriod: number;
+  periodMs: number;
+}
+
+/** Java `GcraResult` — the 5-element GCRA reply. */
+export interface GcraResult {
+  limited: boolean;
+  maxTokens: number;
+  availableTokens: number;
+  retryAfterSeconds: number;
+  fullBurstAfterSeconds: number;
+}
+
+function gcraValidateRate(maxBurst: number, tokensPerPeriod: number, periodMs: number): void {
+  if (maxBurst < 0) throw new Error("redi.ts: maxBurst can't be negative");
+  if (tokensPerPeriod <= 0) throw new Error('redi.ts: tokensPerPeriod must be positive');
+  if (!(periodMs > 0)) throw new Error('redi.ts: period must be positive');
+}
+
+/** Java `RedissonGcra.toSeconds(Duration)`: seconds, trailing zeros stripped. */
+function gcraSeconds(periodMs: number): string {
+  return String(periodMs / 1000);
+}
+
 export class RGcra extends RedisDataStructure {
+  /** Java `getConfigName()` — suffixName(rawName, "config"). */
+  private configKey: string = suffixName(this.name, 'config');
+
+  /** Legacy convenience: one-shot GCRA call with inline limit/period.
+   *  Returns true when allowed (fail-open like the native-facade defaults). */
   async acquire(limit: number, periodMs: number): Promise<boolean> {
     try {
       const r: any = await tryDo(this.redis, 'GCRA', this.name, limit, periodMs);
@@ -3642,6 +3675,75 @@ export class RGcra extends RedisDataStructure {
     } catch {
       return true;
     }
+  }
+
+  /** Java `trySetRate(maxBurst, tokensPerPeriod, Duration)`: HSETNX all three
+   *  config fields; true only when the config was absent. Plain commands (the
+   *  Java Lua is the same three HSETNX; sequential form is mock-compatible). */
+  async trySetRate(maxBurst: number, tokensPerPeriod: number, periodMs: number): Promise<boolean> {
+    gcraValidateRate(maxBurst, tokensPerPeriod, periodMs);
+    await this.redis.hsetnx(this.configKey, 'maxBurst', String(maxBurst));
+    await this.redis.hsetnx(this.configKey, 'rate', String(tokensPerPeriod));
+    return toNumber(await this.redis.hsetnx(this.configKey, 'period', gcraSeconds(periodMs))) === 1;
+  }
+
+  /** Java `setRate`: overwrite the config hash and reset limiter state
+   *  (DEL the raw key). */
+  async setRate(maxBurst: number, tokensPerPeriod: number, periodMs: number): Promise<void> {
+    gcraValidateRate(maxBurst, tokensPerPeriod, periodMs);
+    await this.redis.hset(this.configKey,
+      'maxBurst', String(maxBurst), 'rate', String(tokensPerPeriod), 'period', gcraSeconds(periodMs));
+    await this.redis.del(this.name);
+  }
+
+  /** Java `getConfig`: HGETALL of the config hash; null when unset. */
+  async getConfig(): Promise<GcraConfig | null> {
+    const h: Record<string, string> = await this.redis.hgetall(this.configKey);
+    if (!h || (h.maxBurst === undefined && h.rate === undefined && h.period === undefined)) return null;
+    return {
+      maxBurst: Number(h.maxBurst),
+      tokensPerPeriod: Number(h.rate),
+      periodMs: Math.round(Number(h.period) * 1000),
+    };
+  }
+
+  /** Java `tryAcquire` / `tryAcquire(long tokens)`: read the config hash, then
+   *  GCRA with TOKENS when tokens != 1. Throws when the rate is not set
+   *  (Java Lua assert) or the server lacks GCRA. */
+  async tryAcquire(tokens = 1): Promise<GcraResult> {
+    if (!(tokens > 0)) throw new Error('redi.ts: tokens must be positive');
+    const cfg = await this.redis.hmget(this.configKey, 'maxBurst', 'rate', 'period');
+    const maxBurst = cfg[0];
+    const rate = cfg[1];
+    const period = cfg[2];
+    if (maxBurst === null || maxBurst === undefined || rate === null || rate === undefined
+      || period === null || period === undefined) {
+      throw new Error('GCRA rate is not set');
+    }
+    const args: (string | number)[] = ['GCRA', this.name, maxBurst, rate, period];
+    if (tokens !== 1) args.push('TOKENS', String(tokens));
+    const r = await tryDo(this.redis, ...args);
+    if (!Array.isArray(r) || r.length !== 5) {
+      throw new Error(`redi.ts: unexpected GCRA reply: ${JSON.stringify(r)}`);
+    }
+    return {
+      limited: toNumber(r[0]) === 1,
+      maxTokens: toNumber(r[1]),
+      availableTokens: toNumber(r[2]),
+      retryAfterSeconds: toNumber(r[3]),
+      fullBurstAfterSeconds: toNumber(r[4]),
+    };
+  }
+
+  /** Java delete: raw key + config hash. */
+  override async delete(): Promise<boolean> {
+    await this.redis.del(this.name, this.configKey);
+    return true;
+  }
+
+  override async unlink(): Promise<boolean> {
+    await this.unlinkKeys([this.name, this.configKey]);
+    return true;
   }
 }
 

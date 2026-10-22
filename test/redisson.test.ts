@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
-import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs, TimeSeriesAddArgs, TimeSeriesAggregationArgs, TimeSeriesReadArgs, TSAddArgs, TSCreateArgs, TSIncrArgs, TSRangeArgs, TSReadArgs, TSRuleArgs, TSMultiGetArgs, TSMultiRangeArgs, TSGroupedRangeArgs, MapsImportArgs } from '../src';
+import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs, TimeSeriesAddArgs, TimeSeriesAggregationArgs, TimeSeriesReadArgs, TSAddArgs, TSCreateArgs, TSIncrArgs, TSRangeArgs, TSReadArgs, TSRuleArgs, TSMultiGetArgs, TSMultiRangeArgs, TSGroupedRangeArgs, MapsImportArgs, PrefixNameMapper, defaultNameMapper } from '../src';
 import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
@@ -2594,5 +2594,91 @@ describe('phase 71: RMaps mass writes + TS native args (mock)', () => {
     expect(() => TSGroupedRangeArgs.keys('k1').aggregations(1, [['AVG'], ['SUM']]).appendArgs()).toThrow(/one entry per key/);
     expect(TSReadArgs.fromNext().block(5000, 1).maxCount(100).timestamp).toBe('$');
     expect(TSRuleArgs.destination('dst', 'TWA', 60000).alignTimestamp(5).getAlignTimestamp()).toBe(5);
+  });
+});
+
+describe('phase 72: SetCache expired listener + NameMapper + Gcra config (mock)', () => {
+  it('SetExpiredListener fires on manual pollExpiry and stops after removeListener', async () => {
+    const r = make();
+    const sc = r.getSetCache<string>('p72:sce');
+    const got: string[] = [];
+    const id = await sc.addListener({ onExpired: (v: any) => got.push(v) });
+    expect(id).toBeGreaterThanOrEqual(1_000_000); // offset ids, no clash with hub ids
+    // expiry channel name matches Java prefixName('redisson_set_cache_expired', name)
+    // add the long-TTL member first: add() runs purge(now), which would
+    // silently swallow an already-lapsed short-TTL member before the poll
+    await sc.add('keep', 60000);
+    await sc.add('a', 1); // 1ms TTL
+    await new Promise((res) => setTimeout(res, 15));
+    const n = await sc.pollExpiry();
+    expect(n).toBe(1);
+    await new Promise((res) => setTimeout(res, 50)); // pub/sub loopback delivery
+    expect(got).toEqual(['a']);
+    // expired member is gone, surviving member intact
+    expect(await sc.contains('keep')).toBe(true);
+    expect(await sc.size()).toBe(1);
+    // removed listener receives nothing further
+    await sc.removeListener(id);
+    await sc.add('b', 1);
+    await new Promise((res) => setTimeout(res, 15));
+    await sc.pollExpiry();
+    await new Promise((res) => setTimeout(res, 50));
+    expect(got).toEqual(['a']);
+    expect(await sc.size()).toBe(1);
+    await r.shutdown();
+  });
+
+  it('PrefixNameMapper prefixes every structure key and round-trips unmap', async () => {
+    const nm = new PrefixNameMapper('myapp:');
+    expect(nm.map('foo')).toBe('myapp:foo');
+    expect(nm.map('myapp:foo')).toBe('myapp:foo'); // already prefixed
+    expect(nm.unmap('myapp:foo')).toBe('foo');
+    expect(nm.unmap('other')).toBe('other');
+    expect(defaultNameMapper().map('x')).toBe('x');
+
+    const r = Redisson.create({ client: new RedisMock() as any, nameMapper: new PrefixNameMapper('myapp:') });
+    const b = r.getBucket<any>('p72:nm');
+    await b.set({ x: 1 });
+    expect(await r.redis.exists('myapp:p72:nm')).toBe(1);
+    expect(await r.redis.exists('p72:nm')).toBe(0);
+    expect(await b.get()).toEqual({ x: 1 });
+    // companions derive from the mapped name (Java parity)
+    const sc = r.getSetCache<string>('p72:nsc2');
+    await sc.add('v', 0, 5000);
+    expect(await r.redis.exists('myapp:p72:nsc2')).toBe(1);
+    expect(await r.redis.exists('redisson__idle__set:{myapp:p72:nsc2}')).toBe(1); // idle companion at the MAPPED tag
+    const l = r.getLock('p72:nl');
+    await l.lock();
+    expect(await r.redis.exists('myapp:p72:nl')).toBe(1); // lock key is the mapped name
+    await l.unlock();
+    // topics publish on the mapped channel
+    const t = r.getTopic<number>('p72:nt');
+    const seen: number[] = [];
+    await t.addListener((v) => seen.push(v));
+    await t.publish(7);
+    await new Promise((res) => setTimeout(res, 50));
+    expect(seen).toEqual([7]);
+    await r.shutdown();
+  });
+
+  it('Gcra config commands manage the {name}:config hash', async () => {
+    const r = make();
+    const g = r.getGcra('p72:g');
+    expect(await g.trySetRate(5, 10, 60000)).toBe(true);
+    expect(await g.trySetRate(9, 9, 90000)).toBe(false); // already set
+    expect(await g.getConfig()).toEqual({ maxBurst: 5, tokensPerPeriod: 10, periodMs: 60000 });
+    // setRate overwrites and resets state
+    await g.setRate(3, 6, 30000);
+    expect(await g.getConfig()).toEqual({ maxBurst: 3, tokensPerPeriod: 6, periodMs: 30000 });
+    // fractional periods stay fractional on the wire (Java toSeconds shape)
+    await g.setRate(3, 6, 1500);
+    expect(await r.redis.hget(suffixName('p72:g', 'config'), 'period')).toBe('1.5');
+    // tryAcquire without the GCRA server command rejects (mock has no GCRA)
+    await g.setRate(1, 10, 10000);
+    await expect(g.tryAcquire()).rejects.toThrow();
+    // delete clears raw + config keys
+    await g.delete();
+    expect(await g.getConfig()).toBe(null);
+    await r.shutdown();
   });
 });
