@@ -113,7 +113,12 @@ async function boot(): Promise<void> {
   if (booting) return booting;
   booting = (async () => {
     await ensureBuilt();
-    const cp = `${CLASSES};${existsSync(CP_FILE) ? readFileSync(CP_FILE, 'utf8').trim() : ''}`;
+    // path.delimiter: ';' on Windows, ':' on POSIX — cp.txt is generated with
+    // the platform-native separator too, so this line is what broke CI's
+    // linux runner (a hardcoded ';' made the whole classpath one bad entry).
+    const cp = [CLASSES, existsSync(CP_FILE) ? readFileSync(CP_FILE, 'utf8').trim() : '']
+      .filter((x) => x.length > 0)
+      .join(path.delimiter);
     const proc = spawn(JAVA, ['-Dorg.slf4j.simpleLogger.defaultLogLevel=warn', '-cp', cp, 'io.github.redits.interop.TsProbe', 'repl'], {
       cwd: ROOT,
       env: { ...process.env, ...redisEnv() },
