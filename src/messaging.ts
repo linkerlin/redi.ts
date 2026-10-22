@@ -524,6 +524,10 @@ export interface StreamAddOptions extends StreamTrimOptions {
 /** Full XREADGROUP options (mirrors StreamReadGroupArgs subset). */
 export interface StreamReadGroupOptions {
   count?: number;
+  /** Java 4.7 `maxCount()` — XREADGROUP MAXCOUNT (Redis 8.x). */
+  maxCount?: number;
+  /** Java 4.7 `maxSize()` — XREADGROUP MAXSIZE (Redis 8.x). */
+  maxSize?: number;
   blockMs?: number;
   noAck?: boolean;
   /** min-idle-time CLAIM takeover, ms */
@@ -658,6 +662,8 @@ export class RStream extends RedisDataStructure {
   async readGroupWith(group: string, consumer: string, opts: StreamReadGroupOptions = {}): Promise<StreamEntry[]> {
     const args: (string | number)[] = ['GROUP', group, consumer];
     if (opts.count !== undefined && opts.count > 0) args.push('COUNT', opts.count);
+    if (opts.maxCount !== undefined && opts.maxCount > 0) args.push('MAXCOUNT', opts.maxCount);
+    if (opts.maxSize !== undefined && opts.maxSize > 0) args.push('MAXSIZE', opts.maxSize);
     if (opts.blockMs !== undefined && opts.blockMs >= 0) args.push('BLOCK', opts.blockMs);
     if (opts.claimIdleMs !== undefined && opts.claimIdleMs > 0) args.push('CLAIM', opts.claimIdleMs);
     if (opts.noAck) args.push('NOACK');
@@ -778,11 +784,20 @@ export class RStream extends RedisDataStructure {
   }
   /** Java `read(StreamMultiReadArgs)`: one XREAD over several streams.
    *  `streams` maps stream name → last seen id (use `0` for the beginning). */
-  async readMany(streams: Record<string, string>, count = 10): Promise<Map<string, StreamEntry[]>> {
+  async readMany(streams: Record<string, string>, count: number): Promise<Map<string, StreamEntry[]>>;
+  /** Java 4.7 `read(StreamMultiReadArgs)` — XREAD with COUNT/MAXCOUNT/MAXSIZE. */
+  async readMany(streams: Record<string, string>, opts: { count?: number; maxCount?: number; maxSize?: number }): Promise<Map<string, StreamEntry[]>>;
+  async readMany(streams: Record<string, string>, a: number | { count?: number; maxCount?: number; maxSize?: number } = 10): Promise<Map<string, StreamEntry[]>> {
     const names = Object.keys(streams);
     const out = new Map<string, StreamEntry[]>();
     if (names.length === 0) return out;
-    const res: any = await (this.redis as any).xread('COUNT', count, 'STREAMS', ...names, ...names.map((n) => streams[n]));
+    const opts = typeof a === 'number' ? { count: a } : a;
+    const args: (string | number)[] = [];
+    if (opts.count !== undefined && opts.count > 0) args.push('COUNT', opts.count);
+    if (opts.maxCount !== undefined && opts.maxCount > 0) args.push('MAXCOUNT', opts.maxCount);
+    if (opts.maxSize !== undefined && opts.maxSize > 0) args.push('MAXSIZE', opts.maxSize);
+    args.push('STREAMS', ...names, ...names.map((n) => streams[n]));
+    const res: any = await (this.redis as any).xread(...args);
     for (const [name, rows] of (res ?? []) as [string, [string, string[]][]][]) {
       out.set(String(name), ((rows ?? []) as [string, string[]][]).map(([eid, f]) => ({ id: String(eid), fields: this.decodeFields(f) })));
     }

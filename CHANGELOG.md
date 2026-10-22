@@ -1,3 +1,14 @@
+## 2.49.0 — 2026-10-23
+
+Phase 70 (part 2): RStream read 4.7 params.
+
+- `StreamReadGroupOptions` gains `maxCount` / `maxSize` (Java 4.7
+  `maxCount()`/`maxSize()` — XREADGROUP MAXCOUNT/MAXSIZE, Redis 8.x; sent
+  only when set, so older servers are unaffected until the option is used).
+- `readMany(streams, {count, maxCount, maxSize})` options overload
+  (XREAD COUNT/MAXCOUNT/MAXSIZE); the numeric-count form is unchanged.
+- Mock suite 137/137 (wire 29 + redisson 108).
+
 ## 2.48.0 — 2026-10-23
 
 Phase 70: RTimeSeries 4.8 expansion (full port of RedissonTimeSeries 4.8,
