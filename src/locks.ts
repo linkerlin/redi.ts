@@ -539,19 +539,37 @@ async function waitForWake(redis: Redis, channel: string, timeoutMs: number): Pr
 // RLock
 // ---------------------------------------------------------------------------
 
-export class RLock extends RedisDataStructure {
+/** Listener surface shared by HASH-backed lock types: expired/deleted key
+ *  events via KeyspaceListenerHub (Java RObservable parity; 4.6.1 leaves
+ *  newCondition() unimplemented). */
+abstract class LockObservable extends RedisDataStructure {
+  protected listenerHub: KeyspaceListenerHub;
+  constructor(redis: Redis, name: string) {
+    super(redis, name);
+    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
+  }
+  async addListener(listener: ObjectListener): Promise<number> {
+    return this.listenerHub.add(listener);
+  }
+  async removeListener(listenerId: number): Promise<void> {
+    await this.listenerHub.remove(listenerId);
+  }
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
+}
+
+export class RLock extends LockObservable {
   protected channel: string;
   protected clientId: string;
   protected watchdogMs: number;
   private timers = new Map<string, any>();
-  private listenerHub: KeyspaceListenerHub;
 
   constructor(redis: Redis, name: string, clientId: string, watchdogMs = 30000) {
     super(redis, name);
     this.channel = prefixName('redisson_lock__channel', name);
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
-    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
 
   getChannel(): string {
@@ -677,18 +695,6 @@ export class RLock extends RedisDataStructure {
   async isHeldByCurrentThread(threadId: number | string = 1): Promise<boolean> {
     return this.isHeldByThread(threadId);
   }
-  /** Java `RObservable.addListener`: expired/deleted key events for the lock
-   *  HASH. */
-  async addListener(listener: ObjectListener): Promise<number> {
-    return this.listenerHub.add(listener);
-  }
-  async removeListener(listenerId: number): Promise<void> {
-    await this.listenerHub.remove(listenerId);
-  }
-  /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
-  newCondition(): never {
-    throw new Error('UnsupportedOperationException');
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -809,7 +815,7 @@ export class RNonReentrantLock extends RLock {
 const FAIR_WAIT_MS = 5 * 60 * 1000;
 const NON_REENTRANT_MARKER = 'redi_non_reentrant';
 
-export class RFairLock extends RedisDataStructure {
+export class RFairLock extends LockObservable {
   protected channelPrefix: string;
   protected queueKey: string;
   protected timeoutKey: string;
@@ -817,7 +823,6 @@ export class RFairLock extends RedisDataStructure {
   protected watchdogMs: number;
   private timers = new Map<string, any>();
   protected reentrant: boolean;
-  private listenerHub: KeyspaceListenerHub;
 
   constructor(redis: Redis, name: string, clientId: string, watchdogMs = 30000, reentrant = true) {
     super(redis, name);
@@ -827,7 +832,6 @@ export class RFairLock extends RedisDataStructure {
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
     this.reentrant = reentrant;
-    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
 
   protected field(threadId: number | string = 1): string {
@@ -965,18 +969,6 @@ export class RFairLock extends RedisDataStructure {
     for (const t of this.timers.values()) clearInterval(t);
     this.timers.clear();
   }
-  /** Java `RObservable.addListener`: expired/deleted key events for the lock
-   *  HASH. */
-  async addListener(listener: ObjectListener): Promise<number> {
-    return this.listenerHub.add(listener);
-  }
-  async removeListener(listenerId: number): Promise<void> {
-    await this.listenerHub.remove(listenerId);
-  }
-  /** Java 4.6.1 `newCondition()` is explicitly unimplemented. */
-  newCondition(): never {
-    throw new Error('UnsupportedOperationException');
-  }
 }
 
 export class RNonReentrantFairLock extends RFairLock {
@@ -1006,18 +998,16 @@ export class RReadWriteLock extends RedisDataStructure {
   }
 }
 
-class RWBase extends RedisDataStructure {
+class RWBase extends LockObservable {
   protected clientId: string;
   protected watchdogMs: number;
   protected channel: string;
   private timers = new Map<string, any>();
-  private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, clientId: string, watchdogMs: number, channel: string) {
     super(redis, name);
     this.clientId = clientId;
     this.watchdogMs = watchdogMs;
     this.channel = channel;
-    this.listenerHub = new KeyspaceListenerHub(redis, name, { onExpired: 'expired', onDeleted: 'del' });
   }
   protected primary(tid: number | string): string {
     return `${this.clientId}:${tid}`;
@@ -1061,17 +1051,6 @@ class RWBase extends RedisDataStructure {
       await waitForWake(this.redis, this.channel, Math.min(remain, 1000));
       if (Date.now() >= deadline) return false;
     }
-  }
-  /** Java `RObservable.addListener`: expired/deleted key events for the RW HASH. */
-  async addListener(listener: ObjectListener): Promise<number> {
-    return this.listenerHub.add(listener);
-  }
-  async removeListener(listenerId: number): Promise<void> {
-    await this.listenerHub.remove(listenerId);
-  }
-  /** Java 4.6.1 read/write lock `newCondition()` is unimplemented. */
-  newCondition(): never {
-    throw new Error('UnsupportedOperationException');
   }
 }
 
@@ -1469,8 +1448,24 @@ export interface LockLike {
   unlock(threadId?: number | string): Promise<void>;
 }
 
-export class RMultiLock {
-  constructor(private locks: LockLike[]) {}
+/** MultiLock-family composites reject the Condition/listener surface
+ *  outright (Java 4.6.1 parity; RedLock inherits this from MultiLock there). */
+abstract class UnsupportedLockSurface {
+  newCondition(): never {
+    throw new Error('UnsupportedOperationException');
+  }
+  addListener(_listener: ObjectListener): never {
+    throw new Error('UnsupportedOperationException');
+  }
+  removeListener(_listenerId: number): never {
+    throw new Error('UnsupportedOperationException');
+  }
+}
+
+export class RMultiLock extends UnsupportedLockSurface {
+  constructor(private locks: LockLike[]) {
+    super();
+  }
   async tryLock(threadId: number | string = 1, leaseMs = 30000): Promise<boolean> {
     const acquired: LockLike[] = [];
     for (const l of this.locks) {
@@ -1505,21 +1500,12 @@ export class RMultiLock {
     }
     if (first) throw first;
   }
-  /** Java 4.6.1 MultiLock `newCondition()` throws. */
-  newCondition(): never {
-    throw new Error('UnsupportedOperationException');
-  }
-  /** Java 4.6.1 MultiLock listener APIs throw. */
-  addListener(_listener: ObjectListener): never {
-    throw new Error('UnsupportedOperationException');
-  }
-  removeListener(_listenerId: number): never {
-    throw new Error('UnsupportedOperationException');
-  }
 }
 
-export class RRedLock {
-  constructor(private locks: LockLike[]) {}
+export class RRedLock extends UnsupportedLockSurface {
+  constructor(private locks: LockLike[]) {
+    super();
+  }
   private quorum(): number {
     return Math.floor(this.locks.length / 2) + 1;
   }
@@ -1585,16 +1571,5 @@ export class RRedLock {
         // ignore not-held (quorum rollback parity)
       }
     }
-  }
-  /** Java 4.6.1 RedLock `newCondition()` throws. */
-  newCondition(): never {
-    throw new Error('UnsupportedOperationException');
-  }
-  /** Java 4.6.1 RedLock listener APIs throw (inherited from MultiLock). */
-  addListener(_listener: ObjectListener): never {
-    throw new Error('UnsupportedOperationException');
-  }
-  removeListener(_listenerId: number): never {
-    throw new Error('UnsupportedOperationException');
   }
 }

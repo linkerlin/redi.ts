@@ -593,6 +593,12 @@ export class RSearch {
     if (mode === 'UNF') out.push('UNF');
   }
 
+  private pushCommonFlags(out: string[], f: SearchFieldIndex): void {
+    if (f.indexMissing) out.push('INDEXMISSING');
+    this.pushSortable(out, f.sortable);
+    if (f.noIndex) out.push('NOINDEX');
+  }
+
   /** Convert structured fields to FT.CREATE/FT.ALTER schema tokens. */
   private structuredSchemaTokens(fields: SearchFieldIndex[]): string[] {
     const out: string[] = [];
@@ -608,9 +614,7 @@ export class RSearch {
           if (f.weight !== undefined) out.push('WEIGHT', String(f.weight));
           if (f.withSuffixTrie) out.push('WITHSUFFIXTRIE');
           if (f.indexEmpty) out.push('INDEXEMPTY');
-          if (f.indexMissing) out.push('INDEXMISSING');
-          this.pushSortable(out, f.sortable);
-          if (f.noIndex) out.push('NOINDEX');
+          this.pushCommonFlags(out, f);
           break;
         case 'TAG':
           out.push('TAG');
@@ -618,21 +622,15 @@ export class RSearch {
           if (f.separator !== undefined) out.push('SEPARATOR', f.separator);
           if (f.withSuffixTrie) out.push('WITHSUFFIXTRIE');
           if (f.indexEmpty) out.push('INDEXEMPTY');
-          if (f.indexMissing) out.push('INDEXMISSING');
-          this.pushSortable(out, f.sortable);
-          if (f.noIndex) out.push('NOINDEX');
+          this.pushCommonFlags(out, f);
           break;
         case 'NUMERIC':
           out.push('NUMERIC');
-          if (f.indexMissing) out.push('INDEXMISSING');
-          this.pushSortable(out, f.sortable);
-          if (f.noIndex) out.push('NOINDEX');
+          this.pushCommonFlags(out, f);
           break;
         case 'GEO':
           out.push('GEO');
-          if (f.indexMissing) out.push('INDEXMISSING');
-          this.pushSortable(out, f.sortable);
-          if (f.noIndex) out.push('NOINDEX');
+          this.pushCommonFlags(out, f);
           break;
         case 'GEOSHAPE':
           out.push('GEOSHAPE');

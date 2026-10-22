@@ -1,3 +1,22 @@
+## 2.45.2 — 2026-10-22
+
+Review follow-ups (2): duplication collapse, no behavior change. Full suite
+**308 tests / 70 files green with live Redis** (pattern-topic once flaked
+under 70-way parallel load, passes isolated and on rerun).
+
+- `locks.ts`: five copies of the listener trio collapsed —
+  `LockObservable` base (owns the `KeyspaceListenerHub` field + delegating
+  `addListener`/`removeListener`/`newCondition`) behind
+  RLock/RFairLock/RWBase; `UnsupportedLockSurface` base (throwing trio)
+  behind RMultiLock/RRedLock.
+- `infra.ts`: `pushCommonFlags` extracts the identical
+  INDEXMISSING/SORTABLE/NOINDEX tail from the TEXT/TAG/NUMERIC/GEO schema
+  cases (GEOSHAPE flag order differs, VECTOR has none — both left alone).
+- `collections.ts` RBlockingQueue/RBlockingDeque method pairs deliberately
+  NOT deduped: 3-line interface plumbing across sibling classes (mirrors
+  Java's own sibling layout); extraction would only trade duplication for
+  forwarding.
+
 ## 2.45.1 — 2026-10-22
 
 Review follow-ups from the two-axis audit of the full 2-week history
