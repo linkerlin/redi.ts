@@ -43,6 +43,9 @@ if (!hasRedis) console.warn(`[live] Redis at ${REDIS_URL} unreachable - live cas
 
 describe('live phase 44: RSearch hybrid/profile/cursor/alter', () => {
   it('hybrid KNN/RANGE with RRF/LINEAR, profiles, cursors and alter', async () => {
+    // RediSearch can transiently fail index writes under heavy parallel load
+    // (SEARCH_SAFE_DEPLETER_FAILURE ... "Please retry") — one retry, then fail.
+    const attempt = async (): Promise<void> => {
     if (!hasRedis) return;
     const r = Redisson.create({ address: REDIS_URL });
     const idx = `${NS}hy`;
@@ -140,6 +143,15 @@ describe('live phase 44: RSearch hybrid/profile/cursor/alter', () => {
       await r.getSearch().dropIndex(idx, true).catch(() => undefined);
       await r.getSearch().dropIndex(altIdx, true).catch(() => undefined);
       await r.shutdown();
+    }
+    };
+    try {
+      await attempt();
+    } catch (e) {
+      if (!/SEARCH_SAFE_DEPLETER_FAILURE|please retry/i.test(String((e as any)?.message ?? e))) throw e;
+      console.warn('[phase44] transient RediSearch index-lock failure — retrying once');
+      await new Promise((x) => setTimeout(x, 1000));
+      await attempt();
     }
   }, 120000);
 });

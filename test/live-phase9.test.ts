@@ -113,6 +113,10 @@ describe('live interop phase 9: multilock/redlock/lcm-strategies/cache-paths/mis
       await cleanExact(r, m1, m2);
       const ml = r.newMultiLock(r.getLock(m1), r.getLock(m2));
       expect(await ml.tryLock(1, 30000)).toBe(true);
+      // diagnostic (CI flake hunt): split "lock not persisted" from "probe lied"
+      const heldNow = ((await r.redis.exists(m1, m2)) as number) === 2;
+      if (!heldNow) console.warn(`[phase9] multilock returned true but EXISTS m1,m2 = ${await r.redis.exists(m1, m2)}`);
+      expect(heldNow).toBe(true);
       expect(await probe(`lock-try ${m1}`)).toBe('CONTENDED');
       expect(await probe(`lock-try ${m2}`)).toBe('CONTENDED');
       await ml.unlock(1);
