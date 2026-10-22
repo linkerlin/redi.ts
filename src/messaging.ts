@@ -1270,6 +1270,35 @@ end`;
     const m = await this.redis.lrange(this.name, -1, -1);
     return m.length === 0 ? null : (this.decodeValue(m[0]) as V);
   }
+  /** Java 4.8 `addAll(Collection)`: bulk RPUSH in 5000-chunks, then LTRIM the
+   *  overflow (requires capacity to be set). */
+  async addAll(values: V[]): Promise<boolean> {
+    if (values.length === 0) return false;
+    const enc = values.map((v) => this.encodeValue(v));
+    const s = `local limit = redis.call('get', KEYS[2])
+assert(limit ~= false, 'RingBuffer capacity is not defined')
+local size = 0
+for i = 1, #ARGV, 5000 do
+    size = redis.call('rpush', KEYS[1], unpack(ARGV, i, math.min(i + 4999, #ARGV)))
+end
+local extraSize = size - tonumber(limit)
+if extraSize > 0 then
+    redis.call('ltrim', KEYS[1], extraSize, -1)
+end
+return 1`;
+    try {
+      await luaEval(this.redis, s, 2, this.name, this.capacityKey, ...enc);
+    } catch (e) {
+      if (String((e as any)?.message ?? e).includes('capacity')) throw e;
+      // mock fallback
+      const cap = await this.capacity();
+      if (cap === null) throw new Error('RingBuffer capacity is not defined');
+      await this.redis.rpush(this.name, ...enc);
+      const len = await this.redis.llen(this.name);
+      if (len > cap) await this.redis.ltrim(this.name, len - cap, -1);
+    }
+    return true;
+  }
   async size(): Promise<number> {
     return this.redis.llen(this.name);
   }

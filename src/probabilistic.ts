@@ -1863,6 +1863,86 @@ export class RTDigest extends RedisDataStructure {
   }
 }
 
+/** Java 4.8 `CountMinInitArgs`: byDimensions(width, depth) or
+ *  byProbability(errorRate, probability) — the two are separate CMS commands. */
+export interface CountMinInitArgs {
+  byDimensions: boolean;
+  width?: number;
+  depth?: number;
+  errorRate?: number;
+  probability?: number;
+}
+export const CountMinInitArgs = {
+  byDimensions(width: number, depth: number): CountMinInitArgs {
+    return { byDimensions: true, width, depth };
+  },
+  byProbability(errorRate: number, probability: number): CountMinInitArgs {
+    return { byDimensions: false, errorRate, probability };
+  },
+};
+/** Java 4.8 `CountMinMergeArgs`. */
+export interface CountMinMergeArgs { keys: string[]; weights?: number[] }
+
+/** Java 4.8 `RCountMin`: Count-Min Sketch over the RedisBloom CMS commands
+ *  (CMS.INITBYDIM/INITBYPROB/INCRBY/QUERY/MERGE/INFO; capability-gated). */
+export class RCountMin<V = any> extends RedisDataStructure {
+  async init(args: CountMinInitArgs): Promise<void> {
+    if (args.byDimensions) {
+      await tryDo(this.redis, 'CMS.INITBYDIM', this.name, args.width!, args.depth!);
+    } else {
+      await tryDo(this.redis, 'CMS.INITBYPROB', this.name, args.errorRate!, args.probability!);
+    }
+  }
+  /** Java `add(element[, increment])` / `add(Map)`: CMS.INCRBY, returns the
+   *  count after increment (per-element map for the Map form). */
+  async add(element: V, increment?: number): Promise<number>;
+  async add(elements: Map<V, number>): Promise<Map<V, number>>;
+  async add(a: V | Map<V, number>, b?: number): Promise<number | Map<V, number>> {
+    if (a instanceof Map) {
+      const entries = [...a.entries()];
+      if (entries.length === 0) return new Map();
+      const args: (string | number)[] = ['CMS.INCRBY', this.name];
+      for (const [e, inc] of entries) {
+        if (inc < 0) throw new Error("redi.ts: increment can't be negative");
+        args.push(this.encodeValue(e), inc);
+      }
+      const r = await tryDo(this.redis, ...args);
+      const out = new Map<V, number>();
+      entries.forEach(([e], i) => out.set(e, toNumber((r as any[])[i])));
+      return out;
+    }
+    const inc = b ?? 1;
+    if (inc < 0) throw new Error("redi.ts: increment can't be negative");
+    const r = await tryDo(this.redis, 'CMS.INCRBY', this.name, this.encodeValue(a as V), inc);
+    return toNumber(Array.isArray(r) ? r[0] : r);
+  }
+  /** Java `count(element)` / `count(Collection)`: CMS.QUERY. */
+  async count(element: V): Promise<number>;
+  async count(elements: V[]): Promise<Map<V, number>>;
+  async count(a: V | V[]): Promise<number | Map<V, number>> {
+    const list = Array.isArray(a) ? a : [a];
+    if (list.length === 0) return new Map();
+    const args: (string | number)[] = ['CMS.QUERY', this.name, ...list.map((e) => this.encodeValue(e))];
+    const r = await tryDo(this.redis, ...args);
+    if (Array.isArray(a)) {
+      const out = new Map<V, number>();
+      (a as V[]).forEach((e, i) => out.set(e, toNumber((r as any[])[i])));
+      return out;
+    }
+    return toNumber(Array.isArray(r) ? r[0] : r);
+  }
+  /** Java 4.8 `mergeWith(CountMinMergeArgs)`: CMS.MERGE dest numkeys src [WEIGHTS]. */
+  async mergeWith(args: CountMinMergeArgs): Promise<void> {
+    const a: (string | number)[] = ['CMS.MERGE', this.name, args.keys.length, ...args.keys];
+    if (args.weights?.length) a.push('WEIGHTS', ...args.weights);
+    await tryDo(this.redis, ...a);
+  }
+  /** Java 4.8 `getInfo()`: CMS.INFO flat fields. */
+  async getInfo(): Promise<Record<string, any>> {
+    return flatRecord(await tryDo(this.redis, 'CMS.INFO', this.name));
+  }
+}
+
 export class RGcra extends RedisDataStructure {
   async acquire(limit: number, periodMs: number): Promise<boolean> {
     try {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import RedisMock from 'ioredis-mock';
-import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs } from '../src';
+import { Redisson, StringCodec, JsonCodec, CompareAndDeleteArgs, CountMinInitArgs, QueueMoveElementsArgs } from '../src';
 import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBackOff } from '../src/locks';
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
@@ -2265,6 +2265,32 @@ describe('phase 68: upstream 4.7/4.8 interop fixes (mock)', () => {
     expect(await rb.peekLast()).toBe(4);
     expect(await rb.readNewest(0)).toEqual([]);
     expect(await rb.readOldest(-1)).toEqual([]);
+    // Java 4.8 addAll: bulk add then capacity trim (mock fallback path)
+    await rb.addAll([5, 6]);
+    expect(await rb.readAll()).toEqual([4, 5, 6]);
+    expect(await rb.addAll([])).toBe(false);
     await r.shutdown();
+  });
+});
+
+describe('phase 69: upstream 4.7/4.8 API objects (mock)', () => {
+  it('CountMin args shapes and negative guards', async () => {
+    const r = make();
+    const byDim = CountMinInitArgs.byDimensions(100, 5);
+    expect(byDim.byDimensions).toBe(true);
+    expect(byDim.width).toBe(100);
+    const byProb = CountMinInitArgs.byProbability(0.01, 0.99);
+    expect(byProb.byDimensions).toBe(false);
+    const cm = r.getCountMin('p69:cm');
+    await expect(cm.add('x', -1)).rejects.toThrow(/negative/);
+    await expect(cm.add(new Map([['x' as any, -2]]))).rejects.toThrow(/negative/);
+    await r.shutdown();
+  });
+  it('QueueMoveElementsArgs builder shape (Java 4.7)', () => {
+    const single = QueueMoveElementsArgs.to('dest');
+    const a = single.count(3).oneByOne() as any;
+    expect(a).toMatchObject({ dest: 'dest', selector: 'COUNT', count: 3, ordering: 'OBO' });
+    const b = QueueMoveElementsArgs.to('d2').exactly(2).bulk() as any;
+    expect(b).toMatchObject({ dest: 'd2', selector: 'EXACTLY', count: 2, ordering: 'BULK' });
   });
 });

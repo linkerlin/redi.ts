@@ -1,3 +1,29 @@
+## 2.47.0 — 2026-10-23
+
+Phase 69: upstream 4.8 OSS surface (part 1). Full suite:
+**317 tests / 72 files** (local Redis offline at release time — live-phase69
+cases are command-gated and exercised by CI's redis:8 service job).
+
+- **`RCountMin`** (new structure, Java 4.8): Count-Min Sketch over the
+  RedisBloom CMS commands — `init(CountMinInitArgs.byDimensions|byProbability)`
+  (CMS.INITBYDIM/INITBYPROB), `add(element[, incr])` / `add(Map)` (CMS.INCRBY,
+  negative increments rejected), `count(element|Collection)` (CMS.QUERY),
+  `mergeWith(CountMinMergeArgs)` (CMS.MERGE + WEIGHTS), `getInfo()` (CMS.INFO).
+  Factory `getCountMin(name)`.
+- `RSet.countUnionApprox([limit,] names...)` (SUNIONCARD APPROX) and
+  `countDiff([limit,] names...)` (SDIFFCARD) — Java 4.7.
+- `RQueue.move(QueueMoveElementsArgs)` (LMOVEM; `to(dest).count(n)/.exactly(n)
+  .bulk()/.oneByOne()`) and blocking `RBlockingQueue.move(timeoutMs, args)`
+  (BLMOVEM, dedicated connection) — Java 4.7. RDeque/RBlockingDeque `move`
+  signatures widened to overloads so both the LMOVE and LMOVEM forms coexist.
+- `RRingBuffer.addAll(values)` — Java 4.8 bulk add (RPUSH 5000-chunks + LTRIM
+  overflow in one Lua; mock fallback path).
+- Tests: +2 mock (args shapes, negative guards, ring addAll), +2 live
+  (`live-phase69`, CMS/SDIFFCARD/SUNIONCARD/LMOVEM all command-gated).
+- Remaining 4.8 surface tracked for phase 70+: RTimeSeries 30+ method
+  expansion, RTimeSeriesNative(+Natives), RMaps, RStream read/readGroup
+  maxCount/maxSize, SetExpiredListener, PrefixNameMapper.
+
 ## 2.46.0 — 2026-10-23
 
 Phase 68: upstream Redisson 4.7/4.8 interop alignment (local checkout

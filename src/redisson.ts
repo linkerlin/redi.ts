@@ -16,7 +16,7 @@ import {
   RFencedLock, RMultiLock, RRedLock, BackOff, LockLike,
 } from './locks.js';
 import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging.js';
-import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic.js';
+import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RCountMin, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RRateLimiter, RateType } from './probabilistic.js';
 import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RMaps, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
 
 /**
@@ -302,6 +302,9 @@ export class Redisson {
   }
   getTDigest(name: string): RTDigest {
     return new RTDigest(this.redis, name, this.codec);
+  }
+  getCountMin(name: string): RCountMin {
+    return new RCountMin(this.redis, name, this.codec);
   }
   getGcra(name: string): RGcra {
     return new RGcra(this.redis, name, this.codec);

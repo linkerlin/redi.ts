@@ -10,6 +10,29 @@ import { JsonCodec } from './codec.js';
 import { isUnsupportedCommand, luaEval, prefixName, sleep, toNumber, withDedicatedRedis } from './util.js';
 import { KeyspaceListenerHub, type ObjectListener } from './listeners.js';
 
+/** Java 4.7 `QueueMoveElementsArgs` builder shape: `to(dest)` → `.count(n)` /
+ *  `.exactly(n)` → `.bulk()` / `.oneByOne()`. Without an amount selector the
+ *  move is a single element. */
+export interface QueueMoveElementsArgs {
+  dest: string;
+  selector?: 'COUNT' | 'EXACTLY';
+  count?: number;
+  ordering: 'BULK' | 'OBO';
+}
+export const QueueMoveElementsArgs = {
+  to(dest: string) {
+    const args: QueueMoveElementsArgs = { dest, ordering: 'BULK' };
+    const order = () => ({
+      bulk(): QueueMoveElementsArgs { args.ordering = 'BULK'; return args; },
+      oneByOne(): QueueMoveElementsArgs { args.ordering = 'OBO'; return args; },
+    });
+    return {
+      count(n: number) { args.selector = 'COUNT'; args.count = n; return order(); },
+      exactly(n: number) { args.selector = 'EXACTLY'; args.count = n; return order(); },
+    };
+  },
+};
+
 export class RBucket<V = any> extends RedisDataStructure {
   private listenerHub: KeyspaceListenerHub;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
@@ -539,6 +562,27 @@ export class RSet<V = any> extends RedisKeyedStructure<V> {
   async countUnion(...names: string[]): Promise<number> {
     return toNumber(await this.redis.call('SUNIONCARD', 1 + names.length, this.name, ...names));
   }
+  /** Java 4.7 `countUnionApprox(names...)` / `(limit, names...)`:
+   *  SUNIONCARD with APPROX (HyperLogLog estimate above 100k). */
+  async countUnionApprox(...names: string[]): Promise<number>;
+  async countUnionApprox(limit: number, ...names: string[]): Promise<number>;
+  async countUnionApprox(a: string | number, ...rest: string[]): Promise<number> {
+    const limit = typeof a === 'number' ? a : 0;
+    const names = typeof a === 'number' ? rest : [a, ...rest];
+    const args: (string | number)[] = ['SUNIONCARD', 1 + names.length, this.name, ...names, 'APPROX'];
+    if (limit > 0) args.push('LIMIT', limit);
+    return toNumber(await (this.redis as any).call(...args));
+  }
+  /** Java 4.7 `countDiff(names...)` / `(limit, names...)`: SDIFFCARD. */
+  async countDiff(...names: string[]): Promise<number>;
+  async countDiff(limit: number, ...names: string[]): Promise<number>;
+  async countDiff(a: string | number, ...rest: string[]): Promise<number> {
+    const limit = typeof a === 'number' ? a : 0;
+    const names = typeof a === 'number' ? rest : [a, ...rest];
+    const args: (string | number)[] = ['SDIFFCARD', 1 + names.length, this.name, ...names];
+    if (limit > 0) args.push('LIMIT', limit);
+    return toNumber(await (this.redis as any).call(...args));
+  }
   /** Java `countIntersection(names...)` / `countIntersection(limit, names...)`:
    *  SINTERCARD with an optional LIMIT (0 = unlimited), with a client-side
    *  SMEMBERS fallback for mocks/older Redis. */
@@ -702,6 +746,15 @@ export class RQueue<V = any> extends RedisDataStructure {
     const raw = await this.redis.rpoplpush(this.name, dest);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
+  /** Java 4.7 `move(QueueMoveElementsArgs)`: LMOVEM — head of this queue to
+   *  the tail of dest; no amount selector moves a single element, `count(n)`
+   *  moves up to n, `exactly(n)` fails unless n are available. */
+  async move(args: QueueMoveElementsArgs): Promise<V[]> {
+    const a: (string | number)[] = [this.name, args.dest, 'LEFT', 'RIGHT'];
+    if (args.selector) a.push(args.selector, args.count!, args.ordering);
+    const r = await (this.redis as any).call('LMOVEM', ...a);
+    return (Array.isArray(r) ? r : []).map((x: any) => this.decodeValue(x) as V);
+  }
   /** Java `RQueue.indexOf(V)`: first matching index (encoded comparison). */
   async indexOf(value: V): Promise<number> {
     const all = await this.redis.lrange(this.name, 0, -1);
@@ -802,9 +855,13 @@ export class RDeque<V = any> extends RQueue<V> {
     }
     return arr.map((x) => this.decodeValue(x) as V);
   }
-  /** Java `move(DequeMoveArgs)`: atomic LMOVE into `dest`. */
-  async move(dest: string, from: 'LEFT' | 'RIGHT' = 'LEFT', to: 'LEFT' | 'RIGHT' = 'LEFT'): Promise<V | null> {
-    const raw = await (this.redis as any).lmove(this.name, dest, from, to);
+  /** Java `move(DequeMoveArgs)`: atomic LMOVE into `dest`.
+   *  (Java 4.7 `move(QueueMoveElementsArgs)` LMOVEM is inherited from RQueue.) */
+  move(args: QueueMoveElementsArgs): Promise<V[]>;
+  move(dest: string, from?: 'LEFT' | 'RIGHT', to?: 'LEFT' | 'RIGHT'): Promise<V | null>;
+  async move(a: QueueMoveElementsArgs | string, from: 'LEFT' | 'RIGHT' = 'LEFT', to: 'LEFT' | 'RIGHT' = 'LEFT'): Promise<V[] | V | null> {
+    if (typeof a !== 'string') return super.move(a);
+    const raw = await (this.redis as any).lmove(this.name, a, from, to);
     return raw === null || raw === undefined ? null : (this.decodeValue(raw) as V);
   }
 }
@@ -1291,6 +1348,21 @@ export class RBlockingQueue<V = any> extends RQueue<V> {
   async takeLastAndOfferFirstTo(dest: string): Promise<V | null> {
     return this.pollLastAndOfferFirstTo(dest, null);
   }
+  /** Java 4.7 blocking `move(Duration, QueueMoveElementsArgs)`:
+   *  BLMOVEM on a dedicated connection (float seconds; null = forever).
+   *  The non-blocking `move(args)` form is inherited from RQueue. */
+  move(args: QueueMoveElementsArgs): Promise<V[]>;
+  move(timeoutMs: number | null, args: QueueMoveElementsArgs): Promise<V[]>;
+  async move(a: number | null | QueueMoveElementsArgs, b?: QueueMoveElementsArgs): Promise<V[]> {
+    if (typeof a !== 'number' && a !== null) return super.move(a);
+    const args = b!;
+    return withDedicatedRedis(this.redis, async (conn: any) => {
+      const c: (string | number)[] = [this.name, args.dest, 'LEFT', 'RIGHT', a === null ? 0 : a / 1000];
+      if (args.selector) c.push(args.selector, args.count!, args.ordering);
+      const r = await conn.call('BLMOVEM', ...c);
+      return (Array.isArray(r) ? r : []).map((x: any) => this.decodeValue(x) as V);
+    });
+  }
 }
 
 export class RBlockingDeque<V = any> extends RDeque<V> {
@@ -1329,8 +1401,11 @@ export class RBlockingDeque<V = any> extends RDeque<V> {
   /** Java `RBlockingDeque.move(Duration, DequeMoveArgs)` → LMOVE: atomically
    *  pop one element from `from` here and push it to `to` of `dest` (no
    *  blocking; `null` when this deque is empty). */
-  async move(dest: string, from: ListSide = 'LEFT', to: ListSide = 'LEFT'): Promise<V | null> {
-    const raw = await blockingListMove(this.redis, this.name, dest, from, to, 0);
+  move(args: QueueMoveElementsArgs): Promise<V[]>;
+  move(dest: string, from?: ListSide, to?: ListSide): Promise<V | null>;
+  async move(a: QueueMoveElementsArgs | string, from: ListSide = 'LEFT', to: ListSide = 'LEFT'): Promise<V[] | V | null> {
+    if (typeof a !== 'string') return super.move(a as QueueMoveElementsArgs);
+    const raw = await blockingListMove(this.redis, this.name, a, from, to, 0);
     return raw === null ? null : (this.decodeValue(raw) as V);
   }
   /** Blocking LMOVE (`BLMOVE`). `timeoutMs === null` blocks forever. */
