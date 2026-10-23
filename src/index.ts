@@ -9,6 +9,7 @@ export * from './caches.js';
 export * from './messaging.js';
 export * from './listeners.js';
 export * from './probabilistic.js';
+export * from './arrays.js';
 export * from './infra.js';
 export * from './batch.js';
 export * from './redisson.js';

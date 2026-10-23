@@ -13,6 +13,9 @@ import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import type { RBatch } from './infra.js';
 import type { ScoredEntry } from './collections.js';
+import { toNumber } from './util.js';
+import type { CountMinInitArgs, TSSample, TSInfo } from './probabilistic.js';
+import { TSCreateArgs, TSAddArgs, TSRangeArgs, tsToSample, tsToSamples, tsInfoDecode } from './probabilistic.js';
 
 function dec<T>(fn: (raws: any[]) => T) {
   return fn;
@@ -495,5 +498,104 @@ export class BatchMapCacheNative<K = any, V = any> {
         return v === null || v === undefined ? -2 : Number(v);
       }),
     );
+  }
+}
+
+/** Java 4.8 `RedissonBatch.getCountMin(...)`: batched `RCountMin` facade —
+ *  the same CMS.* commands src/probabilistic.ts RCountMin issues, queued on
+ *  the pipeline; reads resolve when `execute()` runs. Core ops only
+ *  (init/add/count/getInfo). */
+export class BatchCountMin<V = any> {
+  constructor(private batch: RBatch, private name: string, private codec: Codec = new JsonCodec()) {}
+  private enc(v: unknown): string {
+    return this.codec.encode(v);
+  }
+  /** Java `init(CountMinInitArgs)`: CMS.INITBYDIM / CMS.INITBYPROB. */
+  init(args: CountMinInitArgs): void {
+    if (args.byDimensions) {
+      this.batch.enqueue((p) => (p as any).call('CMS.INITBYDIM', this.name, args.width, args.depth), () => undefined);
+    } else {
+      this.batch.enqueue((p) => (p as any).call('CMS.INITBYPROB', this.name, args.errorRate, args.probability), () => undefined);
+    }
+  }
+  /** Java `add(element[, increment])`: CMS.INCRBY — count after increment. */
+  add(element: V, increment = 1): Promise<number> {
+    return this.batch.enqueue(
+      (p) => (p as any).call('CMS.INCRBY', this.name, this.enc(element), String(increment)),
+      dec((r) => toNumber(Array.isArray(r[0]) ? r[0][0] : r[0])),
+    );
+  }
+  /** Java `count(element)`: CMS.QUERY. */
+  count(element: V): Promise<number> {
+    return this.batch.enqueue(
+      (p) => (p as any).call('CMS.QUERY', this.name, this.enc(element)),
+      dec((r) => toNumber(Array.isArray(r[0]) ? r[0][0] : r[0])),
+    );
+  }
+  /** Java `getInfo()`: CMS.INFO flat fields. */
+  getInfo(): Promise<Record<string, any>> {
+    return this.batch.enqueue(
+      (p) => (p as any).call('CMS.INFO', this.name),
+      dec((r) => {
+        const out: Record<string, any> = {};
+        const flat: any[] = (Array.isArray(r[0]) ? r[0] : []) as any[];
+        for (let i = 0; i + 1 < flat.length; i += 2) out[String(flat[i])] = flat[i + 1];
+        return out;
+      }),
+    );
+  }
+}
+
+/** Java 4.8 `RedissonBatch.getTimeSeriesNative(...)`: batched
+ *  `RTimeSeriesNative` facade — the same TS.* commands
+ *  src/probabilistic.ts RTimeSeriesNative issues, queued on the pipeline.
+ *  Core ops only (create/add/addCurrent/get/range/rangeReversed/getInfo). */
+export class BatchTimeSeriesNative {
+  constructor(private batch: RBatch, private name: string) {}
+  /** Java `create()` / `create(TSCreateArgs)`: TS.CREATE. */
+  create(args?: TSCreateArgs): void {
+    const cmdArgs: (string | number)[] = [this.name];
+    args?.appendCreationOptions(cmdArgs);
+    this.batch.enqueue((p) => (p as any).call('TS.CREATE', ...cmdArgs.map(String)), () => undefined);
+  }
+  /** Java `add(long, double)` / `add(TSAddArgs)`: TS.ADD — resolves with the
+   *  sample timestamp. */
+  add(a: number | TSAddArgs, value?: number): Promise<number> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') cmdArgs.push(a, value!);
+    else a.appendArgs(cmdArgs);
+    return this.batch.enqueue(
+      (p) => (p as any).call('TS.ADD', ...cmdArgs.map(String)),
+      dec((r) => toNumber(r[0])),
+    );
+  }
+  /** Java `addCurrent(double)`: TS.ADD key * value (server-stamped). */
+  addCurrent(value: number): Promise<number> {
+    return this.batch.enqueue(
+      (p) => (p as any).call('TS.ADD', this.name, '*', String(value)),
+      dec((r) => toNumber(r[0])),
+    );
+  }
+  /** Java `get()`: TS.GET — last sample, null when empty. */
+  get(): Promise<TSSample | null> {
+    return this.batch.enqueue((p) => (p as any).call('TS.GET', this.name), dec((r) => tsToSample(r[0])));
+  }
+  /** Java `range(long, long)` / `range(TSRangeArgs)`: TS.RANGE. */
+  range(a: number | TSRangeArgs, to?: number): Promise<TSSample[]> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') cmdArgs.push(a, to!);
+    else a.appendRangeOptions(cmdArgs, []);
+    return this.batch.enqueue((p) => (p as any).call('TS.RANGE', ...cmdArgs.map(String)), dec((r) => tsToSamples(r[0])));
+  }
+  /** Java `rangeReversed(long, long)` / `rangeReversed(TSRangeArgs)`: TS.REVRANGE. */
+  rangeReversed(a: number | TSRangeArgs, to?: number): Promise<TSSample[]> {
+    const cmdArgs: (string | number)[] = [this.name];
+    if (typeof a === 'number') cmdArgs.push(a, to!);
+    else a.appendRangeOptions(cmdArgs, []);
+    return this.batch.enqueue((p) => (p as any).call('TS.REVRANGE', ...cmdArgs.map(String)), dec((r) => tsToSamples(r[0])));
+  }
+  /** Java `getInfo()`: TS.INFO. */
+  getInfo(): Promise<TSInfo> {
+    return this.batch.enqueue((p) => (p as any).call('TS.INFO', this.name), dec((r) => tsInfoDecode(r[0])));
   }
 }

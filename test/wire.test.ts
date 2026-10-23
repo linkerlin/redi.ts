@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { JsonCodec, StringCodec, javaTypeWrap, unwrap } from '../src/codec';
 import { prefixName, suffixName, highwayHash128, multimapInternalId, bloomBitIndex, packMapCacheValue, unpackMapCacheValue, packTimeSeriesMember, unpackTimeSeriesMember, unpackDelayedMember, encodeMapCacheEvent, decodeMapCacheEvent, keySynchronizerName, hash128toBase64 } from '../src/util';
+import { ArrayGrepArgs, RCircularBuffer, buildGrepArgs, decodeArrayEntries, decodeArrayInfo, decodeArrayFullInfo } from '../src/arrays';
 
 describe('codec (JsonJacksonCodec default typing)', () => {
   const c = new JsonCodec();
@@ -177,5 +178,50 @@ describe('key synchronizer names (Java RMap/RSet getLock family)', () => {
       .toBe(`{TsJavaT:p19:probe}:${h}:rw_lock`);
     expect(keySynchronizerName('TsJavaT:p19:probe', '"k1"', 'permitexpirablesemaphore'))
       .toBe(`{TsJavaT:p19:probe}:${h}:permitexpirablesemaphore`);
+  });
+});
+
+describe('array grep args + ARINFO/ARSCAN decoders (Java ArrayGrepParams shapes)', () => {
+  const enc = (v: any) => JSON.stringify(v); // scalar-strategy stand-in for codec encode
+  it('grep argv order: predicates, AND/OR, LIMIT, WITHVALUES, NOCASE', () => {
+    const args = ArrayGrepArgs.exact('v1').withGlob('a*').withRegex('^b').or().limit(5).noCase();
+    expect(buildGrepArgs('k', '-', '+', args, enc, false))
+      .toEqual(['k', '-', '+', 'EXACT', '"v1"', 'GLOB', 'a*', 'RE', '^b', 'OR', 'LIMIT', 5, 'NOCASE']);
+    expect(buildGrepArgs('k', 0, 9, ArrayGrepArgs.match('m').and(), enc, true))
+      .toEqual(['k', 0, 9, 'MATCH', '"m"', 'AND', 'WITHVALUES']);
+  });
+  it('grep builders validate like Java', () => {
+    expect(() => buildGrepArgs('k', '-', '+', new ArrayGrepArgs(), enc, false)).toThrow(/predicate/);
+    expect(() => ArrayGrepArgs.exact('x').limit(0)).toThrow(/positive/);
+    expect(() => ArrayGrepArgs.glob(null as any)).toThrow(/null/);
+  });
+  it('ArrayEntry decode: flat RESP2 pairs and nested form', () => {
+    const jdec = (x: any) => (x === null ? null : JSON.parse(x as string));
+    expect(decodeArrayEntries([0, '"a"', 2, '"b"'], jdec))
+      .toEqual([{ index: 0, value: 'a' }, { index: 2, value: 'b' }]);
+    expect(decodeArrayEntries([[0, '"a"'], [2, null]], jdec))
+      .toEqual([{ index: 0, value: 'a' }, { index: 2, value: null }]);
+    expect(decodeArrayEntries(null, jdec)).toEqual([]);
+  });
+  it('ArrayInfo / ArrayFullInfo decode from flat ARINFO replies', () => {
+    const flat = ['count', 3, 'len', 11, 'next-insert-index', 2, 'slices', 1, 'directory-size', 8,
+      'super-dir-entries', 2, 'slice-size', 64];
+    expect(decodeArrayInfo(flat)).toEqual({ count: 3, length: 11, nextInsertIndex: 2, slices: 1,
+      directorySize: 8, superDirectoryEntries: 2, sliceSize: 64 });
+    const full = [...flat, 'dense-slices', 1, 'sparse-slices', 0, 'avg-dense-size', '42.5',
+      'avg-dense-fill', '0.9', 'avg-sparse-size', '3.25'];
+    const decoded = decodeArrayFullInfo(full);
+    expect(decoded.count).toBe(3);
+    expect(decoded.denseSlices).toBe(1);
+    expect(decoded.sparseSlices).toBe(0);
+    expect(decoded.averageDenseSize).toBeCloseTo(42.5, 10);
+    expect(decoded.averageDenseFill).toBeCloseTo(0.9, 10);
+    expect(decoded.averageSparseSize).toBeCloseTo(3.25, 10);
+  });
+  it('circular buffer settings key is hash-tagged prefixName', () => {
+    const cb = new RCircularBuffer({} as any, 'cb');
+    expect(cb.settingsName).toBe('redisson_acb:{cb}');
+    const tagged = new RCircularBuffer({} as any, '{tenant}:cb');
+    expect(tagged.settingsName).toBe('redisson_acb:{tenant}:cb');
   });
 });

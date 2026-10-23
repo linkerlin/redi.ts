@@ -17,7 +17,8 @@ import {
 } from './locks.js';
 import { RTopic, RPatternTopic, RShardedTopic, RReliableTopic, RStream, RDelayedQueue, RRingBuffer, RBinaryStream } from './messaging.js';
 import { RBloomFilter, RBloomFilterNative, RCuckooFilter, RTopK, RTDigest, RGcra, RCountMin, RHyperLogLog, RGeo, RBitSet, RTimeSeries, RTimeSeriesNative, RTimeSeriesNatives, RRateLimiter, RateType } from './probabilistic.js';
-import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RArray, RCircularBuffer, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
+import { RKeys, RScript, RFunction, RSearch, RJsonBucket, RJsonBuckets, RVectorSet, RPriorityQueue, RPriorityBlockingQueue, RPriorityDeque, RPriorityBlockingDeque, RTransferQueue, RBatch, RSetMultimapCacheNative, RListMultimapCacheNative, RRedisNodes, RClientSideCaching } from './infra.js';
+import { RArray, RCircularBuffer } from './arrays.js';
 
 /**
  * Accepted client shapes: a single ioredis connection or an ioredis Cluster.
@@ -402,11 +403,19 @@ export class Redisson {
   getPriorityBlockingDeque<V>(name: string, codec?: Codec): RPriorityBlockingDeque<V> {
     return new RPriorityBlockingDeque<V>(this.redis, this.mapped(name), codec ?? this.codec);
   }
-  getArray<V>(name: string): RArray<V> {
-    return new RArray<V>(this.redis, this.mapped(name), this.codec);
+  /** Java 4.8 `RArray`: Redis 8.8+ ARRAY type (AR.* commands). */
+  getArray<V>(name: string, codec?: Codec): RArray<V> {
+    return new RArray<V>(this.redis, this.mapped(name), codec ?? this.codec);
   }
-  getCircularBuffer<V>(name: string): RCircularBuffer<V> {
-    return new RCircularBuffer<V>(this.redis, this.mapped(name), this.codec);
+  getRArray<V>(name: string, codec?: Codec): RArray<V> {
+    return this.getArray(name, codec);
+  }
+  /** Java 4.8 `RCircularBuffer`: ARRAY-backed ring buffer. */
+  getCircularBuffer<V>(name: string, codec?: Codec): RCircularBuffer<V> {
+    return new RCircularBuffer<V>(this.redis, this.mapped(name), codec ?? this.codec);
+  }
+  getRCircularBuffer<V>(name: string, codec?: Codec): RCircularBuffer<V> {
+    return this.getCircularBuffer(name, codec);
   }
   createBatch(): RBatch {
     return new RBatch(this.redis);

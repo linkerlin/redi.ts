@@ -1,6 +1,7 @@
 /**
  * Infrastructure facades: RKeys, RScript, RFunction, RSearch, JsonBucket(s),
- * VectorSet, RBatch, RPriority*, RTransferQueue, RArray, RCircularBuffer, RMaps.
+ * VectorSet, RBatch, RPriority*, RTransferQueue, RMaps.
+ * (RArray/RCircularBuffer live in src/arrays.ts.)
  */
 import type { Redis } from 'ioredis';
 import { RedisDataStructure } from './base.js';
@@ -8,7 +9,7 @@ import type { Codec } from './codec.js';
 import { JsonCodec } from './codec.js';
 import { sharedKeysListenerHub, type ObjectListener } from './listeners.js';
 import { clusterSlot, luaEval, multimapInternalId, sleep, suffixName, toNumber, withDedicatedRedis } from './util.js';
-import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchDeque, BatchGeo, BatchList, BatchMap, BatchMapCacheNative, BatchQueue, BatchScoredSortedSet, BatchSet, BatchStream } from './batch.js';
+import { BatchAtomicDouble, BatchAtomicLong, BatchBitSet, BatchBucket, BatchCountMin, BatchDeque, BatchGeo, BatchList, BatchMap, BatchMapCacheNative, BatchQueue, BatchScoredSortedSet, BatchSet, BatchStream, BatchTimeSeriesNative } from './batch.js';
 
 // -- RKeys -----------------------------------------------------------------------
 
@@ -1693,38 +1694,7 @@ export class RTransferQueue<V = any> extends RedisDataStructure {
   }
 }
 
-// -- Array / CircularBuffer (Redis 8.8+ ARRAY; skip when missing) -----------------------
-
-export class RArray<V = any> extends RedisDataStructure {
-  private async call(...args: (string | number)[]): Promise<any> {
-    return (this.redis as any).call(...args.map(String));
-  }
-  async set(index: number, value: V): Promise<void> {
-    await this.call('AR.SET', this.name, index, this.encodeValue(value));
-  }
-  async get(index: number): Promise<V | null> {
-    const raw: any = await this.call('AR.GET', this.name, index);
-    return raw === null ? null : (this.decodeValue(raw) as V);
-  }
-  async len(): Promise<number> {
-    return toNumber(await this.call('AR.LEN', this.name));
-  }
-}
-
-export class RCircularBuffer<V = any> extends RedisDataStructure {
-  private async call(...args: (string | number)[]): Promise<any> {
-    return (this.redis as any).call(...args.map(String));
-  }
-  async add(value: V): Promise<void> {
-    // ARRAY-backed ring: best-effort RPUSH-style via AR.APPEND when available
-    await this.call('AR.APPEND', this.name, this.encodeValue(value));
-  }
-  async readAll(): Promise<V[]> {
-    const raw: any = await this.call('AR.GET', this.name, '0', '-1');
-    const arr = Array.isArray(raw) ? raw : [];
-    return arr.map((x: string) => this.decodeValue(x) as V);
-  }
-}
+// -- Array / CircularBuffer moved to src/arrays.ts (Redis 8.8+ AR.* family) ------------
 
 // -- RBatch (pipeline; reads return queued placeholders) ---------------------------------
 
@@ -1833,6 +1803,14 @@ export class RBatch {
   }
   getScoredSortedSet<V>(name: string, codec?: Codec): BatchScoredSortedSet<V> {
     return new BatchScoredSortedSet<V>(this, name, codec ?? new JsonCodec());
+  }
+  /** Java 4.8 `RedissonBatch.getCountMin(...)`: batched CMS.* facade. */
+  getCountMin<V>(name: string, codec?: Codec): BatchCountMin<V> {
+    return new BatchCountMin<V>(this, name, codec ?? new JsonCodec());
+  }
+  /** Java 4.8 `RedissonBatch.getTimeSeriesNative(...)`: batched TS.* facade. */
+  getTimeSeriesNative(name: string): BatchTimeSeriesNative {
+    return new BatchTimeSeriesNative(this, name);
   }
 }
 

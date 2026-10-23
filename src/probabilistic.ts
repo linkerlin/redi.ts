@@ -4339,13 +4339,15 @@ export class TSGroupedRangeArgs extends TSBaseRangeState {
 
 // TS.* reply decoders (RESP shapes as ioredis returns them) ------------------------------
 
-function tsToSample(raw: any): TSSample | null {
+/** @internal shared with the RBatch TS native facade. */
+export function tsToSample(raw: any): TSSample | null {
   if (!raw || !Array.isArray(raw) || raw.length === 0) return null;
   const values = Array.isArray(raw[1]) ? (raw[1] as any[]) : [raw[1]];
   return { timestamp: Number(raw[0]), values: values.map((v) => Number(v)) };
 }
 
-function tsToSamples(raw: any): TSSample[] {
+/** @internal shared with the RBatch TS native facade. */
+export function tsToSamples(raw: any): TSSample[] {
   const arr = (raw ?? []) as any[];
   return arr.map((s) => tsToSample(s)!).filter((s) => s !== null);
 }
@@ -4362,7 +4364,8 @@ const TS_AGGREGATION_BY_TOKEN = new Map<string, TSAggregation>(
   (Object.keys(TS_AGGREGATION_TOKEN) as TSAggregation[]).map((k) => [TS_AGGREGATION_TOKEN[k], k]),
 );
 
-function tsInfoDecode(flat: any): TSInfo {
+/** @internal shared with the RBatch TS native facade. */
+export function tsInfoDecode(flat: any): TSInfo {
   const info: TSInfo = {
     totalSamples: 0, memoryUsage: 0, firstTimestamp: null, lastTimestamp: null,
     retentionTimeMs: 0, chunkCount: 0, chunkSize: 0, chunkType: null, duplicatePolicy: null,

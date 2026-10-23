@@ -136,9 +136,12 @@ params/aggregate/synonyms/dicts/config/
 spellcheck, `hybridSearch` KNN/RANGE + RRF/LINEAR, `profileSearch`/
 `profileAggregate`, aggregation cursors, `alter`),
 `RVectorSet` (VADD args, VEMB/RAW, VINFO, VLINKS WITHSCORES, VRANDMEMBER/
-VRANGE, VSIM names/scores/attributes, iterator/stream), priority queues
-(`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (13 typed
-facades), …
+VRANGE, VSIM names/scores/attributes, iterator/stream),
+`RArray`/`RCircularBuffer` (Redis 8.8+ ARRAY `AR.*` family, Java 4.8 full
+surface: grep args objects, AROP aggregates, ARINFO FULL, ring Lua verbatim,
+capacity in hash-tagged `redisson_acb:{name}`), priority queues
+(`GO_ONLY`, ZSET+score), `RTransferQueue` (`GO_ONLY`), `RBatch` (15 typed
+facades incl. 4.8 `getCountMin`/`getTimeSeriesNative`), …
 See [COMPATIBILITY.md](COMPATIBILITY.md).
 
 Honest non-goals (same as redi.go): `RSortedSet` (LIST+Comparator),

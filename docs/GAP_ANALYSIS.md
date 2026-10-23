@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.48.0，2026-10-23：TimeSeries 4.8 全量扩展）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 当前主干源码；阶段 42 起的路线图见根目录演进方案.md §4。
+> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.52.0，2026-10-23：RArray/RCircularBuffer 全量 + RBatch 模块门面，4.7/4.8 对齐收官）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 本地主干源码（4.8.1-SNAPSHOT，阶段 68–73 对齐依据）；阶段 42 起的路线图见根目录演进方案.md §4。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 
@@ -87,7 +87,7 @@
 
 ## §4 明确不做（保持）
 
-`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO-only 全套（工厂抛错，2.45.1 补齐六件）。另建议记名（4.6.1 OSS jar 确无 API）：`RTimeSeriesNative`；`RCountMin` 为 4.8 新增且已在 2.47.0 实现（CMS 命令族，能力门控）。`RReliablePubSubTopic`/`RLocalCachedMapCache` 的 API 接口在 4.6.1 jar 中**存在**、仅实现为 PRO（原记“版本外”有误），与 `ReliableQueue`/`BitVectorStore`/`LeasedMap`/`ReliableFanout` 一并按 PRO-only 抛错。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）；4.8 上游新增该 API，已于 2.46.0 实现。
+`RSortedSet-Comparator`（无跨语言表示）、`RTransaction`（快照回滚≠MULTI）、`LiveObject`、`reactive/Rx`、`Executor/Remote` 真协议、`RTransferQueue` 握手（同名不同物）、PRO-only 全套（工厂抛错，2.45.1 补齐六件）。~~建议记名：`RTimeSeriesNative`~~——4.8 新增，已于 2.50.0 全量实现（TS.* 薄绑定 + RTimeSeriesNatives 多系列）；`RCountMin` 为 4.8 新增且已在 2.47.0 实现（CMS 命令族，能力门控）；`RArray`/`RCircularBuffer`（4.8 全量 AR.* 面）与 `RBatch.getCountMin`/`getTimeSeriesNative` 门面已于 2.52.0 收官——**4.7/4.8 OSS 可移植面至此 100% 覆盖**（阶段 72 全量 diff 审计：余项均属章程排除——PRO/AI、LiveObject、reactive/Rx、框架集成）。`RReliablePubSubTopic`/`RLocalCachedMapCache` 的 API 接口在 4.6.1 jar 中**存在**、仅实现为 PRO（原记“版本外”有误），与 `ReliableQueue`/`BitVectorStore`/`LeasedMap`/`ReliableFanout` 一并按 PRO-only 抛错。**设计差异（非缺口）**：`CommonOptions`/`InvocationOptions` 不移植——TS 工厂直接接收名称，调用超时/重试归 ioredis；`Class<M>` 监听类型门控不适用——TS codec 负责解码，无运行时类；`RKeys.time` 在 4.6.1 接口中不存在（原 GAP 误报）；4.8 上游新增该 API，已于 2.46.0 实现。
 
 ## §5 路线图
 

@@ -1,3 +1,44 @@
+## 2.52.0 — 2026-10-23
+
+Phase 73: the final 4.8-audit items — full `RArray` (Redis 8.8+ `AR.*`
+ARRAY type) and `RCircularBuffer` surfaces plus the two `RBatch` module
+facades. Classes moved from `infra.ts` to `src/arrays.ts` (public API
+unchanged; old `set/get/len/add/readAll` signatures kept).
+
+- **`RArray` full surface** (Java 4.8 `RedissonArray`, ~30 methods over
+  `ARSET/ARGET/ARMGET/ARMSET/ARGETRANGE/ARLEN/ARINSERT/ARRING/ARNEXT/ARSEEK/
+  ARDEL/ARDELRANGE/ARCOUNT/ARSCAN/ARINFO/ARLASTITEMS/ARGREP` etc.):
+  single + variadic `get`, `isSet`, async-generator `iterator`,
+  `set(index, v…)` / `set(Map)` (ARSET/ARMSET), `delete(indexes…)`,
+  `deleteRange(s)`, `count()`, `countMatches`, `length`, `range`, `scan`
+  (flat + limit), `insert`, `ring`, `next`, `seek`, `lastItems(+Reversed)`,
+  `getInfo`/`getFullInfo` (ARINFO [FULL], flat and nested reply forms both
+  accepted), `grep`/`grepEntries` (`ArrayGrepArgs`: EXACT/MATCH values
+  codec-encoded, GLOB/RE raw patterns, AND/OR, LIMIT, NOCASE), and the
+  `AROP` aggregate family `sum/min/max/bitAnd/bitOr/bitXor`. Values ride
+  the instance codec exactly like Java `encode()`.
+- **`RCircularBuffer` full surface** (Java 4.8 `RedissonCircularBuffer`):
+  capacity in the hash-tagged `redisson_acb:{name}` settings key (LongCodec
+  plain digits — SETNX/SET/GET), Lua ports **verbatim** (ARING ring writes
+  in 4000-chunks, ARNEXT peek, AROP MATCH/SUM/aggregate ops): `trySetCapacity`
+  /`setCapacity`/`capacity`/`remainingCapacity`, `add`/`addAll`, `set`,
+  `get`, `lastItems(+Reversed)`, `range`, `readAll`, `size`, `isFull`,
+  `isEmpty`, `peekFirst`/`peekLast`, `count`/`contains`, `average`,
+  `sum/min/max` (whole-buffer + range forms), `bitAnd/bitOr/bitXor`,
+  `clear`.
+- **`RBatch` module facades** (Java `RedissonBatch.getCountMin/
+  getTimeSeriesNative`): `BatchCountMin` (CMS.INITBYDIM/INITBYPROB/INCRBY/
+  QUERY/INFO) and `BatchTimeSeriesNative` (TS.CREATE/ADD/GET/RANGE/
+  REVRANGE/INFO) queue the same commands the standalone classes issue;
+  reads resolve on `execute()`. RBatch now has 15 typed facades.
+- Tests: `live-phase73.test.ts` (+5: RArray two suites, RCircularBuffer,
+  both batch facades — every suite COMMAND INFO-gated on `ARSET`/`ARRING`/
+  `CMS.`/`TS.` with logged skip), +5 mock builder tests (`wire.test.ts`:
+  ArrayGrepArgs predicate stacking/wire tokens). CI-driven `live-phase71`
+  fixes folded in: retention-safe dynamic timestamps (newer TimeSeries
+  modules trim out-of-retention samples on write) and the RESP2-flat
+  `TS.RANGE` value shape.
+
 ## 2.51.0 — 2026-10-23
 
 Phase 72: the last two Redisson 4.7/4.8 items — `SetExpiredListener` and
