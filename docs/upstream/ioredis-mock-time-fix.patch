@@ -1,0 +1,17 @@
+--- a/src/commands/time.js
++++ b/src/commands/time.js
+@@ -1,10 +1,10 @@
+ import { convertStringToBuffer } from '../commands-utils/convertStringToBuffer'
+ 
+ export function time() {
+-  return [
+-    `${Math.round(new Date().getTime() / 1000)}`,
+-    `${Math.round(process.hrtime()[1] / 1000)}`,
+-  ]
++  const now = new Date().getTime()
++  const seconds = Math.floor(now / 1000)
++  const microseconds = (now % 1000) * 1000
++  return [`${seconds}`, `${microseconds}`]
+ }
+ 
+ export function timeBuffer() {

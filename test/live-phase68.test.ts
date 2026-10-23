@@ -43,8 +43,11 @@ describe('live phase 68: upstream 4.7/4.8 interop fixes', () => {
     // Simulate drift: an already-expired 5-permit member (as if a client died
     // mid-release). 3 + 5 > 4 must take the 4.8 recalc branch, which
     // recomputes value from the permits actually held: 4 - 1 = 3, then -1.
+    // 5s old, far beyond the 500ms window: the original 600ms seed left only
+    // 100ms of margin, which a host↔server clock skew (WSL docker ±300ms)
+    // can eat, making the "stale" member look live to the release Lua
     const stale = Buffer.from(packRatePermit('deadbeefdeadbeefdeadbeefdeadbeef', 5), 'latin1');
-    await raw.zadd(permitsKey, String(Date.now() - 600), stale);
+    await raw.zadd(permitsKey, String(Date.now() - 5000), stale);
     await sleep(50);
     expect(await rl.tryAcquire(1)).toBe(true);
     expect(await rl.availablePermits()).toBe(2); // pre-fix shape: 3 + 5 - 1 = 7

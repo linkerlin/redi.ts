@@ -166,7 +166,19 @@ npm test             # 317 tests: wire vectors, mock functional, live python
 npm run build        # dual output: dist/cjs + dist/esm
 npm run pack-smoke   # npm pack → temp consumer: CJS and ESM both resolve
                      # and emit identical wire output
+npm run docs         # typedoc API reference → docs/api (not committed)
+npm run bench        # sequential-latency microbenchmark → docs/BENCHMARK.md
+bash scripts/redis88-up.sh   # local redis:8 (≥8.8, AR.*/CMS.*/TS.*) on 6390;
+                     # REDIS_URL=redis://127.0.0.1:6390 npm test runs the
+                     # whole suite against the new surface
 ```
+
+- A second resident Java probe (`interop/pom48.xml`, the released
+  **Redisson 4.8.0** jar) powers `test/live-phase74.test.ts`: TimeSeries
+  flag-4 members and the shared `redisson__ts_seq` counter, RArray codec
+  byte parity and RCountMin, both directions (CI job `java-interop-48`).
+  `test/live-cluster-phase74.test.ts` proves the 4.8-era companion keys
+  co-slot on a real 3-master cluster.
 
 - `test/interop.test.ts` spawns `python` with `C:/GitHub/redi.py` to assert
   identical codec outputs, HighwayHash vectors and multimap internal ids

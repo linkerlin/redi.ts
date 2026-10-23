@@ -2312,6 +2312,19 @@ describe('phase 70: TimeSeries 4.8 expansion (mock)', () => {
   // The mock's Lua VM has no `struct` library, so every 4.8 method here takes
   // its client-side JS fallback (the lua48 pre-gate skips the scripts); these
   // cases pin the args shapes and the fallback semantics.
+  it('rejects mixing the legacy and 4.8 write families on one series (law 12)', async () => {
+    const r = make();
+    const legacy = r.getTimeSeries<number>('p74:mix1');
+    await legacy.add(1000, 1); // seq key becomes a STRING counter
+    await expect(legacy.add(TimeSeriesAddArgs.entry(2000, 2))).rejects.toThrow(/mixed TimeSeries write families/);
+    const modern = r.getTimeSeries<number>('p74:mix2');
+    expect(await modern.add(TimeSeriesAddArgs.entry(1000, 1))).toBe(true); // seq HASH
+    await expect(modern.add(2000, 2)).rejects.toThrow(/mixed TimeSeries write families/);
+    await expect(modern.addAll([{ timestamp: 3000, value: 3 }])).rejects.toThrow(/mixed TimeSeries write families/);
+    // the guard never poisons other series on the same client
+    expect(await r.getTimeSeries<number>('p74:mix3').add(TimeSeriesAddArgs.entry(3000, 3))).toBe(true);
+    await r.shutdown();
+  });
   it('args builder shapes (Java 4.8 org.redisson.api.ts.*)', () => {
     const a = TimeSeriesAddArgs.entry(1000, 42).label('l1').ttl(5000).retention(60000);
     expect(a.timestamp).toBe(1000);

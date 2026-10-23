@@ -38,8 +38,15 @@ const MVN = process.env.MVN ?? (process.platform === 'win32' ? 'C:\\\\javas\\\\a
 async function mvnProbe(args: string): Promise<{ ok: boolean; out: string }> {
   // .cmd needs a shell on Windows; quote the -D arg to keep the space.
   const cmd = `"${MVN}" -f "${POM}" -q compile exec:java "-Dexec.args=${args}"`;
+  // TsProbe reads REDIS_HOST/REDIS_PORT (not REDIS_URL) — map them so the
+  // fixture JVM hits the same server the TS client does
+  let redisEnv: Record<string, string> = {};
   try {
-    const { stdout, stderr } = await execAsync(cmd, { timeout: 300000, cwd: ROOT });
+    const u = new URL(REDIS_URL);
+    redisEnv = { REDIS_HOST: u.hostname, REDIS_PORT: u.port || '6379' };
+  } catch { /* keep defaults */ }
+  try {
+    const { stdout, stderr } = await execAsync(cmd, { timeout: 300000, cwd: ROOT, env: { ...process.env, ...redisEnv } });
     return { ok: true, out: `${stdout}\n${stderr}` };
   } catch (e: any) {
     const out = String((e as any)?.stdout ?? '') + String((e as any)?.stderr ?? '') + String((e as any)?.message ?? e);

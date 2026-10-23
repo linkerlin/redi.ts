@@ -109,4 +109,11 @@ npm run pack-smoke   # npm pack 后装进临时消费者，验证 CJS/ESM 都能
 
 本机 `127.0.0.1:6379` 有一个真 Redis 的话，mock 那套也会换上真客户端再跑一遍：传给 `Redisson.create({ client })` 就行。缺席的命令（比如 Redis 8.6 没有 `SUNIONCARD`/`XNACK`）按 `COMMAND INFO` 能力门控、打日志 SKIP，不会静默过。
 
-集群测试 `test/live-cluster.test.ts` 需要一个本机 3 主节点集群：WSL 里跑 `wsl -e bash scripts/cluster-up.sh`（起在 7100-7102，`scripts/cluster-down.sh` 收尾），Windows 侧自动经端口转发可达；找不到集群时用例打警告跳过。
+集群测试 `test/live-cluster.test.ts` 需要一个本机 3 主节点集群：WSL 里跑 `wsl -e bash scripts/cluster-up.sh`（起在 7100-7102，`scripts/cluster-down.sh` 收尾），Windows 侧自动经端口转发可达；找不到集群时用例打警告跳过。`test/live-cluster-phase74.test.ts` 另对 4.8 时代结构的伴生键做了 CLUSTER KEYSLOT 同槽断言与集群实跑。
+
+想要 Redis 8.8+ 新面（`AR.*`/`CMS.*`/`TS.*`/`HIMPORT`/`GCRA`）的本地真机：`bash scripts/redis88-up.sh` 在 WSL docker 起 redis:8 于 **6390**（不动托管的 6379），然后 `REDIS_URL=redis://127.0.0.1:6390 npm test` 全量走新面。
+
+双向互操作有两套常驻 Java 探针：`interop/`（Redisson **4.6.1**，历史 wire 基线，`live-interop`/`live-phase*`）与 `interop/pom48.xml`（Redisson **4.8.0** 正式 jar，`live-phase74`：TimeSeries flag-4 成员/共享 seq 计数器、RArray 字节级 codec、RCountMin 双向实测；CI 的 `java-interop-48` 任务跑它）。
+
+工具链：`npm run docs`（typedoc 生成 API reference 到 `docs/api`，产物不入库）、`npm run bench`（`scripts/bench.mjs` 顺序延迟微基准，报告在 `docs/BENCHMARK.md`）。
+

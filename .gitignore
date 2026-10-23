@@ -23,4 +23,9 @@ lerna-debug.log*
 .temp
 .tmp
 
+# generated API reference (npm run docs)
+/docs/api
+
 target/
+interop/target48/
+zz-mc2.mjs

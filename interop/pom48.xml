@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.github.redits</groupId>
+    <artifactId>redits-java-probe48</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>redits-java-probe48</name>
+    <description>Redisson 4.8.0 probe for verifying wire interoperability of the 4.8-only surfaces
+        (TimeSeriesAddArgs flag-4 members, RArray AR.*, RCountMin CMS.*) with redi.ts</description>
+
+    <properties>
+        <maven.compiler.release>17</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <redisson.version>4.8.0</redisson.version>
+        <jackson.version>2.18.2</jackson.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>${redisson.version}</version>
+        </dependency>
+        <!-- redisson declares jackson optional; JsonJacksonCodec needs it -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- separate dirs so the 4.6.1 probe build is never touched -->
+        <directory>target48</directory>
+        <sourceDirectory>src48/main/java</sourceDirectory>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,6 +1,6 @@
 # redi.ts vs Redisson 差距分析（Gap Analysis）
 
-> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.52.0，2026-10-23：RArray/RCircularBuffer 全量 + RBatch 模块门面，4.7/4.8 对齐收官）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 本地主干源码（4.8.1-SNAPSHOT，阶段 68–73 对齐依据）；阶段 42 起的路线图见根目录演进方案.md §4。
+> 创建 2026-10-13；§2 各结构状态持续随版本同步（最近 v2.53.0，2026-10-23：4.8.0 jar 双向实测探针 + 集群同槽验证 + RMaps 集群修复/混族守卫，证据闭环）。基线：`redisson-4.6.1.jar`（jar 实测为准）+ 本地主干源码（4.8.1-SNAPSHOT，阶段 68–73 对齐依据）+ `redisson-4.8.0.jar`（阶段 74 双向实测）；阶段 42 起的路线图见根目录演进方案.md §4。
 > 方法：4 路并行调研（锁/集合/消息/数据基建），关键断言逐条源码 + jar + 实证复核。
 > 状态：P0 修完 5 项（PES-hex、setPermits 删除、tryInit 对齐、RateLimiter tag+hex member、SpinLock BackOff；latch 经查是按请求幂等键，跨语言无影响），见 CHANGELOG 1.8.1/1.8.2。
 

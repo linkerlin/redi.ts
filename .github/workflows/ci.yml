@@ -52,5 +52,47 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y maven
       - run: npm ci
       - run: npm run build
-      - name: Full suite (incl. live bidirectional probes)
-        run: npm test
+      # Live files serialized (--no-file-parallelism): 70+ live suites hitting
+      # one Redis in parallel produced the whole class of load flakes the
+      # phase9/37/44 retries used to paper over (SORTBY lagging fresh indexes,
+      # multilock probe flips). Mock/wire/interop stay parallel.
+      - name: Mock + wire + interop suites (parallel)
+        run: npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts
+      - name: Live suites incl. Java 4.6.1 probes (serialized)
+        run: npx vitest run live- --no-file-parallelism
+
+  # Direct TS ↔ Redisson 4.8.0 interop for the 4.8-only surfaces (TimeSeries
+  # flag-4 family, RArray AR.*, RCountMin CMS.*) — test/live-phase74.test.ts
+  # builds interop/pom48.xml (TsProbe48) on demand and skips logged when the
+  # probe or module commands are unavailable.
+  java-interop-48:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+      - run: npm ci
+      - run: npm run build
+      - name: TS ↔ Java Redisson 4.8.0 bidirectional probes
+        run: npx vitest run test/live-phase74.test.ts

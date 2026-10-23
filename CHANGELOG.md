@@ -1,3 +1,61 @@
+## 2.53.0 — 2026-10-23
+
+Phase 74: closing the evidence loop on "100% Java Redisson 4.8.x" —
+bidirectional interop against the released **4.8.0 jar** (not just the
+4.6.1 baseline), cluster co-slotting for the 4.8-era companion keys, and a
+set of hardening fixes the new surfaces flushed out.
+
+- **TS ↔ Java Redisson 4.8.0 bidirectional probes** (`interop/pom48.xml` +
+  `TsProbe48`, a self-contained resident REPL against the released jar):
+  TimeSeries `add(TimeSeriesAddArgs)` family — Java reads TS-written
+  flag-4 members and vice versa, both writers draw from the ONE
+  `redisson__ts_seq:{name}` HASH counter (identical companion names
+  verified in RedissonTimeSeries 4.8 source), member bytes asserted
+  flag-4 with distinct ids; `RArray` — cross-language get/set with the
+  raw stored bytes proven to be the JSON-quoted codec value;
+  `RCountMin` — one shared CMS sketch. `test/helpers/java-probe.ts`
+  refactored into `createJavaProbe(opts)` (existing 4.6.1 exports
+  unchanged; `java-probe48.ts` is the second instance). New CI job
+  `java-interop-48` runs `live-phase74` on redis:8.
+- **`RTimeSeries` mixed-family guard** (AGENTS law 12 enforcement): the
+  seq key type (STRING = legacy 4.6.1 family, HASH = 4.8 family) is
+  checked once per family per instance; a cross-family write throws a
+  clear error instead of corrupting members / surfacing a raw WRONGTYPE.
+- **`RMaps` cluster fix (real bug)**: pipeline `exec()` never rejects for
+  per-command errors — on an ioredis Cluster the error object sits inside
+  the results, so `set()`/`createImport()` silently wrote NOTHING when
+  HIMPORT was missing (or CROSSSLOT). Per-command errors are now checked;
+  unknown-HIMPORT/CROSSSLOT falls back to the cluster-safe plain-HASH
+  path (HIMPORT's fieldset key has no hash-tag — Java parity — so the
+  fast path is effectively single-node, documented).
+- **`live-cluster-phase74`**: server-side `CLUSTER KEYSLOT` proves every
+  4.8-era companion (`redisson__ts_ttl/seq`, `redisson_acb`,
+  `redisson_set_cache_expired`) co-slots with its bare name; TimeSeries
+  4.8 family, RCountMin, RMaps and (AR-gated) RCircularBuffer operate
+  through a real 3-master cluster client.
+- **CI flake root cause**: the java-interop job now runs the ~75 live
+  suites **serialized** (`--no-file-parallelism`) — one Redis hammered by
+  73 parallel files was the source of the phase9/37/44 load flakes.
+- **Local dev oracle**: `scripts/redis88-up.sh` — WSL-docker redis:8
+  (≥8.8, AR./CMS./TS.*/HIMPORT/GCRA) on 6390 without touching the managed
+  6379; `REDIS_URL=redis://127.0.0.1:6390 npm test` runs the whole suite
+  on the new surface locally (phase5/6/10 TTL-interop margins assume
+  Java-probe and Redis share a clock — fine on CI, keep in mind for
+  cross-VM setups).
+- **`live-interop` env fix**: the fixture JVM (`mvn exec` TsProbe) now
+  inherits REDIS_HOST/REDIS_PORT mapped from REDIS_URL — it used to write
+  fixtures to the default 6379 regardless of the suite's target.
+- Tooling: `typedoc` API reference (`npm run docs` → docs/api,
+  gitignored) and `npm run bench` (`scripts/bench.mjs`, sequential
+  ops/sec microbenchmark → docs/BENCHMARK.md); ioredis-mock upstream TIME
+  fix prepared under docs/upstream/ (patch + issue text, not submitted).
+- Tests: +1 mock (mixed-family guard), `live-phase74` (3 suites, all
+  gated: probe boot / ARSET / CMS), `live-cluster-phase74` (1 suite).
+  Local validation: serialized live sweep against redis 8.10.2 green —
+  75 files / 207 tests (mid-run failures traced to a concurrent benchmark
+  on the same instance plus a 100ms-margin rate-limiter seed that
+  host↔server clock skew could eat; the stale-permit seed is now 5s old).
+
 ## 2.52.0 — 2026-10-23
 
 Phase 73: the final 4.8-audit items — full `RArray` (Redis 8.8+ `AR.*`

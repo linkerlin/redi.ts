@@ -566,7 +566,15 @@ export class RMapsImport<K = any, V = any> {
   private async write(rows: MapsImportRow[]): Promise<void> {
     if (mapsHashImportDisabled) return this.writeWithHset(rows);
     try {
-      await this.writeWithHashImport(rows);
+      const res = await this.writeWithHashImport(rows);
+      // pipelines resolve even when individual commands fail — on a cluster
+      // the error object sits inside the results (exec never rejects there),
+      // so an unknown HIMPORT or a CROSSSLOT silently wrote NOTHING
+      for (const err of execErrors(res)) {
+        if (!isUnsupportedCommand(err) && !/CROSSSLOT/i.test(String((err as Error).message ?? err))) throw err;
+        mapsHashImportDisabled = true;
+        return this.writeWithHset(rows);
+      }
     } catch (e) {
       // Unknown HIMPORT (plain Redis) or a client without `.call` (ioredis-mock
       // pipelines) — permanently fall back to the plain-HASH path.
@@ -576,13 +584,15 @@ export class RMapsImport<K = any, V = any> {
     }
   }
 
-  /** HIMPORT PREPARE fieldsetName f...; then HIMPORT SET name fieldsetName v... per row. */
-  private async writeWithHashImport(rows: MapsImportRow[]): Promise<void> {
+  /** HIMPORT PREPARE fieldsetName f...; then HIMPORT SET name fieldsetName v... per row.
+   *  Note: the fieldset key has no hash-tag (Java `rs%08x` naming parity), so
+   *  this fast path is effectively single-node; clusters fall back to HSET. */
+  private async writeWithHashImport(rows: MapsImportRow[]): Promise<[unknown, unknown][]> {
     const pipe = (this.redis as any).pipeline?.() ?? (this.redis as any).multi?.();
     if (!pipe) throw new Error('redi.ts: redis client does not support pipeline');
     pipe.call('HIMPORT', 'PREPARE', this.fieldsetName, ...this.fields);
     for (const row of rows) pipe.call('HIMPORT', 'SET', row.name, this.fieldsetName, ...row.values);
-    await pipe.exec();
+    return await pipe.exec();
   }
 
   /** DEL name; HSET name f1 v1 f2 v2 ... — one plain HASH per object. */
@@ -595,8 +605,24 @@ export class RMapsImport<K = any, V = any> {
       for (let i = 0; i < row.values.length; i++) params.push(this.fields[i], row.values[i]);
       pipe.hset(...params as [string, string]);
     }
-    await pipe.exec();
+    const res = await pipe.exec();
+    for (const err of execErrors(res)) throw err;
   }
+}
+
+/** Per-command errors from a pipeline exec(): ioredis pairs [err, reply];
+ *  ioredis Cluster pipelines instead put the error object in the slot. */
+function execErrors(res: unknown): unknown[] {
+  const out: unknown[] = [];
+  if (!Array.isArray(res)) return out;
+  for (const entry of res) {
+    if (Array.isArray(entry)) {
+      if (entry[0]) out.push(entry[0]);
+    } else if (entry && typeof entry === 'object' && (entry as any).command) {
+      out.push(entry);
+    }
+  }
+  return out;
 }
 
 /** Java 4.8 `RMaps<K, V>`: mass operations with Map objects. Every object is

@@ -1844,10 +1844,33 @@ export class RTimeSeries<V = any> extends RedisDataStructure {
   private ttlKey: string;
   private seqKey: string;
   private keyspaceHub: KeyspaceListenerHub | null = null;
+  /** Family this instance has already vetted the seq key for (AGENTS law 12:
+   *  legacy ids come from a STRING counter, 4.8 ids from the HASH field `id`).
+   *  Caching avoids a TYPE round-trip per add once the family is settled. */
+  private seqFamilyVetted: 'string' | 'hash' | null = null;
   constructor(redis: Redis, name: string, codec: Codec = new JsonCodec()) {
     super(redis, name, codec);
     this.ttlKey = prefixName('redisson__ts_ttl', name);
     this.seqKey = prefixName('redisson__ts_seq', name);
+  }
+  /** Fails loudly when the seq key was created by the OTHER write family —
+   *  mixing makes each family's members unreadable to the other and lets
+   *  ids collide across schemes. Redis would only surface this later as a
+   *  raw WRONGTYPE on the counter. */
+  private async guardSeqFamily(hash: boolean): Promise<void> {
+    if (this.seqFamilyVetted === (hash ? 'hash' : 'string')) return;
+    const t = String(await this.redis.type(this.seqKey));
+    if (t === 'none') {
+      this.seqFamilyVetted = hash ? 'hash' : 'string';
+      return;
+    }
+    if (t !== 'string' && t !== 'hash') {
+      throw new Error(`redi.ts: TimeSeries seq key ${this.seqKey} holds a ${t.toUpperCase()} — corrupted companion state`);
+    }
+    if ((t === 'hash') !== hash) {
+      throw new Error(`redi.ts: mixed TimeSeries write families on "${this.name}" — the seq key ${this.seqKey} was created by the ${t === 'hash' ? '4.8 API family (add(TimeSeriesAddArgs) …)' : 'legacy family (add(ts, v) …)'}; use a fresh series name or stick to one family (AGENTS.md law 12)`);
+    }
+    this.seqFamilyVetted = t;
   }
   private hub(): KeyspaceListenerHub {
     if (this.keyspaceHub === null) {
@@ -1876,6 +1899,7 @@ export class RTimeSeries<V = any> extends RedisDataStructure {
   async add(entry: TimeSeriesAddArgs<V>): Promise<boolean>;
   async add(a: number | TimeSeriesAddArgs<V>, value?: V, ttlMs = 0, label = ''): Promise<void | boolean> {
     if (typeof a !== 'number') return this.add48(a);
+    await this.guardSeqFamily(false);
     const timestamp = a;
     const now = await serverNowMs(this.redis);
     const exp = ttlMs > 0 ? now + ttlMs : now + 365 * 100 * 24 * 3600 * 1000;
@@ -1917,6 +1941,7 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
    *  pass (sequence ids + both ZSETs); mock falls back to per-entry add(). */
   async addAll(entries: TimeSeriesEntry<V>[], ttlMs = 0): Promise<void> {
     if (entries.length === 0) return;
+    await this.guardSeqFamily(false);
     const now = await serverNowMs(this.redis);
     const exp = ttlMs > 0 ? now + ttlMs : now + 365 * 100 * 24 * 3600 * 1000;
     const args: string[] = [String(TS_NEXT_ID_WIDTH), String(exp)];
@@ -2251,6 +2276,7 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
   /** Java `encodeArgs(TimeSeriesAddArgs)`:
    *  [idWidth, retention, now, timestamp, labelFlag, value, label, expiration]. */
   private async encodeAddArgs48(a: TimeSeriesAddArgs<V>): Promise<string[]> {
+    await this.guardSeqFamily(true); // every 4.8-family write funnels through here
     const now = await serverNowMs(this.redis);
     const retentionMs = Math.max(0, a.getRetentionMs());
     const ttlMs = a.getTimeToLiveMs();

@@ -17,6 +17,7 @@ TypeScript 1:1 复刻 Redisson（面向 Redis 8.x）。**wire format（key 布�
 npm run build   # tsc
 npm test        # 全量（live-* 需本机 Redis 127.0.0.1:6379 + mvn + interop/ 探针；集群项另需 wsl bash scripts/cluster-up.sh 起的 3 主节点 7100-7102；缺失时 live 用例带日志 skip，绝不静默过）
 npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # 无 Redis 可跑子集
+bash scripts/redis88-up.sh   # 可选：WSL docker 起 redis:8(≥8.8, AR.*/CMS.*/TS.*) 于 6390；REDIS_URL=redis://127.0.0.1:6390 npm test 全量走新面
 ```
 
 ## 铁律（违反即回归）

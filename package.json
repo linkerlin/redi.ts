@@ -1,6 +1,6 @@
 {
   "name": "redi.ts",
-  "version": "2.52.0",
+  "version": "2.53.0",
   "description": "TypeScript 1:1 port of Redisson — wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
   "repository": {
     "type": "git",
@@ -28,7 +28,10 @@
     "build": "node scripts/build.mjs",
     "pack-smoke": "node scripts/pack-smoke.mjs",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "docs": "typedoc",
+    "predocs": "node scripts/typedoc-toolchain.mjs",
+    "bench": "node scripts/bench.mjs"
   },
   "keywords": ["redis", "redisson", "distributed", "lock", "map", "queue", "topic", "rate-limiter", "bloom-filter"],
   "author": "",
@@ -39,6 +42,8 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "ioredis-mock": "^8.13.1",
+    "typedoc": "^0.28.20",
+    "typedoc-typescript": "npm:typescript@~5.9.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.3"
