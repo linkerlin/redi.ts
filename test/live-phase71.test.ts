@@ -84,11 +84,12 @@ describe('live phase 71: TimeSeries native (TS.*) + RMaps', () => {
     expect(info.chunkType).toBe('COMPRESSED');
     expect(await ts.removeRange(t0, t0)).toBe(1);
     expect(await ts.size()).toBe(2);
-    // raw wire: TS.RANGE replies [ts, [value]] pairs
+    // raw wire: TS.RANGE replies [ts, value] pairs; RESP2 keeps the value flat
+    // (RESP3-ish replies nest it) — accept both, like the library decoder does
     const rawReply: any = await raw.call('TS.RANGE', `${NS}n1`, '-', '+');
     expect(rawReply.length).toBe(2);
     expect(Number(rawReply[1][0])).toBe(serverTs);
-    expect(Number(rawReply[1][1][0])).toBeCloseTo(3.5, 10);
+    expect(Number(Array.isArray(rawReply[1][1]) ? rawReply[1][1][0] : rawReply[1][1])).toBeCloseTo(3.5, 10);
     await r.getKeys().unlink(`${NS}n1`);
     raw.disconnect();
     await r.shutdown();
@@ -108,7 +109,9 @@ describe('live phase 71: TimeSeries native (TS.*) + RMaps', () => {
     const multi = r.getTimeSeriesNatives();
     const k1 = `${NS}s1`;
     const k2 = `${NS}s2`;
-    await raw.unlink(k1, k2);
+    // belt-and-suspenders: if the retention test ever aborts mid-way, its
+    // area=32-labeled series would leak into this filter below
+    await raw.unlink(k1, k2, `${NS}n1`);
     await r.getTimeSeriesNative(k1).create(TSCreateArgs.defaults().label('area', '32').label('sensor', '1'));
     await r.getTimeSeriesNative(k2).create(TSCreateArgs.defaults().label('area', '32').label('sensor', '2'));
     const added = await multi.addAll({
