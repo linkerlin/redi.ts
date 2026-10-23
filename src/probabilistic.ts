@@ -1192,6 +1192,35 @@ for i = 1, #values do
 end
 return result`;
 
+/** Index-page twin of TS_COLLECT_LIVE for the lazy stream/iterator: live
+ *  entries of ZRANGE [offset, offset+count-1] in one round trip. The reply
+ *  LEADS with the raw member count of the window (live + expired) so the
+ *  caller can advance its cursor; triples follow. ARGV: [nowMs, offset, end]. */
+const TS_COLLECT_PAGE = `local anyExpired = redis.call('zcount', KEYS[2], '-inf', ARGV[1]) > 0
+local values = redis.call('zrange', KEYS[1], ARGV[2], ARGV[3])
+local result = {#values}
+for i = 1, #values do
+    local live = true
+    if anyExpired then
+        local expirationDate = redis.call('zscore', KEYS[2], values[i])
+        live = expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1])
+    end
+    if live then
+        local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i])
+        local lbl = ''
+        if n == 4 then
+            local mark = string.byte(label, 1)
+            if mark == 3 then lbl = string.sub(label, 2) end
+        elseif n ~= 2 then
+            lbl = label
+        end
+        table.insert(result, redis.call('zscore', KEYS[1], values[i]))
+        table.insert(result, val)
+        table.insert(result, lbl)
+    end
+end
+return result`;
+
 const TS_REMOVE_RANGE = `local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3])
 local removed = 0
 for i = 1, #values do
@@ -2082,9 +2111,22 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
     const score = Buffer.isBuffer(rawScore) ? rawScore.toString() : String(rawScore);
     return { timestamp: Number(score), value, label };
   }
-  /** Index page over the data ZSET (used by the lazy stream/iterator). */
+  /** Index page over the data ZSET (used by the lazy stream/iterator).
+   *  Server-side collect (TS_COLLECT_LIVE's index-page twin): one round
+   *  trip instead of 1 + N member ZSCOREs. The script replies
+   *  [rawMemberCount, score, value, label, ...] — the raw count (live +
+   *  expired in the window) leads so the caller can advance its cursor;
+   *  falls back client-side when the script cannot run (no Lua `struct`). */
   private async rawPage(offset: number, count: number): Promise<{ entries: TimeSeriesEntry<V>[]; rawCount: number }> {
     const now = await serverNowMs(this.redis);
+    try {
+      const flat: any[] = await luaEval(this.redis, TS_COLLECT_PAGE, 2, this.name, this.ttlKey,
+        String(now), String(offset), String(offset + count - 1));
+      const arr = Array.isArray(flat) ? flat : [];
+      const rawCount = toNumber(arr[0]);
+      const entries = this.decodeTriples(arr.slice(1));
+      return { entries, rawCount };
+    } catch { /* fall through to the client-side path */ }
     const args: (string | number)[] = [this.name, offset, offset + count - 1, 'WITHSCORES'];
     let raw: any[];
     try {

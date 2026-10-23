@@ -1,3 +1,12 @@
+## 2.53.2 — 2026-10-23
+
+`stream`/`iterator` pages join the server-side collect (companion to
+2.53.1): `TS_COLLECT_PAGE` returns the live entries of an index window in
+one round trip, leading with the raw member count (live + expired) so the
+lazy cursor still advances correctly; same `anyExpired` fast path, same
+decoded-triples reply, same client-side fallback for no-`struct` Lua.
+A 100-member page drops from 101 round trips to 1.
+
 ## 2.53.1 — 2026-10-23
 
 TimeSeries read path: server-side collection (one round trip), Java
