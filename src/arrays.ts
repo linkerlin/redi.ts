@@ -68,7 +68,11 @@ export interface ArrayFullInfo extends ArrayInfo {
 export type ArrayGrepPredicateType = 'EXACT' | 'MATCH' | 'GLOB' | 'RE';
 
 /** Java `ArrayGrepArgs` / `ArrayGrepParams` builder. EXACT/MATCH values are
- *  codec-encoded on the wire; GLOB/RE patterns travel raw. */
+ *  codec-encoded on the wire; GLOB/RE patterns travel raw.
+ *  Caveat (Java parity): ARGREP compares the STORED BYTES, so with the
+ *  default JSON codec the encoded quotes become part of the needle and
+ *  substring/glob matching misses — Java's own tests use StringCodec for
+ *  grep; do the same for MATCH/GLOB/RE semantics. */
 export class ArrayGrepArgs {
   private predicates: ArrayGrepPredicateType[] = [];
   private predicateValues: any[] = [];

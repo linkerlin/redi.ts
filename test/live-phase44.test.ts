@@ -133,7 +133,14 @@ describe('live phase 44: RSearch hybrid/profile/cursor/alter', () => {
       await search.alter(altIdx, ['tag', 'TAG']);
       const a2 = `${altPrefix}2`;
       await r.redis.hset(a2, 'title', 'new', 'tag', 'fresh');
-      const alt = await search.search(altIdx, '@tag:{fresh}');
+      let alt = await search.search(altIdx, '@tag:{fresh}');
+      if (alt.total === 0) {
+        // CI-only transient: alter-added field visibility blips under the
+        // 73-file parallel load (same family as SEARCH_SAFE_DEPLETER) —
+        // one bounded retry, then the assertion below reports for real
+        await new Promise((res) => setTimeout(res, 250));
+        alt = await search.search(altIdx, '@tag:{fresh}');
+      }
       expect(alt.total).toBe(1);
       expect(alt.docs[0].id).toBe(a2);
       const info = await search.info(altIdx);

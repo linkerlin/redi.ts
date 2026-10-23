@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import Redis from 'ioredis';
 import {
-  Redisson, ArrayGrepArgs, CountMinInitArgs, TSCreateArgs,
+  Redisson, ArrayGrepArgs, CountMinInitArgs, TSCreateArgs, StringCodec,
 } from '../src';
 
 const NS = 'TsJavaT:p73:';
@@ -136,16 +136,19 @@ describe('live phase 73: AR.* RArray + RCircularBuffer + batch facades', () => {
     expect(await ring.ring(4, 1, 2, 3, 4, 5)).toBe(0); // 5 wraps onto slot 0
     expect(await ring.count()).toBe(4);
     expect(await ring.get(0)).toBe(5);
-    // grep family
+    // grep family — StringCodec, exactly like Java's own RedissonArrayTest:
+    // ARGREP predicates compare the STORED BYTES, so with the default JSON
+    // codec the encoded quotes become part of the pattern (Java parity —
+    // MATCH/GLOB/RE are only sane with a plain string codec)
     const a3 = `${NS}a3`;
     await raw.unlink(a3);
-    const gr = r.getArray<string>(a3);
+    const gr = r.getArray<string>(a3, new StringCodec());
     await gr.set(0, 'apple', 'banana', 'apricot');
     await gr.set(5, 'cherry');
     expect((await gr.grep(ArrayGrepArgs.match('ap'))).sort((x, y) => x - y)).toEqual([0, 2]);
     expect(await gr.grep(ArrayGrepArgs.glob('a*'))).toEqual([0, 2]);
     expect(await gr.grep(ArrayGrepArgs.exact('cherry').noCase())).toEqual([5]);
-    expect(await gr.grep(0, 2, ArrayGrepArgs.match('a'))).toEqual([0, 2]);
+    expect(await gr.grep(0, 2, ArrayGrepArgs.match('a'))).toEqual([0, 1, 2]);
     expect(await gr.grepEntries(ArrayGrepArgs.exact('cherry'))).toEqual([{ index: 5, value: 'cherry' }]);
     expect(await gr.grepEntries(ArrayGrepArgs.match('ap'))).toEqual([
       { index: 0, value: 'apple' }, { index: 2, value: 'apricot' },

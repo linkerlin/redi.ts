@@ -5,7 +5,20 @@ import { LOCK_ACQUIRE_SCRIPT, LOCK_UNLOCK_SCRIPT, constantBackOff, exponentialBa
 import { RRateLimiter } from '../src/probabilistic';
 import { prefixName, suffixName, hash128toBase64, unpackMapCacheValue } from '../src/util';
 
-const make = () => Redisson.create({ client: new RedisMock() as any });
+// ioredis-mock's TIME mixes wall-clock SECONDS (Date) with the sub-second
+// part of process.hrtime — two uncorrelated clocks, so the value can jump
+// ±999ms between calls and break the serverNowMs TTL math (CI flake).
+// Serve both fields from the same Date call, like a real server would.
+function mockClient(): any {
+  const c = new RedisMock() as any;
+  c.time = async () => {
+    const ms = Date.now();
+    return [String(Math.floor(ms / 1000)), String((ms % 1000) * 1000)];
+  };
+  return c;
+}
+
+const make = () => Redisson.create({ client: mockClient() });
 
 describe('Redisson core (mock)', () => {
   it('bucket', async () => {
@@ -2638,7 +2651,7 @@ describe('phase 72: SetCache expired listener + NameMapper + Gcra config (mock)'
     expect(nm.unmap('other')).toBe('other');
     expect(defaultNameMapper().map('x')).toBe('x');
 
-    const r = Redisson.create({ client: new RedisMock() as any, nameMapper: new PrefixNameMapper('myapp:') });
+    const r = Redisson.create({ client: mockClient(), nameMapper: new PrefixNameMapper('myapp:') });
     const b = r.getBucket<any>('p72:nm');
     await b.set({ x: 1 });
     expect(await r.redis.exists('myapp:p72:nm')).toBe(1);
