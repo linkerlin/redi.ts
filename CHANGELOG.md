@@ -34,10 +34,19 @@ unchanged; old `set/get/len/add/readAll` signatures kept).
 - Tests: `live-phase73.test.ts` (+5: RArray two suites, RCircularBuffer,
   both batch facades — every suite COMMAND INFO-gated on `ARSET`/`ARRING`/
   `CMS.`/`TS.` with logged skip), +5 mock builder tests (`wire.test.ts`:
-  ArrayGrepArgs predicate stacking/wire tokens). CI-driven `live-phase71`
-  fixes folded in: retention-safe dynamic timestamps (newer TimeSeries
-  modules trim out-of-retention samples on write) and the RESP2-flat
-  `TS.RANGE` value shape.
+  ArrayGrepArgs predicate stacking/wire tokens). CI-driven fixes folded in:
+  retention-safe dynamic timestamps in `live-phase71` (newer TimeSeries
+  modules trim out-of-retention samples on write) + the RESP2-flat
+  `TS.RANGE` value shape; `ARLASTITEMS` slot semantics (last n slots by
+  index, holes included); ARGREP predicates compare stored bytes so grep
+  needs `StringCodec` (same as Java's own test — documented on
+  `ArrayGrepArgs`); **ioredis-mock's `TIME` mixes wall-clock seconds with
+  `process.hrtime` sub-seconds (two uncorrelated clocks — the value can
+  jump ±999ms between calls), silently breaking every `serverNowMs` TTL
+  comparison at ~4% flake rate**; `mockClient()` now serves both fields
+  from one `Date` call (30/30 green after the fix); phase44 alter-visibility
+  retry under 73-file parallel load. First fully green CI run including
+  live AR.*/CMS.*/TS.* validation: 39883266177.
 
 ## 2.51.0 — 2026-10-23
 
