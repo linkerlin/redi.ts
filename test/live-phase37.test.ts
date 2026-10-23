@@ -69,9 +69,16 @@ describe('live interop phase 37: RSearch', () => {
       }
       expect(res.total).toBe(2);
 
-      const sorted = await search.search(idx, '*', {
+      const sortedQuery = () => search.search(idx, '*', {
         sortBy: 'price', sortAsc: true, returnFields: ['title', 'price'], limit: [0, 2],
       });
+      let sorted = await sortedQuery();
+      if (sorted.docs.length !== 2) {
+        // CI load: the SORTBY path can lag docs that are already indexed
+        // (same transient family as phase44's alter-visibility blip)
+        await sleep(250);
+        sorted = await sortedQuery();
+      }
       expect(sorted.docs.map((d) => d.title)).toEqual(['banana', 'apple']);
 
       const byParams = await search.search(idx, '@price:[$min $max]', {

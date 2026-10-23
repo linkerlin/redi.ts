@@ -37,7 +37,11 @@ npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # �
    `[ttl|−1, token]` 数组；mock 缺 `PFADD/GEOADD` 等命令时测试 skip 而非 fail。
    订阅（MapCache 事件等）只挂 `messageBuffer`（ioredis 总会发射它；另注册
    `message` 会双派发）；发布含 u64LE 长度前缀的负载必须传 `Buffer` 参数
-   （字符串按 UTF-8 编码会破坏字节）。
+   （字符串按 UTF-8 编码会破坏字节）。**ioredis-mock 的 `TIME` 把墙钟秒与
+   `process.hrtime` 亚秒拼在一起（相位无关，±999ms 跳变），会静默打爆一切
+   `serverNowMs` TTL 比较**——测试一律经 `mockClient()`（redisson.test.ts）
+   修正为同一次 `Date` 调用；真 Redis 无此问题。RESP2 的模块批量回复（如
+   `TS.RANGE`）值是扁平 `[ts, val]`，嵌套形态断言两种都要兼容。
 7. **二进制成员必须走 Buffer**：struct-packed 值（MapCache `<dQ`、TimeSeries、
    DelayedQueue 成员、BinaryStream/BitSet 原始字节）在真实 Redis 上只能用
    `*Buffer` 命令 + Buffer 参数传输——ioredis 字符串按 UTF-8 编解码，会破坏
@@ -67,7 +71,10 @@ npx vitest run test/wire.test.ts test/redisson.test.ts test/interop.test.ts  # �
     n=4+flag 前缀形状会破坏 4.6.1 读，反之被 DECODE_LABEL 显式兼容——
     写侧一律用 4.6.1 形状。读侧按 DECODE_LABEL 分支（n==4 看首字节 flag；
     n==2 无；其他取整段），再 codec 解码。4.6.1 真实 Lua 以 jar 常量池为准
-    （`C:/GitHub/redisson` 是新版源码）。
+    （`C:/GitHub/redisson` 是新版源码）。4.8 族 API（`add(TimeSeriesAddArgs)`
+    等）写 flag-4 单调 id 成员（seq 为 HASH），旧 API 保持 flag-2/3（seq 为
+    STRING）——**同一系列勿混用两族**。带 retention 的用例时间戳必须落在
+    窗口内（新模块写时即裁剪，1970 纪元值会消失）。
 13. **全局命名空间也要按文件隔离**：vitest 多文件并行，Redis Functions 按库名
     全局共享——phase6/phase7 同名 `p6lib/p6answer` 曾互相 REPLACE 覆盖致假失败；
     函数库/函数名加阶段后缀（`p6lib7/p6answer7`），跨文件共享键一律阶段前缀。
