@@ -161,7 +161,7 @@ wrappers, so bare JSON from redi.py and raw strings also read fine.
 ## Tests
 
 ```sh
-npm test             # 317 tests: wire vectors, mock functional, live python
+npm test             # 350+ tests: wire vectors, mock functional, live python
                      # interop, live bidirectional suites vs Redisson 4.6.1
 npm run build        # dual output: dist/cjs + dist/esm
 npm run pack-smoke   # npm pack → temp consumer: CJS and ESM both resolve

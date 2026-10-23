@@ -1,3 +1,26 @@
+## 2.53.1 — 2026-10-23
+
+TimeSeries read path: server-side collection (one round trip), Java
+`COLLECT_RANGE` shape — 44× faster windowed reads.
+
+- `range`/`entryRange`/`rangeReversed` (and everything routed through
+  them: `getEntry`/`getValue`/`first`/`last`/poll fallbacks) now collect
+  the window in ONE Lua (`TS_COLLECT_LIVE`) with Java's `anyExpired` fast
+  path: a single ZCOUNT up front skips the per-member expiry checks when
+  nothing has expired; members are struct-unpacked inside the script so
+  raw binary never crosses the wire as UTF-8 (reply = decoded
+  `[score, value, label]` triples, `decodeTriples` unchanged). The
+  historical client-side loop stays as the fallback for Lua environments
+  without `struct` (ioredis-mock).
+- Measured on the bench oracle (redis 8.10.2, 64-entry window):
+  `entryRange` **52.7 ms → 1.2–1.7 ms**; docs/BENCHMARK.md refreshed.
+- Bug caught by the mock while porting: the reverse branch must use
+  `zrevrangebyscore` (swapped `zrangebyscore` bounds return empty on real
+  Redis and silently succeed empty on the mock).
+- Tests: existing phase25/27/70/74 suites cover both paths (mock takes
+  the fallback, live takes the Lua); no new cases needed — 149 mock +
+  24 TimeSeries live re-verified against 8.10.2.
+
 ## 2.53.0 — 2026-10-23
 
 Phase 74: closing the evidence loop on "100% Java Redisson 4.8.x" —

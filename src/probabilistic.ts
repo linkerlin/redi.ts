@@ -1155,6 +1155,43 @@ for i = 1, #values do
 end
 return nil`;
 
+/** Java COLLECT_RANGE shape (server-side): collect live entries of a score
+ *  window in ONE round trip — the `anyExpired` fast path (one ZCOUNT) skips
+ *  the per-member expiry checks when nothing has expired; members are
+ *  struct-unpacked inside the script so raw binary never crosses the wire
+ *  as a UTF-8 string (label handling matches TS_GET_AND_REMOVE: n==4 mark-3
+ *  strips the mark byte, n==2 carries no label). Reply: flat
+ *  [score, value, label, …] triples. ARGV: [nowMs, from, to, reverse?1:0]. */
+const TS_COLLECT_LIVE = `local anyExpired = redis.call('zcount', KEYS[2], '-inf', ARGV[1]) > 0
+local values
+if ARGV[4] ~= '0' then
+    values = redis.call('zrevrangebyscore', KEYS[1], ARGV[3], ARGV[2])
+else
+    values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3])
+end
+local result = {}
+for i = 1, #values do
+    local live = true
+    if anyExpired then
+        local expirationDate = redis.call('zscore', KEYS[2], values[i])
+        live = expirationDate == false or tonumber(expirationDate) > tonumber(ARGV[1])
+    end
+    if live then
+        local n, t, val, label = struct.unpack('BBc0Lc0Lc0', values[i])
+        local lbl = ''
+        if n == 4 then
+            local mark = string.byte(label, 1)
+            if mark == 3 then lbl = string.sub(label, 2) end
+        elseif n ~= 2 then
+            lbl = label
+        end
+        table.insert(result, redis.call('zscore', KEYS[1], values[i]))
+        table.insert(result, val)
+        table.insert(result, lbl)
+    end
+end
+return result`;
+
 const TS_REMOVE_RANGE = `local values = redis.call('zrangebyscore', KEYS[1], ARGV[2], ARGV[3])
 local removed = 0
 for i = 1, #values do
@@ -1979,6 +2016,18 @@ redis.call('zadd', KEYS[2], ARGV[2], val)`;
   /** Raw entries in score order with TTL filtering; `limit <= 0` = unlimited. */
   private async rawEntries(from: number | string, to: number | string, reverse: boolean, limit: number): Promise<TimeSeriesEntry<V>[]> {
     const now = await serverNowMs(this.redis);
+    // Server-side collection (Java COLLECT_RANGE shape): one round trip, with
+    // the `anyExpired` fast path so a series without expiring entries skips
+    // the per-member checks entirely. Members are decoded inside the script —
+    // raw binary members must never cross the wire as UTF-8 strings. Falls
+    // back to the historical client-side loop when the script cannot run
+    // (ioredis-mock Lua has no `struct`).
+    try {
+      const flat: any[] = await luaEval(this.redis, TS_COLLECT_LIVE, 2, this.name, this.ttlKey,
+        String(now), String(from), String(to), reverse ? '1' : '0');
+      const all = this.decodeTriples(Array.isArray(flat) ? flat : []);
+      return limit > 0 ? all.slice(0, limit) : all;
+    } catch { /* fall through to the client-side path */ }
     // BYSCORE REV takes (max, min); callers always pass ascending bounds.
     const args: (string | number)[] = [this.name, reverse ? String(to) : String(from), reverse ? String(from) : String(to), 'BYSCORE'];
     if (reverse) args.push('REV');

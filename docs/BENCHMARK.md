@@ -8,15 +8,16 @@ Java Redisson (whose Netty pipeline, thread model and batching change the
 picture entirely). Use it to spot relative wire costs between structures
 and regressions over time on the same machine, nothing more.
 
-RTimeSeries `entryRange` is deliberately included with its real per-entry
-cost: the Java-compatible read path checks each returned member's TTL
-individually, so a 64-entry range costs 64 extra sequential round trips
-(~52 ms below). RArray requires Redis >= 8.8 (`ARSET`); the script skips
-it with a log line when the server lacks the command.
+RTimeSeries `entryRange` collects the window **server-side in one Lua**
+(Java `COLLECT_RANGE` shape, with the `anyExpired` fast path) — 64-entry
+windows measure ~1.7 ms below. Before 2.53.1 the TTL check ran per member
+client-side (64 extra sequential round trips, ~52 ms on this machine).
+RArray requires Redis >= 8.8 (`ARSET`); the script skips it with a log
+line when the server lacks the command.
 
 | environment | |
 |---|---|
-| date | 2026-10-23T12:39:18.766Z |
+| date | 2026-10-23 (after 2.53.1 server-side collect) |
 | os | win32 10.0.26200 (x64) |
 | cpu | 13th Gen Intel(R) Core(TM) i9-13900HX x 32 |
 | node | v26.8.1 |
@@ -26,14 +27,14 @@ it with a log line when the server lacks the command.
 
 | structure | op | ops/sec | avg latency µs |
 |---|---|---:|---:|
-| RBucket | set | 2817 | 355.0 |
-| RBucket | get | 3319 | 301.3 |
-| RMap | put | 2955 | 338.4 |
-| RMap | get | 3165 | 315.9 |
-| RLock | lock+unlock | 1097 | 911.9 |
-| RQueue | offer | 3135 | 319.0 |
-| RQueue | poll | 2847 | 351.2 |
-| RTimeSeries | add(entry) | 1427 | 700.8 |
-| RTimeSeries | entryRange | 19 | 52697.0 |
-| RArray | set | 1661 | 602.1 |
-| RArray | get | 2034 | 491.8 |
+| RBucket | set | 2963 | 337.5 |
+| RBucket | get | 2347 | 426.0 |
+| RMap | put | 2498 | 400.3 |
+| RMap | get | 2543 | 393.2 |
+| RLock | lock+unlock | 1151 | 868.9 |
+| RQueue | offer | 1866 | 535.9 |
+| RQueue | poll | 2804 | 356.6 |
+| RTimeSeries | add(entry) | 1091 | 916.6 |
+| RTimeSeries | entryRange | 577 | 1732.3 |
+| RArray | set | 2313 | 432.4 |
+| RArray | get | 1742 | 574.0 |
