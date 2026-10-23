@@ -2606,10 +2606,12 @@ describe('phase 72: SetCache expired listener + NameMapper + Gcra config (mock)'
     expect(id).toBeGreaterThanOrEqual(1_000_000); // offset ids, no clash with hub ids
     // expiry channel name matches Java prefixName('redisson_set_cache_expired', name)
     // add the long-TTL member first: add() runs purge(now), which would
-    // silently swallow an already-lapsed short-TTL member before the poll
+    // silently swallow an already-lapsed short-TTL member before the poll.
+    // TTL margin per AGENTS law 10: a 1ms TTL can lapse INSIDE add()'s own
+    // insert→purge gap on a loaded runner and get silently purged (CI flip)
     await sc.add('keep', 60000);
-    await sc.add('a', 1); // 1ms TTL
-    await new Promise((res) => setTimeout(res, 15));
+    await sc.add('a', 100); // 100ms TTL
+    await new Promise((res) => setTimeout(res, 250));
     const n = await sc.pollExpiry();
     expect(n).toBe(1);
     await new Promise((res) => setTimeout(res, 50)); // pub/sub loopback delivery
@@ -2619,8 +2621,8 @@ describe('phase 72: SetCache expired listener + NameMapper + Gcra config (mock)'
     expect(await sc.size()).toBe(1);
     // removed listener receives nothing further
     await sc.removeListener(id);
-    await sc.add('b', 1);
-    await new Promise((res) => setTimeout(res, 15));
+    await sc.add('b', 100);
+    await new Promise((res) => setTimeout(res, 250));
     await sc.pollExpiry();
     await new Promise((res) => setTimeout(res, 50));
     expect(got).toEqual(['a']);

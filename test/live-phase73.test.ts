@@ -94,9 +94,10 @@ describe('live phase 73: AR.* RArray + RCircularBuffer + batch facades', () => {
     expect(await arr.deleteRange(0, 0)).toBe(1);
     expect(await arr.deleteRanges(2, 2, 5, 5)).toBe(2);
     expect(await arr.count()).toBe(0);
-    // info
-    expect(await arr.getInfo()).toMatchObject({ count: 0 });
-    expect(await arr.getFullInfo()).toMatchObject({ count: 0 });
+    // info (a4 still holds values — an emptied ARRAY key is auto-reclaimed
+    // by the server and ARINFO would fail with "no such key")
+    expect(await am.getInfo()).toMatchObject({ count: 2 });
+    expect(await am.getFullInfo()).toMatchObject({ count: 2 });
     // raw wire: ARGET returns the codec-encoded JSON (Java-parity evidence)
     expect(await raw.call('ARGET', a4, 0)).toBe('"x"');
     await r.getKeys().unlink(a1, a4);
@@ -124,8 +125,10 @@ describe('live phase 73: AR.* RArray + RCircularBuffer + batch facades', () => {
     expect(await cur.insert(11)).toBe(10); // 11@10
     expect(await cur.length()).toBe(11);
     expect(await cur.count()).toBe(3);
-    expect(await cur.lastItems(2)).toEqual([20, 11]);
-    expect(await cur.lastItemsReversed(2)).toEqual([11, 20]);
+    // ARLASTITEMS walks the last N SLOTS by index, not the last N non-null
+    // values: slots 0..10 hold {0:10, 1:20, 10:11} → last 2 = [null@9, 11@10]
+    expect(await cur.lastItems(2)).toEqual([null, 11]);
+    expect(await cur.lastItemsReversed(2)).toEqual([11, null]);
     // ring
     const a5 = `${NS}a5`;
     await raw.unlink(a5);
