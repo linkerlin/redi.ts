@@ -197,6 +197,8 @@ public final class TsProbe48 {
     private static String zs48BgResult = null;
     private static CountDownLatch mlk48BgLatch = new CountDownLatch(1);
     private static String mlk48BgResult = null;
+    private static CountDownLatch bd48BgLatch = new CountDownLatch(1);
+    private static String bd48BgResult = null;
     private static CountDownLatch mlk48BgRelease = new CountDownLatch(1);
     private static CountDownLatch mlk48BgDone = new CountDownLatch(1);
 
@@ -1723,6 +1725,44 @@ public final class TsProbe48 {
                 org.redisson.RedissonFencedLock fl =
                         (org.redisson.RedissonFencedLock) redisson.getFencedLock(a[0]);
                 out.add("deleted=" + fl.delete());
+            }
+            // --- Round 34: RBlockingDeque ends / RLock lease + watchdog / stream blocking read ---
+            case "bd48-offerfirst" -> {
+                out.add("offered=" + redisson.<String>getBlockingDeque(a[0]).offerFirst(a[1]));
+            }
+            case "bd48-offerlast" -> {
+                out.add("offered=" + redisson.<String>getBlockingDeque(a[0]).offerLast(a[1]));
+            }
+            case "bd48-bgpoll" -> {
+                // a[1]=first|last, a[2]=waitMs — daemon thread parks on that end
+                String side = a[1];
+                long waitMs = Long.parseLong(a[2]);
+                bd48BgLatch = new CountDownLatch(1);
+                bd48BgResult = null;
+                Thread t = new Thread(() -> {
+                    try {
+                        var bd = redisson.<String>getBlockingDeque(a[0]);
+                        Object v = side.equals("first")
+                                ? bd.pollFirst(waitMs, TimeUnit.MILLISECONDS)
+                                : bd.pollLast(waitMs, TimeUnit.MILLISECONDS);
+                        bd48BgResult = "value=" + v;
+                    } catch (Exception e) {
+                        bd48BgResult = "error=" + e.getClass().getSimpleName();
+                    }
+                    bd48BgLatch.countDown();
+                });
+                t.setDaemon(true);
+                t.start();
+                out.add("armed");
+            }
+            case "bd48-bgresult" -> {
+                boolean r = bd48BgLatch.await(Long.parseLong(a[0]), TimeUnit.MILLISECONDS);
+                out.add(r ? bd48BgResult : "timeout");
+            }
+            case "lock48-trylocklease" -> {
+                // tryLock(0, leaseMs, MS) — bounded lease, no watchdog
+                boolean ok = redisson.getLock(a[0]).tryLock(0, Long.parseLong(a[1]), TimeUnit.MILLISECONDS);
+                out.add("locked=" + ok);
             }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }

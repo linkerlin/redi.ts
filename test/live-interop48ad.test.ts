@@ -72,7 +72,7 @@ describe('live interop48ad: mapcache deep ops / native / grab-bag vs Java 4.8.0'
       expect(await probe48.probe(`mc48-get ${name} ck`)).toBe('value=ts-computed');
       const tsTtl = await mc.remainTimeToLive('ck');
       expect(tsTtl).toBeGreaterThan(30000);
-      expect(tsTtl).toBeLessThanOrEqual(60000);
+      expect(tsTtl).toBeLessThanOrEqual(60500);
 
       // Java computeIfAbsent (Duration) → TS reads the value
       expect(await probe48.probe(`mc48-compute ${name} jk 60000 java-computed`)).toBe('value=java-computed');
@@ -83,7 +83,7 @@ describe('live interop48ad: mapcache deep ops / native / grab-bag vs Java 4.8.0'
       await probe48.probe(`mc48-putttl ${name} pk java-put 60000`);
       const putTtl = await mc.remainTimeToLive('pk');
       expect(putTtl).toBeGreaterThan(30000);
-      expect(putTtl).toBeLessThanOrEqual(60000);
+      expect(putTtl).toBeLessThanOrEqual(60500);
       expect(await mc.getWithTTLOnly('pk')).toBe('java-put');
 
       // TS expireEntry shortens to 15s → Java's per-key rttl agrees
@@ -118,14 +118,14 @@ describe('live interop48ad: mapcache deep ops / native / grab-bag vs Java 4.8.0'
       expect(await r.getMapCacheNative<string, string>(name).get('jf')).toBe('java-native');
       const jttl = await r.getMapCacheNative<string, string>(name).remainTimeToLive('jf');
       expect(jttl).toBeGreaterThan(30000);
-      expect(jttl).toBeLessThanOrEqual(60000);
+      expect(jttl).toBeLessThanOrEqual(60500);
 
       // TS put(key, value, ttlMs) → Java get + per-field HPTTL read
       await r.getMapCacheNative<string, string>(name).put('tf', 'ts-native', 60000);
       expect(await probe48.probe(`mcn48-get ${name} tf`)).toBe('value=ts-native');
       const tsttl = Number((await probe48.probe(`mcn48-rttl ${name} tf`)).slice('ttl='.length));
       expect(tsttl).toBeGreaterThan(30000);
-      expect(tsttl).toBeLessThanOrEqual(60000);
+      expect(tsttl).toBeLessThanOrEqual(60500);
     } finally {
       await delAll(raw, [name]);
       raw.disconnect();

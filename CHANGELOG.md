@@ -1,3 +1,36 @@
+## 2.54.1 — 2026-10-25
+
+Round 34 of the Java-4.8.0 bidirectional evidence suite (docs+test
+only): blocking-wake paths and lock TTL semantics the earlier rounds
+did not cover, plus a TTL-slack hardening in the round-30 suite.
+
+Round 34 — `live-interop48ah` (probe commands `bd48-offerfirst/
+offerlast/bgpoll/bgresult`, `lock48-trylocklease`): blocking-wake
+paths and lock TTL semantics the earlier rounds did not cover.
+
+- RBlockingDeque: all four end × direction blocking wakes — TS parks
+  on BLPOP/BRPOP and a Java offer at the OPPOSITE end wakes it (an
+  empty deque's single element pops from either side); a Java
+  background pollFirst/pollLast(timeout, MS) is woken by TS
+  addFirst/addLast.
+- RLock lease expiry: a 500ms lease is rejected by the other language
+  inside its window and releases to it after expiry, both directions
+  (TS lease → Java; Java tryLock(0, 500, MS) → TS).
+- RLock watchdog: TS `lock()` renews past a full watchdog cycle
+  (30s/3) — TTL stays ~30s vs the ~17.5s unrenewed floor, Java
+  `isLocked` holds throughout, TS `unlock()` lets Java acquire
+  immediately.
+- RStream: TS blocking `readGroupWith({ blockMs })` (dedicated
+  connection) parks on XREADGROUP BLOCK until a Java XADD arrives;
+  the entry lands in Java's PEL for the TS consumer.
+- Test-side hardening: `live-interop48ad`'s four 60s TTL upper
+  bounds had no clock-rounding slack and flaked at 60008ms under
+  full-suite parallel load — +500ms per law 10.
+- 4/4 PASS (one test-side API-name fix: TS RDeque inserts are
+  addFirst/addLast, not offerFirst/Last); full 36-file interop
+  regression: 115/115 TWICE consecutively after the slack fix; build
+  green.
+
 ## 2.54.0 — 2026-10-24
 
 Interop-caught wire fixes + the complete Java-4.8.0 bidirectional e2e
