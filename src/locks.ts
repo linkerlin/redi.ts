@@ -1336,14 +1336,24 @@ export class RPermitExpirableSemaphore extends RedisDataStructure {
     await this.purge();
     return this.redis.zcard(this.timeoutKey);
   }
+  /** Java ZADDs the permit member as the hex id DECODED to 16 raw bytes
+   *  (ByteBufUtil.decodeHexDump — verified in the 4.6.1/4.8 bytecode); the
+   *  hex string is only the client-facing id. Every member write/lookup must
+   *  go through this conversion or cross-language release-by-id misses.
+   *  (Buffer args are raw bytes on real Redis; ioredis-mock serializes Buffer
+   *  eval args to the same JSON form on both acquire and release, so its
+   *  internally-symmetric paths keep working.) */
+  private member(permitId: string): Buffer {
+    return Buffer.from(permitId, 'hex');
+  }
   async tryAcquire(leaseMs: number, permits = 1): Promise<string[] | null> {
     const now = await serverNowMs(this.redis);
-    // hex text ids (same domain as Java UUID strings): latin1 would corrupt
-    // on the UTF-8 wire and break cross-language release/lookup by id.
+    // hex ids (Java's client-facing domain); the ZSET member is the decoded
+    // 16 raw bytes — see member().
     const ids: string[] = [];
     for (let i = 0; i < permits; i++) ids.push(randomBytes(16).toString('hex'));
     const r = await luaEval(this.redis, PES_ACQUIRE, 2, this.name, this.timeoutKey,
-      String(permits), String(leaseMs), String(now), ...ids);
+      String(permits), String(leaseMs), String(now), ...ids.map((i) => this.member(i)));
     if (toNumber(r) !== 1) return null;
     return ids;
   }
@@ -1355,7 +1365,7 @@ export class RPermitExpirableSemaphore extends RedisDataStructure {
     }
   }
   async release(permitId: string): Promise<boolean> {
-    return toNumber(await luaEval(this.redis, PES_RELEASE, 3, this.name, this.timeoutKey, this.channel, permitId)) === 1;
+    return toNumber(await luaEval(this.redis, PES_RELEASE, 3, this.name, this.timeoutKey, this.channel, this.member(permitId))) === 1;
   }
   async releaseAll(permitIds: string[]): Promise<number> {
     if (permitIds.length === 0) return 0;
@@ -1368,17 +1378,17 @@ if removed > 0 then
     redis.call('publish', KEYS[3], removed)
 end
 return removed`;
-    return toNumber(await luaEval(this.redis, s, 3, this.name, this.timeoutKey, this.channel, ...permitIds));
+    return toNumber(await luaEval(this.redis, s, 3, this.name, this.timeoutKey, this.channel, ...permitIds.map((i) => this.member(i))));
   }
   async updateLeaseTime(permitId: string, leaseMs: number): Promise<boolean> {
-    const score = await this.redis.zscore(this.timeoutKey, permitId);
+    const score = await this.redis.zscore(this.timeoutKey, this.member(permitId));
     if (score === null) return false;
     const now = await serverNowMs(this.redis);
-    await this.redis.zadd(this.timeoutKey, 'XX', String(now + leaseMs), permitId);
+    await this.redis.zadd(this.timeoutKey, 'XX', String(now + leaseMs), this.member(permitId));
     return true;
   }
   async getLeaseTime(permitId: string): Promise<number> {
-    const score = await this.redis.zscore(this.timeoutKey, permitId);
+    const score = await this.redis.zscore(this.timeoutKey, this.member(permitId));
     if (score === null) return -1;
     const now = await serverNowMs(this.redis);
     return Math.max(0, Number(score) - now);

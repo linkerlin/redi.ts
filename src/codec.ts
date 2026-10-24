@@ -46,8 +46,13 @@ export function javaTypeWrap(v: any): any {
   }
   if (isPlainObject(v)) {
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v)) out[k] = javaTypeWrap((v as any)[k]);
-    if (!('@class' in out)) out['@class'] = 'java.util.LinkedHashMap';
+    // Java's JsonJacksonCodec default typing writes @class FIRST. Reads are
+    // order-agnostic, but byte-comparing ops (RBucket.compareAndSet's Lua
+    // GET == ARGV) make the position a wire fact — it must match Java.
+    out['@class'] = '@class' in v ? (v as any)['@class'] : 'java.util.LinkedHashMap';
+    for (const k of Object.keys(v)) {
+      if (k !== '@class') out[k] = javaTypeWrap((v as any)[k]);
+    }
     return out;
   }
   return v;

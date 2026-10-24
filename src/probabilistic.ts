@@ -3389,11 +3389,19 @@ export class RBloomFilterNative extends RedisDataStructure {
   async reserve(capacity: number, errorRate: number): Promise<void> {
     await tryDo(this.redis, 'BF.RESERVE', this.name, errorRate, capacity);
   }
+  /** Java `init(double errorRate, long capacity)` / `init(BloomFilterInitArgs)`: BF.RESERVE. */
+  async init(errorRate: number, capacity: number): Promise<void> {
+    await this.reserve(capacity, errorRate);
+  }
   async add(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'BF.ADD', this.name, element)) === 1;
   }
   async exists(element: string): Promise<boolean> {
     return toNumber(await tryDo(this.redis, 'BF.EXISTS', this.name, element)) === 1;
+  }
+  /** Java `count()`: BF.CARD — approximate number of items added. */
+  async count(): Promise<number> {
+    return toNumber(await tryDo(this.redis, 'BF.CARD', this.name));
   }
 }
 
@@ -3461,7 +3469,7 @@ export class RCuckooFilter extends RedisDataStructure {
     const params: (string | number)[] = [this.name];
     if (args.capacity !== undefined) params.push('CAPACITY', args.capacity);
     if (args.noCreate) params.push('NOCREATE');
-    params.push('ITEMS', ...args.items);
+    params.push('ITEMS', ...args.items.map((i) => this.encodeValue(i)));
     const r: any = await tryDo(this.redis, mode, ...params);
     const arr = (r ?? []) as any[];
     return args.items.filter((_, i) => toNumber(arr[i]) === 1);
@@ -3470,32 +3478,32 @@ export class RCuckooFilter extends RedisDataStructure {
   async add(element: string): Promise<boolean>;
   async add(args: CuckooFilterAddArgs<string>): Promise<string[]>;
   async add(a: string | CuckooFilterAddArgs<string>): Promise<boolean | string[]> {
-    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADD', this.name, a)) === 1;
+    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADD', this.name, this.encodeValue(a))) === 1;
     return this.insert('CF.INSERT', a);
   }
   /** Java `addIfAbsent(V)` / `addIfAbsent(CuckooFilterAddArgs)`. */
   async addIfAbsent(element: string): Promise<boolean>;
   async addIfAbsent(args: CuckooFilterAddArgs<string>): Promise<string[]>;
   async addIfAbsent(a: string | CuckooFilterAddArgs<string>): Promise<boolean | string[]> {
-    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADDNX', this.name, a)) === 1;
+    if (typeof a === 'string') return toNumber(await tryDo(this.redis, 'CF.ADDNX', this.name, this.encodeValue(a))) === 1;
     return this.insert('CF.INSERTNX', a);
   }
   async exists(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'CF.EXISTS', this.name, element)) === 1;
+    return toNumber(await tryDo(this.redis, 'CF.EXISTS', this.name, this.encodeValue(element))) === 1;
   }
   /** Java `exists(Collection)`: CF.MEXISTS → the subset that exists. */
   async existsMany(elements: string[]): Promise<string[]> {
     if (elements.length === 0) return [];
-    const r: any = await tryDo(this.redis, 'CF.MEXISTS', this.name, ...elements);
+    const r: any = await tryDo(this.redis, 'CF.MEXISTS', this.name, ...elements.map((e) => this.encodeValue(e)));
     const arr = (r ?? []) as any[];
     return elements.filter((_, i) => toNumber(arr[i]) === 1);
   }
   async remove(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'CF.DEL', this.name, element)) === 1;
+    return toNumber(await tryDo(this.redis, 'CF.DEL', this.name, this.encodeValue(element))) === 1;
   }
   /** Java `count(V)`: CF.COUNT. */
   async count(element: string): Promise<number> {
-    return toNumber(await tryDo(this.redis, 'CF.COUNT', this.name, element));
+    return toNumber(await tryDo(this.redis, 'CF.COUNT', this.name, this.encodeValue(element)));
   }
   /** Java `getInfo()`: CF.INFO flat field/value record. */
   async getInfo(): Promise<Record<string, any>> {
@@ -3532,8 +3540,8 @@ export class RTopK extends RedisDataStructure {
   /** Java `add(V...)`: returns the evicted item per input (`null` when none). */
   async add(...elements: string[]): Promise<(string | null)[]> {
     if (elements.length === 0) return [];
-    const r: any = await tryDo(this.redis, 'TOPK.ADD', this.name, ...elements);
-    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : String(x)));
+    const r: any = await tryDo(this.redis, 'TOPK.ADD', this.name, ...elements.map((e) => this.encodeValue(e)));
+    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : this.decodeValue(x)));
   }
   /** Java `incrementBy(V, int)`: TOPK.INCRBY → evicted item or null. */
   async incrementBy(element: string, increment: number): Promise<string | null>;
@@ -3544,48 +3552,49 @@ export class RTopK extends RedisDataStructure {
     increment?: number,
   ): Promise<string | null | (string | null)[]> {
     if (typeof a === 'string') {
-      const r: any = await tryDo(this.redis, 'TOPK.INCRBY', this.name, a, increment ?? 1);
+      const r: any = await tryDo(this.redis, 'TOPK.INCRBY', this.name, this.encodeValue(a), increment ?? 1);
       const v = Array.isArray(r) ? r[0] : r;
-      return v === null || v === undefined ? null : String(v);
+      return v === null || v === undefined ? null : this.decodeValue(v);
     }
     const entries = a instanceof Map ? [...a.entries()] : Object.entries(a);
     if (entries.length === 0) return [];
     const args: (string | number)[] = [this.name];
-    for (const [item, count] of entries) args.push(item, count);
+    for (const [item, count] of entries) args.push(this.encodeValue(item), count);
     const r: any = await tryDo(this.redis, 'TOPK.INCRBY', ...args);
-    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : String(x)));
+    return ((r ?? []) as any[]).map((x) => (x === null || x === undefined ? null : this.decodeValue(x)));
   }
   async contains(element: string): Promise<boolean>;
   async contains(elements: string[]): Promise<boolean[]>;
   async contains(a: string | string[]): Promise<boolean | boolean[]> {
     if (typeof a === 'string') {
-      const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, a);
+      const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, this.encodeValue(a));
       return toNumber(Array.isArray(r) ? r[0] : r) === 1;
     }
     if (a.length === 0) return [];
-    const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, ...a);
+    const r: any = await tryDo(this.redis, 'TOPK.QUERY', this.name, ...a.map((e) => this.encodeValue(e)));
     return ((r ?? []) as any[]).map((x) => toNumber(x) === 1);
   }
   async count(element: string): Promise<number>;
   async count(elements: string[]): Promise<number[]>;
   async count(a: string | string[]): Promise<number | number[]> {
     if (typeof a === 'string') {
-      const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, a);
+      const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, this.encodeValue(a));
       return toNumber(Array.isArray(r) ? r[0] : r);
     }
     if (a.length === 0) return [];
-    const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, ...a);
+    const r: any = await tryDo(this.redis, 'TOPK.COUNT', this.name, ...a.map((e) => this.encodeValue(e)));
     return ((r ?? []) as any[]).map((x) => toNumber(x));
   }
   async list(): Promise<string[]> {
-    return (await tryDo(this.redis, 'TOPK.LIST', this.name)) as string[];
+    const r = (await tryDo(this.redis, 'TOPK.LIST', this.name)) as any[] | null;
+    return ((r ?? []) as any[]).map((x) => this.decodeValue(x));
   }
   /** Java `listWithCount()`: TOPK.LIST ... WITHCOUNT → item→count. */
   async listWithCount(): Promise<Map<string, number>> {
     const r: any = await tryDo(this.redis, 'TOPK.LIST', this.name, 'WITHCOUNT');
     const out = new Map<string, number>();
     const arr = (r ?? []) as any[];
-    for (let i = 0; i + 1 < arr.length; i += 2) out.set(String(arr[i]), Number(arr[i + 1]));
+    for (let i = 0; i + 1 < arr.length; i += 2) out.set(this.decodeValue(arr[i]), Number(arr[i + 1]));
     return out;
   }
   async getInfo(): Promise<Record<string, any>> {

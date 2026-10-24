@@ -58,10 +58,20 @@ bash scripts/redis88-up.sh   # 可选：WSL docker 起 redis:8(≥8.8, AR.*/CMS.
    （`trySetCapacity`/`tryInit` 二次调用合法返回 false）。
    Multimap 更须用 `clear()`：集合键 `{name}:<id>` 对裸名模式不可见，
    且内部 id 是确定性的——残留集合会被复用追加（Java 同行为），pattern 清理必漏。
+   **测试清理键必须经 `prefixName`/`suffixName` 生成（或写 `{${name}}:suffix`
+   带花括号字面量）**：裸 `${name}:suffix` 拼接是无括号的错误键，DEL 是静默
+   no-op——48l/48d/48o 曾因此泄漏 PES timeout ZSET，满载 run 间隔超租约后
+   purge 回收陈旧许可把计数撑爆（48l 抑制 6 轮的假抖动根因）。
    且 `clear()` 必须在 pattern 清理之前（它经 HASH 反查集合，HASH 先被删就反查为空）。
 10. **TTL 余量按最坏抖动给**：全量套件多文件并行、JVM 逐个冷启，JVM→TS 交接
     抖动可达数秒。`visible-before` 断言（先见到再消失）的 TTL 取 ≥5s；
-    `gone-after` 方向天然抗抖。1.5s 量级只在空载单测里成立。
+    `gone-after` 方向天然抗抖。1.5s 量级只在空载单测里成立。**服务器时钟本身
+    会向前跳**（WSL docker 的 redis 在重负载下时钟重同步）——绝对毫秒 score
+    的租约断言（PES timeout ZSET 等）租约取 ≥10min，否则瞬时"过期"清成员
+    会把计数器断言炸成 counter=4/zset=[]（interop48l 实测）。**双钟分歧**：
+    TS 的租约 score 用服务器 TIME，Java PES/DQ 的写入与惰性清理用**客户端
+    墙钟**——宿主与 redis 时钟偏移超过租约时跨语言"到期前不可得"断言必抖，
+    跨语言 deadline 用例只断言 gone-after 方向（interop48o 实测）。
 11. **探针命令先对 Java 4.6.1 javap 再写**：同名 API 在 4.x/5.x 形状不同
     （`ReturnType.INTEGER`→`LONG` 无别名、`StreamCreateGroupArgs` 须 `makeStream`；
     新增命令的 `args[i]` 个数守卫逐个核对，`mcnative-put` 曾差一位吞掉 TTL）。

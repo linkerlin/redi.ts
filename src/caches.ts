@@ -1057,9 +1057,15 @@ export class RSetCache<V = any> extends RedisKeyedStructure<V> {
     const now = await serverNowMs(this.redis);
     await this.purge(now);
     const enc = this.encodeValue(value);
-    const expiry = ttlMs > 0 ? now + ttlMs : 9223372036854775807;
+    // Java RedissonSetCache scores no-TTL entries `92233720368547758L - now`
+    // (Long.MAX_VALUE/100) and readAll's ZRANGEBYSCORE ceiling is that same
+    // constant — a MaxInt64 score would exceed it and make TS-written no-TTL
+    // entries invisible to Java readAll (4.6.1 + 4.8.0 bytecode-verified).
+    const expiry = ttlMs > 0
+      ? String(now + ttlMs)
+      : (92233720368547758n - BigInt(now)).toString();
     const exists = await this.redis.zscore(this.name, enc);
-    await this.redis.zadd(this.name, String(expiry), enc);
+    await this.redis.zadd(this.name, expiry, enc);
     if (maxIdleMs > 0) {
       await this.redis.zadd(this.idleKey, String(maxIdleMs), enc);
       await this.redis.hset(this.touchKey, enc, String(now));

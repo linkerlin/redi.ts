@@ -1,3 +1,708 @@
+## 2.54.0 — 2026-10-24
+
+Interop-caught wire fixes + the complete Java-4.8.0 bidirectional e2e
+evidence suite: 33 rounds, 33 new `live-interop48*` files, 111
+cross-language cases green TWICE against redis 8.10.2 (probe commands
+javap'd against the 4.8.0 jar per law 11). Four library fixes the Java
+side caught:
+
+- **codec**: `@class` is now written FIRST in encoded objects (Java
+  default-typing order) — reads are order-agnostic, but byte-comparing
+  ops (`RBucket.compareAndSet`'s Lua `GET == ARGV`) make the position a
+  wire fact.
+- **RSetCache**: no-TTL entries score `Long.MAX/100 − now` (Java's
+  ZRANGEBYSCORE ceiling in `readAll`); a MaxInt64 score made TS-written
+  entries invisible to Java (bytecode-verified 4.6.1 + 4.8.0).
+- **RPermitExpirableSemaphore**: the timeout-ZSET member is the hex
+  permit id DECODED to 16 raw bytes (Java `ByteBufUtil.decodeHexDump`) —
+  hex text broke cross-language release-by-id.
+- **RCuckooFilter/RTopK** items travel codec-encoded (Java
+  `encode(element)`); **RBloomFilterNative** gains `init(errorRate,
+  capacity)` (Java `init(double, long)`).
+
+Round 1 — `live-interop48` (probabilistic/ring family), first Java-side
+e2e: bidirectional vs Java Redisson **4.8.0** via new `TsProbe48`
+commands `cf48-*`/`topk48-*`/`td48-*`/`cb48-*`, all shapes javap'd
+against the 4.8.0 jar:
+
+- **`RCuckooFilter`/`RTopK` items now travel codec-encoded** (Java
+  `encode(element)` → JSON-quoted strings), returns codec-decoded —
+  previously raw strings, so a TS `add('x')` was invisible to Java
+  `exists("x")` and vice versa (TS-only phase 36/66 suites couldn't see
+  it: both sides of those tests used the same raw convention). `RCountMin`
+  already encoded correctly (phase74-proven) — now all three agree.
+- `RTDigest` (raw doubles) and `RCircularBuffer` (codec-encoded AR.* ring,
+  shared `redisson_acb:{name}` settings key) needed no fix; the new suite
+  proves both directions: TS rings 4 through capacity 3 ⇄ Java reads
+  `two,three,four` and rings `five` back.
+- Gated per command (`CF.RESERVE`/`TOPK.RESERVE`/`TDIGEST.CREATE`/`ARSET`)
+  + Java probe availability; needs redis ≥8.8 for the AR case
+  (`REDIS_URL=redis://127.0.0.1:6390`). 4/4 PASS on redis 8.10.2.
+
+Round 2 — `live-interop48b` (probe commands `gcra48-*`/`tsn48-*`/
+`maps48-*`/`set48-*`/`q48-*`, shapes javap'd against the 4.8.0 jar),
+first Java-side e2e for the 4.8 OSS surfaces phase 69/71/72 had covered
+TS-only:
+
+- **RGcra**: TS-configured `{name}:config` hash read back as Java
+  `GcraConfig` (period s↔ms) and vice versa; a shared burst-2 limiter
+  enforced across languages (TS and Java alternate `tryAcquire` down to
+  `limited=true`), incl. the `TOKENS n` path. Gated on the `GCRA`
+  command — **not shipped in OSS redis:8** (verified 8.10.2: 669
+  commands, none rate-limit-ish), so the case activates only on
+  GCRA-capable builds; the wire shape itself was already Java-Lua-proven
+  in phase72.
+- **RTimeSeriesNative**: raw-double TS.* series shared both directions —
+  TS adds two samples, Java reads size/firstTs/lastTs/range and appends a
+  third, TS sees all three. No codec either side (Java StringCodec).
+- **RMaps** mass set: one TS `RMaps.set` of two maps read back through
+  Java `getMap` field-by-field; Java `RMaps.set` read back through TS
+  `getMap` (codec HASH parity).
+- **RSet countDiff/countUnionApprox** (SDIFFCARD/SUNIONCARD APPROX):
+  identical cardinalities (5/15) from both languages on the same sets.
+- **RQueue.move** (LMOVEM): TS bulk-moves 2 (decoded returns), Java moves
+  1 more, both ends verified from both languages.
+- 5/5 PASS on redis 8.10.2 (GCRA case gated-skip with log); regression
+  across interop48/phase69/71/72/74/wire/mock 169/169.
+
+Rounds 3–4 — `live-interop48c` (RAtomicLong args + RSearch) and
+`live-interop48d` (RAtomicDouble args + PES), probe commands
+`atomic48-*`/`atomicd48-*`/`search48-*`/`pes48-*`, shapes javap'd against
+the 4.8.0 jar:
+
+- **PES permit members fixed to raw bytes** — the round's second real wire
+  bug: Java ZADDs the permit as the hex id decoded to 16 raw bytes
+  (`ByteBufUtil.decodeHexDump`, confirmed in the 4.6.1 AND 4.8 bytecode);
+  TS stored the 32-char hex text, so a permit acquired in one language
+  was unreleasable in the other (both directions). All TS member
+  writes/lookups now go through `Buffer.from(id, 'hex')` (real Redis:
+  raw bytes; ioredis-mock serializes Buffer eval args symmetrically, so
+  its internally-symmetric paths keep working). e2e: TS acquires → Java
+  releases by id → availability observed on both sides, plus reverse and
+  cross-language `updateLeaseTime`.
+- `incrementAndGet(LongIncrementArgs)`/`(DoubleIncrementArgs)`: TS's
+  Lua-CAS emulation proven equivalent to Java's native `INCREX`
+  point-by-point — out-of-bounds without `saturate` rejected (value
+  unchanged, returns current), with `saturate` clamps; both directions,
+  long and double. `compareAndDelete(CompareAndDeleteArgs)` six ops agree
+  cross-language.
+- **RSearch** first Java-side e2e: TS-built index (TEXT/NUMERIC/TAG over
+  plain HASH docs) queried by Java (`*`, numeric range, tag), Java-built
+  index queried by TS incl. doc field read-back. Probe reads use
+  StringCodec — plain HASH field values are not JSON.
+- 3/3 + 2/2 PASS on redis 8.10.2; regression incl. PES phases 3/8/16/19,
+  mock + wire + interop48/48b: 191/191.
+
+Round 5 — `live-interop48e` (probe commands `bfn48-*`/`rate48-*`/
+`q48-offer`): RBloomFilterNative, blocking queue move and rate-limiter
+permit recycling.
+
+- **RBloomFilterNative**: elements are RAW strings on both sides (Java
+  StringCodec — deliberately NOT codec-encoded, the opposite of
+  CF/TopK); e2e shares the bits in both directions (TS reserve+add ⇄
+  Java exists/count). Also closes a 1:1 API gap: TS gained
+  `count()` (BF.CARD) and `init(errorRate, capacity)` matching Java's
+  `init(double, long)`.
+- **BLMOVEM**: TS consumer blocks on a dedicated connection with
+  `exactly(2)` — the move completes only after Java feeds BOTH elements
+  (`COUNT 2` alone wakes on the first push and moves what is there;
+  EXACTLY is the wait-for-all selector).
+- **RRateLimiter**: permits acquired in TS, recycled by `release()`,
+  immediately acquireable by Java `tryAcquire` — the release/recalc
+  branch phase68 covered TS-only, now cross-language.
+- 3/3 PASS; regression mock + wire + interop48–48e + phase22: 171/171.
+
+Round 6 — `live-interop48f`: TimeSeries labels and RJsonBucket deep
+paths — the two subtlest wire surfaces left (probe commands
+`ts48-addlabel`/`ts48-rangebylabel`/`json48-*`).
+
+- **TimeSeries labels (law 12 in action)**: TS's codec-encoded label
+  blob (flag-2/3 members) is found by Java 4.8's `entryRangeByLabel`,
+  which also filters out unlabeled members; Java 4.8's own
+  `add(ts, v, label)` is found by TS `rangeByLabel`. Each direction
+  uses a separate series key — the e2e re-confirmed live why law 12
+  forbids mixing families in one series: Java 4.8's old-signature add
+  runs the seq-HASH Lua while TS's old API keeps seq STRING
+  (WRONGTYPE without the guard).
+- **RJsonBucket deep paths**: TS document write read by Java through
+  single-path queries (RedisJSON returns the match array — probe decodes
+  with JacksonCodec<List>, Map fails on `[2]`); Java `set(path, v)` and
+  `setIfAbsent(path, v)` read precisely by TS (`$.b.c` → `[3]`); NX
+  verdicts agree on occupied paths in both languages.
+- 2/2 PASS; regression incl. phase25/27/35/43 + mock + wire + all six
+  interop suites: 174/174.
+
+Round 7 — `live-interop48g` (probe commands `search48-agg`/`lock48-*`):
+aggregation, blocking deque takes and cross-language force-unlock.
+
+- **FT.AGGREGATE**: TS-built TAG index aggregated by Java
+  (`GROUPBY @cat REDUCE COUNT 0` — `GroupBy.fieldNames` wants the `@`
+  property syntax, the probe adds it) and a Java-built index aggregated
+  by TS raw REDUCE tokens — identical group rows (fruit=3/berry=2 and
+  fruit=2/berry=1) from both languages.
+- **RBlockingDeque**: TS `takeFirst`/`takeLast` block on dedicated
+  connections; Java `q48-offer` (RPUSH) feeds them — the head-pop and
+  tail-pop both wake and return, queue drained to empty.
+- **RLock.forceUnlock**: a watchdog-held TS lock force-released by Java
+  (TS re-acquires), and a Java-held lock force-released by TS (Java's
+  isLocked flips) — the disaster-recovery path, cross-language.
+- 3/3 PASS; regression incl. phase3/5/45 + mock + wire + all seven
+  interop suites: 189/189.
+
+Round 8 — `live-interop48h` (probe commands `sem48-*`): multi-queue
+blocking polls, semaphore drain and the BLMOVE relay.
+
+- **pollFromAny/pollFirstFromAny**: TS consumer blocks across multiple
+  queues (BLPOP over [q1,q2] / BLMPOP COUNT 2); Java feeds one of them;
+  the single pop resolves from the fed queue, the batch pop drains the
+  loaded queue only (atomic on one key).
+- **RSemaphore**: permits configured by TS are drained to zero by Java
+  `drainPermits()`; TS `release()` restores cross-language visibility
+  (Java `tryAcquire` consumes it); reverse direction with Java-configured
+  permits drained by TS.
+- **pollLastAndOfferFirstTo** (BLMOVE RIGHT→LEFT): blocking relay fires
+  on the first push; with elements resident the TAIL relays and is
+  LPUSHed to the destination head (Java reads [r3, r1] after two relays).
+- 3/3 PASS; regression mock + wire + all eight interop suites + phase3:
+  182/182.
+
+Round 9 — `live-interop48i` (probe commands `bfl48-*`/`lex48-*`): the
+hash-based bloom filter, lex set and JSON array ops.
+
+- **RBloomFilter (HighwayHash-128)** — the Lua/hash one, distinct from
+  round 5's native `BF.*` filter: cross-language contains proves the
+  HighwayHash-128 port lands on identical bit positions (TS init+add ⇄
+  Java contains, both directions; config key is the hash-tag
+  `{name}:config`).
+- **RLexSortedSet**: members are RAW strings both sides (Java
+  StringCodec); Java `range` takes ELEMENT bounds and adds the `[`
+  brackets itself (passing raw lex syntax like `-`/`+` corrupts them);
+  TS ranges with its own lex-syntax bounds — full order, rank and count
+  agree cross-language.
+- **RJsonBucket array/string ops** (phase43 TS-only until now): TS
+  `arrayAppend` observed by Java (`$.arr` → `[[1,2,3]]`); Java path
+  writes consumed by TS `arrayIndex`/`arrayPop`/`arraySize`; `stringAppend`
+  growth visible to Java.
+- 3/3 PASS; regression mock + wire + the original live-interop fixtures
+  + all nine interop suites: 179/179.
+
+Round 10 — `live-interop48j` (probe commands `latch48-*`/`rw48-*`):
+cross-language coordination.
+
+- **RCountDownLatch**: TS `await` polls the shared counter while Java
+  `countDown()`s it to zero — the one-shot barrier opens for the TS
+  awaiter; reverse setup with a Java-armed latch released by TS.
+- **RReadWriteLock**: a TS-held READ lock lets Java read-acquire
+  (shared) while denying its write-acquire; a Java-held WRITE lock
+  blocks both TS ends; every transition flips exclusivity correctly.
+- 2/2 PASS; regression mock + wire + phase3 + all ten interop suites:
+  187/187.
+
+Round 11 — `live-interop48k` (probe commands `bkt48-*`/`tsn48-*`/
+`vec48-*`): bucket object CAS, native multi-series MRANGE and the
+vector set.
+
+- **`@class` now written FIRST in encoded objects** — the round's real
+  wire bug (4th of this effort): Java's JsonJacksonCodec default typing
+  emits `{"@class":"java.util.LinkedHashMap","v":1}` while TS emitted
+  the `@class` LAST. Reads are order-agnostic (every fixture passed for
+  years), but byte-comparing ops exposed it — Java's
+  `RBucket.compareAndSet` on a TS-written object always failed. TS now
+  emits `@class` first (`javaTypeWrap`); 220/220 regression incl. the
+  python interop and the 4.6.1 fixtures.
+- **RBucket.compareAndSet on objects**: expect/update maps CAS in both
+  languages; stale expects rejected.
+- **RTimeSeriesNatives MRANGE with FILTER** (phase71 TS-only): TS-created
+  labeled native series found by Java's filter (others excluded), and
+  Java-created labeled series found by TS's `TSMultiRangeArgs.filter`.
+- **RVectorSet** (deep 4.8 surface, only 4.6.1 basics covered before):
+  TS-added vectors similarity-searched by Java (`getSimilar`);
+  Java-added vector with JSON attributes read back by TS
+  (`sim`/`getAttributes`); TS `setAttributes` visible to Java.
+- 3/3 PASS on redis 8.10.2.
+
+Round 12 — `live-interop48l`: wake paths and expiry args.
+
+- **PES blocked acquire woken cross-language**: a TS `acquire()` parked on
+  the last permit resumes when Java `release(permitId)` frees it and
+  publishes the `redisson_sc:{name}` wake — the blocked side receives a
+  fresh permit id.
+- **RArray inserts** (phase73 TS-only before): TS `ARINSERT` appends read
+  positionally by Java; Java's append observed via TS `range` (explicit
+  bounds — TS `range()` rejects negative indexes).
+- **INCREX `timeToLive`**: TS's Lua-CAS PX and Java's native
+  `INCREX ... PX` both leave live TTLs on the shared key, mutually
+  readable; a TS renewal with a shorter window shortens it (PTTL
+  verified raw).
+- 3/3 PASS; regression incl. phase73 + mock + wire + all twelve
+  interop suites: 190/190.
+
+Round 13 — `live-interop48m`: CONCURRENT cross-language contention (all
+earlier suites alternated operations sequentially).
+
+- **Atomic INCR race**: 50 TS + 50 Java increments in flight together →
+  exactly 100, read identically by both.
+- **Queue drain race**: 20 preloaded items consumed by concurrent TS and
+  Java polls → every item delivered exactly once (union = full set, no
+  duplicates, queue empty).
+- **Semaphore no-oversell**: 1 permit raced by both languages → exactly
+  one holder, none available, regardless of the winner.
+- Flake hunted down and fixed in the round-12 PES wake case: the 6390
+  redis (WSL docker) **jumps its clock forward** under parallel load,
+  expiring short leases mid-test and skewing counters (observed
+  counter=4/zset=[]). 10-minute leases make any realistic jump
+  irrelevant; lesson folded into AGENTS law 10.
+- 3/3 PASS; full 15-file interop regression under parallel load:
+  188/188.
+
+Round 14 — `live-interop48n`: TRI-LATERAL (TS + Java 4.6.1 + Java 4.8.0
+in one worker, both resident JVMs) and Unicode payloads.
+
+- **Rolling upgrade relay**: one counter relayed TS → 4.6.1 set → 4.8.0
+  increment → read back identically by all three; one queue fed by three
+  producers (one per runtime), drained in order by TS.
+- **Version-mixed lock handoff**: a lock held by TS denies 4.6.1
+  `tryLock`, is observed `locked` by 4.8.0, force-released BY 4.8.0 and
+  re-acquired by 4.6.1 — the lock wire is stable across Java versions
+  (the rolling-upgrade disaster-recovery path).
+- **Unicode**: CJK/emoji/accented bucket fields and queue members cross
+  languages intact. Java verification goes through boolean
+  field-match commands (`bkt48-expectfield`/`q48-expectpoll`) so values
+  never echo through stdout (host-charset-sensitive); Java-written CJK
+  (UTF-8 stdin args) read exactly by TS.
+- 3/3 PASS; full 16-file interop regression: 191/191.
+
+Round 15 — `live-interop48o`: TTL-driven CRASH RECOVERY and large
+payloads (probe commands `bstream48-stat`/`bstream48-gen`).
+
+- **Lock lease expiry**: a TS holder that never unlocks (explicit short
+  lease, no watchdog — a crashed client) is recovered purely by expiry:
+  Java 4.6.1 `tryLock` goes CONTENDED → ACQUIRED across the window.
+- **PES permit expiry**: an unreleased permit returns to the pool by
+  lease expiry and Java acquires it ("gone-after" direction only — see
+  the clock note).
+- **DelayedQueue firing**: the 4.6.1 probe offers with a delay (its
+  resident JVM schedules the transfer); TS's destination poll receives
+  the item after the deadline.
+- **Large payloads**: 128KB of random bytes written by TS verified by
+  Java via len+sum stats; 64KB of deterministic pattern written by Java
+  verified byte-for-byte (0 mismatches) by TS.
+- **Clock finding documented (AGENTS law 10)**: TS scores leases with
+  server TIME while Java PES/DQ writes and lazily purges with its
+  CLIENT wall clock — with the WSL-vs-host skew exceeding the lease,
+  cross-language "not before deadline" assertions are inherently flaky;
+  such cases assert only the gone-after direction.
+- 4/4 PASS; full 17-file interop regression: 195/195 (one load-sensitive
+  first-run blip did not reproduce).
+
+Round 16 — `live-interop48p`: numeric precision boundaries, the last
+untested codec risk area (probe commands `bkt48-setlong`/
+`atomic48-setlong`).
+
+- **Unsafe longs (|v| > 2^53)**: the wire carries the exact decimal in
+  the `["java.lang.Long",v]` wrapper. Java reads TS-written 2^53+1
+  EXACTLY (and −2^53−5); Java-written values read back exactly by TS
+  through the opt-in `JsonCodec({ bigIntForUnsafeLong: true })`. (The
+  default codec keeps its documented lossy number contract on DECODE;
+  encoding was verified lossless — the raw stored bytes carry the full
+  literal either way.)
+- **int32 boundary**: 2147483647 stays a bare literal, 2147483648 gets
+  the Long wrapper — wire shapes verified raw, values exact in both
+  directions.
+- **RAtomicLong** stores raw decimal strings: unsafe values exact in
+  both directions with the plain API (TS parses unsafe as BigInt).
+  **Doubles** round-trip bit-for-bit (Java's minimal `Double.toString`
+  agrees with TS's serialization).
+- 3/3 PASS; full 19-file interop regression incl. the python codec
+  cross-checks: 203/203.
+
+Round 17 — `live-interop48q` (probe commands `search48-alias`/
+`search48-dropalias`): watchdog renewal, shared bloom init, aliases.
+
+- **Lock watchdog renewal**: a TS `lock()` with NO explicit lease
+  (watchdogTimeout 8s) stays locked at 12s — 1.5× the first lease, so
+  renewal is the only way the key exists — observed by Java's
+  `isLocked` at both ends; `unlock` flips it everywhere.
+- **Bloom shared initialization** (round 9 proved each side's OWN init;
+  this closes the loop): Java ADDS bits into a TS-initialized filter by
+  reading TS's `{name}:config` (same hashIterations/bitSize) and vice
+  versa — counts stay exact on both sides.
+- **RSearch aliases**: a TS `addAlias` resolves Java searches through
+  the alias; a Java-dropped-and-re-added alias resolves TS searches.
+- 3/3 PASS; full 19-file interop regression: 201/201 (one load-sensitive
+  first-run blip did not reproduce).
+
+Round 18 — `live-interop48r`: the final structural gaps.
+
+- **RBoundedBlockingQueue across languages**: capacity configured by TS
+  (`trySetCapacity(2)`, companion `redisson_bqs:{name}`) gates Java's
+  blocking `put` — the third put parks (its result key shows
+  `BQ_PUT_STARTED`) until a TS `take` frees the slot and completes it
+  (`BQ_PUT_OK`); drain restores the remaining capacity to 2. (The
+  capacity key stores the REMAINING counter, not the max —
+  `getCapacity()` is a remainingCapacity alias.)
+- **PES multi-permit atomicity**: TS `tryAcquire(lease, 2)` consumes two
+  permits in one Lua; Java sees exactly one remaining, takes it, and
+  TS's next 2-permit attempt is rejected whole (no partial grant).
+  Cleanup uses the hash-tag `{name}:timeout` form (law 4 — plain-form
+  deletes leak members across runs).
+- **RJsonBucket terminal ops**: TS `merge` read by Java as the merged
+  shape; TS `toggle` flip seen by Java; Java path-writes consumed by TS
+  `arraySize`/`clear` (cleared empty array reads back as the match
+  array `[[]]`).
+- 3/3 PASS; full 20-file interop regression: 204/204 (one first-run
+  blip did not reproduce).
+
+Round 19 — `live-interop48s` (probe command `sem48-release`): the last
+distinct blocking code paths.
+
+- **`RBlockingQueue.take()` forever-block**: TS parks on a dedicated
+  connection with NO timeout parameter; a Java offer wakes it (30s
+  safety race fails loudly instead of hanging on a missed wake). Every
+  earlier round used the timeout variants.
+- **`RSemaphore.acquire()` wake loop**: TS blocks on the last permit
+  held by Java; Java's `release()` publishes the `redisson_sc` wake and
+  the TS acquire resolves holding the permit — the plain-semaphore wake
+  path, previously proven only for PES (round 12).
+- 2/2 PASS; full 21-file interop regression: 206/206 (one first-run
+  blip did not reproduce).
+
+Round 20 — `live-interop48t` (probe commands `flock48-*`, `topic48-*`,
+`mc48-*`): three surfaces never exercised cross-language before.
+
+- **RFairLock FIFO queue, both wake directions**: Java holder → TS
+  `lock()` queued → Java unlock wakes TS; and TS holder → Java
+  background `tryLock(wait, lease)` waiter → TS unlock wakes Java.
+  Queue member / HASH field / wake-channel suffix are `id:threadId`
+  on both sides, so the wake resolving IS the wire proof. Plus
+  `tryLock()` immediate-fail against a Java holder.
+- **RTopic pub/sub payload**: channel is the raw name (no prefix —
+  Java wraps it in ChannelName directly). TS listener decodes Java's
+  JsonJacksonCodec payload and vice versa; PUBLISH's receiver count
+  sees the other side's subscriber (exactly 1).
+- **RMapCache per-entry TTL**: Java `put(k, v, ttl)` → TS get unpacks
+  Java's packed value + deadline ZSET; TS `put(k, v, ttlMs)` → Java
+  get unpacks TS's packing while alive. Expiry asserted gone-after
+  only (law 10). First live proof of the MapCache packed layout
+  against 4.8.
+- Test-side lesson: `getTopic()` returns a fresh instance each call —
+  `removeListener` on a new instance no-ops and the old subscription
+  leaks (PUBLISH counted 2 receivers). Hold one instance.
+- 5/5 PASS; full 22-file interop regression: 69/69 (one first-run
+  blip in 48l did not reproduce).
+
+Round 21 — `live-interop48u` (probe commands `zset48-*`, `ring48-*`,
+`sc48-*`): the ZSET / ring / set-cache families had thorough 4.6.1-probe
+coverage but no 4.8.0-jar evidence until now.
+
+- **Real wire bug fixed (`RSetCache` no-TTL score)**: TS scored no-TTL
+  entries `MaxInt64`, but Java scores them
+  `92233720368547758L - now` (Long.MAX_VALUE/100 — bytecode-verified
+  identical on 4.6.1 AND 4.8.0) and `readAll`'s ZRANGEBYSCORE ceiling
+  is that same constant, so TS-written no-TTL entries were INVISIBLE
+  to Java `readAll` (contains/size passed — only readAll exposes it;
+  the 4.6.1 probe never tested a TS no-TTL entry, so it went
+  unnoticed). `src/caches.ts` now writes Java's formula (BigInt for
+  the >2^53 constant); the sc48 test asserts the fixed direction
+  (Java readAll reads back a TS no-TTL entry) plus TTL gone-after on
+  both sides.
+- RScoredSortedSet: codec members + scores read back both directions;
+  rank/first/last/pollFirst/addScore/count agreement; GT conditionals
+  agree cross-language.
+- RRingBuffer: capacity trim round-trips through both writers
+  (`redisson_rb:{name}` settings key identical).
+- 4/4 PASS; SetCache regressions (mock 154 + live phase 5/16/62/72
+  20/20) green; full 23-file interop regression: 73/73 (one first-run
+  blip did not reproduce; rerun twice clean).
+
+Round 22 — `live-interop48v` (probe commands `stream48-*`, 10 new):
+RStream, the biggest family still without 4.8.0-jar evidence.
+
+- **add/read both directions**: field names AND values are
+  codec-encoded on the wire; TS group-read decodes Java's entries and
+  vice versa (`fields={temp=19}` from a TS-written entry), ids agree.
+- **PEL is cross-language**: a Java consumer's unacked reads appear in
+  TS `listPending` (consumer name and all); TS `claim` (XCLAIM, min
+  idle 0) + `ack` shrinks Java's PEL; Java `ack` closes it — both
+  sides report empty.
+- **XAUTOCLAIM takeover**: TS-consumer pending entries claimed by
+  Java's `autoClaim` (min-idle 0); ownership flip visible from TS
+  `listPending` before TS acks everything clean.
+- 3/3 PASS first try; full 24-file interop regression: 76/76 (48l's
+  PES-wake case blipped twice under full load — solo + two full reruns
+  all green, same documented clock-jump class; no code change needed).
+
+Round 23 — `live-interop48w` (probe commands `bits48-*`, `hll48-*`,
+`geo48-*`, `idgen48-*`): the four smaller families the 4.6.1 probe had
+covered but the 4.8.0 jar had zero evidence for.
+
+- RBitSet: single bits, BITFIELD 64-bit segments and BITOP OR agree
+  both ways. Lesson: BITFIELD windows are MSB-first (value 5 at bit
+  offset 64 → set bits {125,127} in LSB numbering), while SETBIT bits
+  are LSB-numbered — both sides consistent, the test's first draft
+  assumed little-endian.
+- RHyperLogLog: shared register counts identically (5 → 7 through
+  both writers). RGeo: dist/pos/search agree both directions on codec
+  members. RIdGenerator: block allocation is `[old, old+alloc)` on
+  both sides (Java's Lua returns the OLD counter as block start);
+  each fresh Java instance burns a whole block — exact sequence
+  1000/1010/1020… asserted, no duplicates.
+- **48l's chronic PES-wake flake ROOT-CAUSED and fixed**: the PES
+  timeout ZSET is `suffixName`-braced (`{name}:timeout`) but 48l/48d/
+  48o cleanup deleted the UNBRACED `${name}:timeout` — a silent no-op
+  that leaked stale permits across runs; any full-suite run spaced
+  >10 min from a leak had its purge recover them, inflating
+  `availablePermits` (observed as counter=2). Cleanup keys now use the
+  braced form; leaked keys purged from 6390.
+- **48o's DQ test latent bug exposed by that fix**: `poll(12000)` is
+  the non-blocking COUNT overload, not a timed wait — it used to pass
+  by draining leftover transfers from the leaked staging keys. Now
+  uses `pollWithTimeout(12000)` (blocking) and passes on clean state.
+- 4/4 PASS; full 25-file regression 80/80 TWICE consecutively — the
+  48l flake is gone with its root cause.
+
+Round 24 — `live-interop48x` (probe commands `adder48-*`, `mm48-*`,
+`lmm48-*`, `map48-random-entries`): the last three families without
+4.8.0-jar evidence.
+
+- RLongAdder cohort flush chain, the subtlest wire in the library:
+  Java cohort `add(100)` → TS `add(20)` + `sum()` (merge) = 120 →
+  signal → Java cohort `sum()` = 120, both exact. Per-client
+  `{name}:{id}:counter` keys are random per client — cleanup uses a
+  `*name*` pattern sweep (no braces in glob).
+- RMultimap: Highway-derived collection ids must match cross-language
+  or `getAll` misses — SET and LIST variants, both directions; cleanup
+  via `delete()` per law 9 (child collections are invisible to
+  patterns and ids are deterministic).
+- RMap `randomEntries`: HRANDFIELD subsets from both writers stay
+  inside the shared key space.
+- 3/3 PASS first try; full 26-file interop regression: 83/83 TWICE
+  consecutively. With this round every structure family in
+  COMPATIBILITY.md has live bidirectional evidence against the 4.8.0
+  jar.
+
+Round 25 — `live-interop48y` (probe commands `batch48-run`,
+`list48-range`, `buckets48-*`, `script48-*`): the execution layer —
+RBatch, RScript, RBuckets — joins the 4.8.0 evidence set (structure
+families were closed in round 24).
+
+- RBatch both directions: TS queues codec-encoded bucket/map/list/
+  atomicLong writes and executes; Java reads each back. Java's batch
+  facades expose ONLY the `*Async` methods (RFutures settle on
+  `execute()` — compile-time discovery); TS's per-op Deferreds decode
+  on execute the same way (incrementAndGet → 1, add → 2 asserted).
+- RScript asymmetry documented, not "fixed": Java eval encodes ARGV
+  through the codec (`"v"` with quotes) and decodes VALUE replies
+  through it; TS eval passes values raw and returns raw replies. The
+  round trip works because each side reads through its own codec
+  (Java script-put → TS bucket get; TS bucket set → Java script-get
+  VALUE). Script bodies are space-free constants duplicated
+  byte-identically in the probe (args split on spaces, law 11). Sha
+  sharing goes both ways: TS scriptLoad → Java scriptExists + evalsha;
+  Java scriptLoad → TS scriptExists + evalSha (raw reply, JSON-decoded
+  in the test).
+- RBuckets MSET/MGET both directions.
+- 3/3 PASS first try; full 27-file interop regression: 86/86 TWICE
+  consecutively; build green.
+
+Round 26 — `live-interop48z` (probe commands `sharded48-*`,
+`buckets48-casexist/casabsent`, `bq48-bgtake/bgresult`,
+`deque48-push/pop`): the queue/topic/deque edges the earlier rounds
+skipped.
+
+- RShardedTopic (4.8: extends RTopic, wire is SPUBLISH/SSUBSCRIBE —
+  TS delivers via the `smessage` event): codec payloads decode both
+  directions and TS sees the SPUBLISH receiver count (publish → 1
+  while Java listens).
+- RBuckets conditional MSETEX (XX/NX) all-or-nothing both directions:
+  a failed XX writes NEITHER key (pre-existing TS value intact);
+  Java's `SetArgs.entries(m).timeToLive(...)` lands codec values + TTL
+  on both keys (PTTL bounded, read by TS); TS `setIfAllKeysAbsent/
+  setIfAllKeysExist` verified by Java readback.
+- RBlockingQueue wake both ways: TS `take()` parked on BLPOP woken by
+  Java's plain RPUSH offer; a Java background take() (daemon thread +
+  latch statics, REPL stays responsive) woken by a TS offer.
+- RDeque both-ends ops both directions (the no-arg `pollFirst/
+  pollLast` are inherited from `java.util.Deque` in 4.8 — javap of the
+  interface alone doesn't show them).
+- 4/4 PASS first try; full 28-file interop regression: 90/90 TWICE
+  consecutively; build green.
+
+Round 27 — `live-interop48aa` (probe commands `latch48-bgwait/
+bgresult`, `sem48-bgacquire/bgresult`, `pattern48-listen/poll`,
+`mmc48-put/expirekey/getall`): blocked waits woken cross-language and
+the last two pub/sub / multimap shapes without 4.8 evidence.
+
+- RCountDownLatch wake both ways: TS `await()` parked on a count of 2
+  resolves when Java counts down twice; a Java background await() (the
+  no-arg variant is VOID in 4.8 — probe uses the bounded 120s one)
+  resolves on TS's countdowns.
+- RSemaphore wake both ways on the shared `redisson_sc:{name}`
+  channel: TS `acquire()` parked at 0 permits woken by Java release();
+  a Java background acquire() woken by a TS release(1).
+- RPatternTopic: Java's PatternMessageListener is 3-arg (pattern,
+  channel, message) — TS receives concrete channel + decoded payload
+  both directions; publish receiver count visible to TS.
+- RSetMultimapCache TTL: the RMultimapCache interface has NO
+  put-with-TTL (both languages) — per-key expiry is `expireKey` only;
+  Java values visible to TS, TS values to Java, empty after expiry
+  (gone-after, law 10). Cache-variant read method is `get(key)`
+  returning an array, not `getAll`.
+- 4/4 PASS (one test-side `getAll`→`get` fix); full 29-file interop
+  regression: 94/94 TWICE consecutively; build green.
+
+Round 28 — `live-interop48ab` (probe commands `lock48-trylock`,
+`map48-putifabsent/replace3/removeval/putall`): mutual exclusion and
+conditional writes — the semantics behind wire shapes earlier rounds
+only probed non-blockingly.
+
+- RLock mutex both ways: a TS-held lock rejects Java's tryLock(0) and
+  vice versa (Java locks with a 10s lease); Java forceUnlock releases
+  the other side's view and TS can lock again. Companion of the round
+  20 FairLock FIFO/wake tests — plain-lock exclusion was unproven
+  against 4.8 until now.
+- RReadWriteLock full semantics across languages: Java read held → TS
+  read tryLock succeeds (shared) while TS write tryLock fails; after
+  all readers release, TS writer holds and Java's write tryLock fails;
+  after TS releases Java can write. Writer exclusion is symmetric.
+- RMap conditional CAS chain alternating sides: putIfAbsent sees the
+  other's value as `prev`, 3-arg replace accepts only the exact old
+  value on both sides, remove(key,value) rejects stale expectations,
+  putIfAbsent creates after delete.
+- RMap lazy HSCAN iterator: 12 Java-written fields fully collected at
+  COUNT 5 (multi-round scan), then a TS put read back by Java.
+- 3/3 PASS (one assertion-string typo fixed); full 30-file interop
+  regression: 97/97 TWICE consecutively; build green.
+
+Round 29 — `live-interop48ac` (probe commands `rtopic48-*`,
+`set48-addall/readall/union`, `zset48-addpairs/union/dump`): reliable
+delivery and set algebra.
+
+- RReliableTopic both directions: XADD field `m` + one subscriber group
+  per client, payloads codec JSON through XREADGROUP. publish() returns
+  the live group count (0 on a groupless topic, 1 across languages).
+  Consumed-by-all entries are DELETED (Java size() = 0 after delivery
+  is correct semantics); groupless entries stay (size = 1).
+- **Set store semantics CLARIFIED by e2e** (no library change — TS
+  already matched): Java `union(names)` overwrites SELF with
+  union(others) — the SUNIONSTORE args[0] is only the DESTINATION, not
+  an input (my first bytecode reading mistook it for an input; clean
+  probe repro: s1={a,b,c} union s2={d,b,e} → s1={b,d,e}, count=3, for
+  4.6.1 AND 4.8.0 — bytecode-identical). TS's pinned behavior was
+  right; the COMPATIBILITY row's "(self IS an input)" note was
+  misleading and is now corrected. read* variants DO read self as
+  first input (fresh s4={f,x} readUnion(s1,s2) → {b,d,e,f,x}, s4
+  untouched).
+- RScoredSortedSet algebra: Java `union(Aggregate, String...)` MAX
+  merge read by TS, TS `unionWith({names, aggregate: 'SUM'})` read by
+  Java — member scores agree both ways (Java prints whole doubles as
+  "1.0").
+- 3/3 PASS (test-side expectation fixes: SUNIONSTORE destination
+  semantics, consumed-entry deletion, `add` returns boolean); full
+  31-file interop regression: 100/100 TWICE consecutively; build green.
+
+Round 30 — `live-interop48ad` (probe commands `mc48-compute/
+expireentry/rttl`, `mcn48-put/get/rttl`, `bits48-and/xor`,
+`list48-set/get`): TTL-deep map-cache surfaces and small operators.
+
+- RMapCache deep ops: TS `computeIfAbsent(key, ttlMs, fn)` (per-key
+  lock + TTL) read by Java; Java `computeIfAbsent(K, Duration, fn)`
+  read by TS; per-key `remainTimeToLive(K)` cross-read both ways;
+  `getWithTTLOnly` returns without refreshing; `expireEntry`
+  shortens a TTL set by the other side (bounds asserted both views,
+  small clock-rounding slack for the WSL host).
+- RMapCacheNative (7.4+ HSETEX/HPEXPIRE) — zero 4.8 evidence until
+  now: Java `put(K, V, Duration)` ↔ TS `put(key, value, ttlMs)`,
+  values and per-field HPTTL read back on both sides.
+- **BITOP self-as-input lesson (test-side, no library change)**:
+  Java's `and/xor` build `BITOP <op> self self others...` — the
+  destination is ALSO a source, so AND into a fresh (zero) key yields
+  all zeros; seed the destination with OR first. And the `or/and/xor`
+  return value is the result's BYTE LENGTH, not popcount — round 23's
+  "len=" wording on `bits48-or` was the honest one.
+- Grab-bag: TS Bucket `getAndSet`/`getAndDelete` with Java readback;
+  RList index ops both ways (TS `set`/`trim` ↔ Java single-index
+  `get`, Java `set` ↔ TS `get`).
+- 3/3 PASS after two test-side semantic fixes (BITOP seeding, TTL
+  rounding slack); full 32-file interop regression: 103/103 TWICE
+  consecutively; build green.
+
+Round 31 — `live-interop48ae` (probe commands `exp48-rttl/expire/
+expireat/persist`, `zset48-bgpoll/bgresult`, `mcn48-putifabsent`):
+TTL-management primitives and blocking sorted-set polls — the last
+unproven surfaces outside RFunction.
+
+- RExpirable primitives full chain: TS `expire(ms)` → Java
+  `remainTimeToLive()` bounded; Java `expire(ms, MS)` → TS bound; TS
+  `expireAt(epochMs)` → Java bound; Java persist is `clearExpire()`
+  (RExpirable has NO persist() in 4.8 — it lives on RObject, found at
+  compile time) → TS reads -1; TS `clearExpire()` → Java reads -1.
+- RScoredSortedSet blocking polls both ways: TS `pollFirstWithTimeout`
+  parked on BZPOPMIN woken by Java `add` (ScoredEntry carries value +
+  score 1.5); a Java background `pollFirst(60, SECONDS)` woken by a TS
+  add.
+- RMapCacheNative conditionals: Java `putIfAbsent(K, V, Duration)`
+  creates a fresh field; TS putIfAbsent sees the existing value and
+  rejects; TS putIfAbsent with TTL lands where Java reads value +
+  HPTTL.
+- 3/3 PASS first try; full 33-file interop regression: 106/106 TWICE
+  consecutively; build green.
+
+Round 32 — `live-interop48af` (probe commands `fn48-load/callwrite/
+callread/fnexists/listlibs`): RFunction FUNCTION LOAD / FCALL — the
+last execution-layer surface without 4.8.0-jar bidirectional evidence.
+
+- TS `FUNCTION LOAD` (full payload incl. shebang) → Java `FCALL` runs
+  the TS-registered write function; Java's vararg VALUES are
+  codec-encoded (bytecode: `encode(Collection, codec)` on
+  RedissonFuction.callAsync — impl class is literally
+  `org.redisson.RedissonFuction`, typo and all), so TS's bucket decode
+  sees the clean string; Java `FCALL_RO` runs the TS no-writes read
+  function → codec-decoded VALUE.
+- Java `loadAndReplace(libName, BODY)` → TS `FCALL`/`FCALL_RO` run the
+  Java-registered functions. Java builds the shebang line ITSELF
+  (`"#!lua name=" + lib + " \n" + body`) — probe passes body-only.
+  TS reads the raw bulk reply (stored codec bytes, quotes included —
+  `JSON.parse` to compare), same asymmetry as RScript.
+- `FUNCTION LIST` both ways: Java `list(lib)` function names sorted;
+  TS `list()`/`list(lib)` library + function discovery; Java
+  `list()` all-libraries listing sees each side's library.
+- 2/2 PASS after one test-side ordering fix (per-library listlibs
+  assertions split — test 1's cleanup deletes its lib before test 2
+  runs); full 34-file interop regression: 108/108 TWICE consecutively;
+  build green.
+
+Round 33 — `live-interop48ag` (probe commands `dq48-offer/read`,
+`mlk48-trylock/unlock/bgtrylock/bgresult/bgrelease`, `rlk48-trylock/
+unlock`, `fnc48-trylockget/unlock/gettoken/delete`): delayed delivery
+and composite/fenced locking — three surfaces whose cross-language
+evidence predated the 4.8 jar rounds.
+
+- RDelayedQueue wire holds vs 4.8: Java `offer(v, 400ms, MS)` STAGES a
+  struct-packed (`Bc0Lc0`) member that TS `size()`/`pendingSize()`/
+  `contains()` unpack (payload decodes identically); TS `poll()` runs
+  the sync catch-up migration and consumes it. Reverse: TS `offer` +
+  started migrator delivers into the destination where Java polls.
+- RMultiLock all-or-nothing across languages (Java-held triple rejects
+  TS MultiLock + single lock; TS-held triple parks a Java background
+  `tryLock(6s, MS)` until TS `unlock()` wakes it); RRedLock quorum —
+  TS holding 1 of 3 still lets Java win (2 ≥ quorum), a TS RedLock at
+  1 of its targets fails AND rolls back the one it took.
+- RFencedLock DISCOVERY: Java 4.8's NO-ARG `tryLockAndGetToken()` is
+  bytecode-identical to `lockAndGetToken()` (both route to
+  waitTime=-1/leaseTime=-1) and BLOCKS on contention until an unlock
+  wake — a 180s live hang; the probe uses the bounded
+  `(waitMs, MS)` variant. TS's no-arg variant is the single
+  non-blocking attempt its interface contract promises (documented
+  divergence, client-side semantics only — the wire counter is shared
+  and monotonic across languages, and TS `delete()` resets it to 0).
+- Java multi-lock unlock lesson: the background thread holds on ITS
+  thread id — a foreign thread's `unlock()` throws, so the bg task
+  holds until `mlk48-bgrelease` asks it to release itself.
+- 3/3 PASS (two live-caught fixes: bg-thread unlock ownership, and
+  delete() = false on a fresh name); full 35-file interop regression:
+  111/111 TWICE consecutively; build green.
+
 ## 2.53.2 — 2026-10-23
 
 `stream`/`iterator` pages join the server-side collect (companion to
