@@ -199,8 +199,39 @@ public final class TsProbe48 {
     private static String mlk48BgResult = null;
     private static CountDownLatch bd48BgLatch = new CountDownLatch(1);
     private static String bd48BgResult = null;
+    private static CountDownLatch lk48BgLatch = new CountDownLatch(1);
+    private static String lk48BgResult = null;
+    private static CountDownLatch mce48Latch = new CountDownLatch(1);
+    private static String mce48Result = null;
+    private static int mce48Id = -1;
     private static CountDownLatch mlk48BgRelease = new CountDownLatch(1);
     private static CountDownLatch mlk48BgDone = new CountDownLatch(1);
+
+    /** MapCache entry listener implementing all four kinds (Java dispatches
+     *  by instanceof on the sub-interfaces; a bare MapEntryListener throws
+     *  "Wrong listener type"). */
+    private static class MceAllListener implements
+            org.redisson.api.map.event.EntryCreatedListener<String, String>,
+            org.redisson.api.map.event.EntryUpdatedListener<String, String>,
+            org.redisson.api.map.event.EntryRemovedListener<String, String>,
+            org.redisson.api.map.event.EntryExpiredListener<String, String> {
+        private void record(String kind, org.redisson.api.map.event.EntryEvent<String, String> e) {
+            mce48Result = "kind=" + kind + " key=" + e.getKey() + " value=" + e.getValue();
+            mce48Latch.countDown();
+        }
+        public void onCreated(org.redisson.api.map.event.EntryEvent<String, String> e) {
+            record("ENTRY_CREATED", e);
+        }
+        public void onUpdated(org.redisson.api.map.event.EntryEvent<String, String> e) {
+            record("ENTRY_UPDATED", e);
+        }
+        public void onRemoved(org.redisson.api.map.event.EntryEvent<String, String> e) {
+            record("ENTRY_REMOVED", e);
+        }
+        public void onExpired(org.redisson.api.map.event.EntryEvent<String, String> e) {
+            record("ENTRY_EXPIRED", e);
+        }
+    }
 
     private static List<String> dispatch(RedissonClient redisson, String cmd, String[] a) throws Exception {
         List<String> out = new ArrayList<>();
@@ -921,6 +952,10 @@ public final class TsProbe48 {
             case "mc48-putttl" -> {
                 redisson.getMapCache(a[0]).put(a[1], a[2], Long.parseLong(a[3]), TimeUnit.MILLISECONDS);
                 out.add("put=ok");
+            }
+            case "mc48-remove" -> {
+                Object prev = redisson.getMapCache(a[0]).remove(a[1]);
+                out.add("removed=" + (prev != null));
             }
             case "mc48-get" -> {
                 Object v = redisson.getMapCache(a[0]).get(a[1]);
@@ -1787,6 +1822,154 @@ public final class TsProbe48 {
                 // no-arg lock(): no lease → Java's own watchdog renews every 30s/3
                 redisson.getLock(a[0]).lock();
                 out.add("locked=true");
+            }
+            // --- Round 36: RVectorSet / RJsonBuckets ---
+            case "vs48-add" -> {
+                // vs48-add name element dim1,dim2,dim3 — comma-joined doubles (probe args split on spaces)
+                String[] parts = a[2].split(",");
+                java.util.List<java.lang.Double> vec = new java.util.ArrayList<>();
+                for (String p : parts) vec.add(Double.parseDouble(p));
+                boolean ok = redisson.<String>getVectorSet(a[0])
+                        .add(org.redisson.api.vector.VectorAddArgs.element(a[1]).vector(vec.toArray(new Double[0])));
+                out.add("added=" + ok);
+            }
+            case "vs48-sim" -> {
+                var hits = redisson.<String>getVectorSet(a[0])
+                        .getSimilar(org.redisson.api.vector.VectorSimilarArgs.element(a[1]).count(Integer.parseInt(a[2])));
+                out.add("hits=" + String.join(",", hits));
+            }
+            case "vs48-size" -> {
+                out.add("size=" + redisson.<String>getVectorSet(a[0]).size());
+            }
+            case "vs48-contains" -> {
+                out.add("contains=" + redisson.<String>getVectorSet(a[0]).contains(a[1]));
+            }
+            case "vs48-dim" -> {
+                out.add("dim=" + redisson.<String>getVectorSet(a[0]).dimensions());
+            }
+            case "jb48-set" -> {
+                // jb48-set key1 val1 key2 val2 ... — codec plain JSON docs
+                var m = new java.util.LinkedHashMap<String, Object>();
+                for (int i = 0; i + 1 < a.length; i += 2) m.put(a[i], a[i + 1]);
+                redisson.getJsonBuckets(new org.redisson.codec.JacksonCodec<>(Object.class)).set(m);
+                out.add("set=ok");
+            }
+            case "jb48-get" -> {
+                var keys = new ArrayList<String>();
+                for (int i = 0; i < a.length; i++) keys.add(a[i]);
+                var m = redisson.<String>getJsonBuckets(new org.redisson.codec.JacksonCodec<>(Object.class)).get(keys.toArray(new String[0]));
+                for (int i = 0; i < a.length; i++) out.add("k=" + a[i] + " v=" + m.get(a[i]));
+            }
+            // --- Round 37: blocking lock() wake / RBinaryStream bytes / stream trim ---
+            case "lock48-bglock" -> {
+                // daemon thread parks in blocking lock() until someone unlocks
+                lk48BgLatch = new CountDownLatch(1);
+                lk48BgResult = null;
+                Thread t = new Thread(() -> {
+                    try {
+                        redisson.getLock(a[0]).lock();
+                        lk48BgResult = "locked=ok";
+                    } catch (Exception e) {
+                        lk48BgResult = "error=" + e.getClass().getSimpleName();
+                    }
+                    lk48BgLatch.countDown();
+                });
+                t.setDaemon(true);
+                t.start();
+                out.add("armed");
+            }
+            case "lock48-bgresult" -> {
+                boolean r = lk48BgLatch.await(Long.parseLong(a[0]), TimeUnit.MILLISECONDS);
+                out.add(r ? lk48BgResult : "timeout");
+            }
+            case "bs48-set" -> {
+                // RBinaryStream extends RBucket<byte[]> — plain set/get works
+                redisson.getBinaryStream(a[0]).set(a[1].getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+                out.add("set=ok");
+            }
+            case "bs48-get" -> {
+                byte[] b = redisson.getBinaryStream(a[0]).get();
+                out.add("len=" + (b == null ? -1 : b.length)
+                        + " text=" + (b == null ? "" : new String(b, java.nio.charset.StandardCharsets.ISO_8859_1)));
+            }
+            case "stream48-trim" -> {
+                // trim(MAXLEN n) — the builder needs a terminal (noLimit)
+                long removed = redisson.<String, String>getStream(a[0]).trim(
+                        org.redisson.api.stream.StreamTrimArgs.maxLen(Integer.parseInt(a[1])).noLimit());
+                out.add("removed=" + removed);
+            }
+            // --- Round 38: BLMPOP multi-queue / semaphore addPermits ---
+            case "blm48-bgpollfirstany" -> {
+                // daemon thread parks on pollFirstFromAny(waitMs, MS, names...)
+                // — a[1..] are the queue names, a[0] the wait in ms
+                long waitMs = Long.parseLong(a[0]);
+                String[] names = java.util.Arrays.copyOfRange(a, 1, a.length);
+                bd48BgLatch = new CountDownLatch(1);
+                bd48BgResult = null;
+                Thread t = new Thread(() -> {
+                    try {
+                        // NOTE: RedissonBlockingDeque.pollFirstFromAny IGNORES the
+                        // extra names (parks on self only — source line 121); the
+                        // real multi-queue BLMPOP is the queue count variant
+                        var m = redisson.<String>getBlockingQueue(names[0])
+                                .pollFirstFromAny(java.time.Duration.ofMillis(waitMs), 1, names);
+                        String v = m.isEmpty() ? null : m.values().iterator().next().get(0);
+                        bd48BgResult = "value=" + v;
+                    } catch (Exception e) {
+                        bd48BgResult = "error=" + e.getClass().getSimpleName();
+                    }
+                    bd48BgLatch.countDown();
+                });
+                t.setDaemon(true);
+                t.start();
+                out.add("armed");
+            }
+            case "blm48-bgresult" -> {
+                boolean r = bd48BgLatch.await(Long.parseLong(a[0]), TimeUnit.MILLISECONDS);
+                out.add(r ? bd48BgResult : "timeout");
+            }
+            case "sem48-addpermits" -> {
+                redisson.getSemaphore(a[0]).addPermits(Integer.parseInt(a[1]));
+                out.add("added=ok");
+            }
+            // --- Round 39: MapCache idle expiry / HLL merge ---
+            case "mci48-put" -> {
+                // put(K, V, ttl, MS, maxIdle, MS) — the idle variant
+                redisson.getMapCache(a[0]).put(a[1], a[2],
+                        Long.parseLong(a[3]), TimeUnit.MILLISECONDS,
+                        Long.parseLong(a[4]), TimeUnit.MILLISECONDS);
+                out.add("put=ok");
+            }
+            case "hll48-merge" -> {
+                redisson.<Integer>getHyperLogLog(a[0]).mergeWith(java.util.Arrays.copyOfRange(a, 1, a.length));
+                out.add("merged=ok");
+            }
+            case "hll48-countwith" -> {
+                long c = redisson.<Integer>getHyperLogLog(a[0])
+                        .countWith(java.util.Arrays.copyOfRange(a, 1, a.length));
+                out.add("count=" + c);
+            }
+            // --- Round 40: RMapCache entry events (redisson_map_cache_* topics) ---
+            case "mce48-listen" -> {
+                mce48Latch = new CountDownLatch(1);
+                mce48Result = null;
+                org.redisson.api.RMapCache<String, String> mc = redisson.getMapCache(a[0]);
+                // Java dispatches by instanceof on the four sub-interfaces —
+                // the bare MapEntryListener is rejected ("Wrong listener
+                // type"); the static listener implements ALL four so every
+                // kind reaches us
+                mce48Id = mc.addListener(new MceAllListener());
+                out.add("listening=" + mce48Id);
+            }
+            case "mce48-poll" -> {
+                // fresh latch first — wait for the NEXT event, not a stale one
+                mce48Latch = new CountDownLatch(1);
+                boolean r = mce48Latch.await(Long.parseLong(a[0]), TimeUnit.MILLISECONDS);
+                out.add(r ? mce48Result : "timeout");
+            }
+            case "mce48-rmlistener" -> {
+                redisson.getMapCache(a[0]).removeListener(mce48Id);
+                out.add("removed=ok");
             }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }

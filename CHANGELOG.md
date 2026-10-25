@@ -31,6 +31,132 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.3 — 2026-10-25
+
+Rounds 36-40 of the Java-4.8.0 evidence suite (docs+test only; no
+library changes): RVectorSet + RJsonBuckets first cross-language
+evidence (36); blocking-lock wake / BinaryStream raw bytes / stream
+trim (37); BLMPOP multi-queue wakes + addPermits accounting + the
+deque pollFirstFromAny ignores-names quirk (38); MapCache idle expiry
+/ HLL algebra / fair-lock mixed FIFO (39); MapCache event channels
+with the Java-4.8 addListener zero-subscription quirk (40).
+
+Round 36 — `live-interop48aj` (probe commands `vs48-add/sim/size/contains/
+dim`, `jb48-set/get`): two module surfaces whose prior evidence was
+TS-only phase suites.
+
+- RVectorSet: TS `add(element, vector)` builds the set (DIM fixed by the
+  first vector) — Java `contains`/`size`/`dimensions`/
+  `getSimilar(element, count)` see the identical elements and rank the
+  nearest cluster first; a Java `VectorAddArgs.element().vector()` add is
+  visible to TS `contains`/`size` and TS `sim` ranks it with the cluster.
+  Gated on the vector-set module (skip with a logged line).
+- RJsonBuckets: Java `set(Map)` / `get(keys)` with 4.8's JacksonCodec —
+  DISCOVERY: `getJsonBuckets()` REQUIRES a `JsonCodec` argument, and
+  `JsonJacksonCodec` is NOT one (the Json* API moved to the new
+  codec hierarchy; `JacksonCodec(Object.class)` is the plain-JSON
+  implementor) — TS plain-JSON docs read identically both ways.
+- 2/2 PASS first try; full 38-file interop regression: 120/120 TWICE
+  consecutively; build green.
+
+## Unreleased
+
+Round 37 — `live-interop48ak` (probe commands `lock48-bglock/bgresult`,
+`bs48-set/get`, `stream48-trim`): blocking-lock wakes, binary-stream
+bytes, and stream trim — paths the earlier rounds did not cover.
+
+- RLock BLOCKING `lock()` (not tryLock) woken across languages both
+  ways: a TS `lock()` parked behind a Java holder completes on Java
+  `unlock()`; a Java background blocking `lock()` behind a TS holder
+  completes on TS `unlock()`.
+- RBinaryStream: RBinaryStream extends `RBucket<byte[]>` — plain
+  get/set carries raw bytes; TS `set(Buffer)` with non-UTF8-safe
+  latin1 bytes reaches Java byte-identical (length proves the high
+  bytes; the probe's line protocol prints them lossily), and Java
+  `set(byte[])` reads back through TS `get()`/`getRange()`/`size()`.
+- RStream `trim(MAXLEN n)`: Java trims a TS-built stream and vice
+  versa — removed counts and final sizes agree on both sides (Java's
+  `StreamTrimArgs.maxLen()` builder requires a terminal `noLimit()`).
+- 3/3 PASS (one test-side display fix: probe stdout renders high
+  bytes as `?`, so assertions compare length + printable segments);
+  full 39-file interop regression: 123/123 TWICE consecutively; build
+  green.
+
+## Unreleased
+
+Round 38 — `live-interop48al` (probe commands `blm48-bgpollfirstany/
+bgresult`, `sem48-addpermits`): multi-queue BLMPOP wakes and semaphore
+permit accounting.
+
+- BLMPOP: TS `pollLastFromAnyWithName` (BRPOP with name, two queues)
+  parked is woken by a Java offer into the SECOND queue and reports
+  the source; a Java background BLMPOP `pollFirstFromAny(Duration,
+  count, names...)` is woken by a TS offer into the second queue.
+- Java-side DISCOVERY: `RedissonBlockingDeque.pollFirstFromAny(long,
+  TimeUnit, names...)` IGNORES the extra names — its pollFromAnyAsync
+  parks on self only (source line 121); the real multi-queue BLMPOP
+  is the queue `pollFirstFromAny(Duration, count, names...)` count
+  variant. Documented in the test + probe comment.
+- RSemaphore `addPermits(delta)` accounting across languages: TS
+  grant / Java acquire+release / TS addPermits(+3) / Java
+  addPermits(-2) — `availablePermits` agrees on both sides at every
+  step and a cross-language acquire succeeds.
+- 2/2 PASS; full 40-file interop regression: 125/125 TWICE
+  consecutively; build green.
+
+## Unreleased
+
+Round 39 — `live-interop48am` (probe commands `mci48-put`,
+`hll48-merge`, `hll48-countwith`): idle expiry, HLL set algebra, and
+strict fair-lock FIFO — three wire behaviors the earlier rounds did
+not cover.
+
+- RMapCache IDLE expiry (the `redisson__idle__set:{name}` ZSET, a
+  distinct wire structure from the TTL set): TS
+  `put(k, v, 60s, idle 3s)` → Java reads; Java's 6-arg
+  `put(K,V,ttl,MS,maxIdle,MS)` → TS reads; past the idle window both
+  entries vanish on BOTH sides (gone-after, law 10) with the TTL far
+  from due — the idle clock, not the TTL, drove the expiry.
+- RHyperLogLog algebra: TS `countWith` over a Java-built register and
+  Java `countWith` over a TS-built one both report |{1,2} ∪ {3,4}| = 4;
+  Java `mergeWith` combines them into a third register counting 4 on
+  both sides.
+- RFairLock STRICT FIFO through mixed-language waiters: Java holder,
+  TS waiter A, Java bg waiter B, TS waiter C queue in that order;
+  serial unlocks hand the lock down the queue A → B → C (order array
+  asserts A before C, bgwaitacquired proves B in between).
+- 3/3 PASS (two test-side fixes: TS waiters need DISTINCT threadIds —
+  the shared default 1 makes them one re-entrant owner — and unlocks
+  must carry the matching threadId); full 41-file interop regression:
+  128/128 TWICE consecutively; build green.
+
+## Unreleased
+
+Round 40 — `live-interop48an` (probe commands `mce48-listen/poll/
+rmlistener`, `mc48-remove`): RMapCache entry events — the last untouched
+wire surface (`redisson_map_cache_{created,updated,removed}:{name}`
+topics).
+
+- Java writer → TS listener, full dispatch: TS `addListener({ onCreated,
+  onUpdated, onRemoved })` receives all three kinds from Java's put/
+  re-put/remove with key/value/oldValue decoded; registering sets the
+  Java `has-listeners` option so Java writers publish.
+- TS publish side verified at BYTE level: a raw subscriber on the three
+  channels sees u64LE-length-prefixed frames with codec-encoded parts
+  ([key,value] / [key,value,old] / [key,old]) — the exact framing of
+  Java's own writer (struct.pack('Lc0Lc0',...) in its put/remove Lua).
+- Java-side DISCOVERY (4.8 quirk): `RMapCache.addListener` registers
+  NOTHING observable in this standalone-RESP2 setup — NUMSUB/CHANNELS/
+  SHARDCHANNELS/NUMPAT all zero and the listener misses even its OWN
+  writes (plain RTopic in the same probe self-delivers fine, so the
+  probe's pubsub is healthy). Plus one registration serves exactly ONE
+  kind (instanceof first-match; Removed is checked first) and the bare
+  `MapEntryListener` is rejected with "Wrong listener type" — the probe
+  keeps a four-interface listener class. TS→Java listener delivery is
+  therefore not testable here; the byte-level check is TS's evidence.
+- 2/2 PASS; full 42-file interop regression: 130/130 TWICE
+  consecutively; build green.
+
 ## 2.54.2 — 2026-10-25
 
 Round 35 — `live-interop48ai` (probe commands `geo48-store/storesorted`,
