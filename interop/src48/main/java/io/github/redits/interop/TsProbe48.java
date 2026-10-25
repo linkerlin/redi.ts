@@ -1764,6 +1764,30 @@ public final class TsProbe48 {
                 boolean ok = redisson.getLock(a[0]).tryLock(0, Long.parseLong(a[1]), TimeUnit.MILLISECONDS);
                 out.add("locked=" + ok);
             }
+            // --- Round 35: RGeo store family / Java watchdog / re-entry count ---
+            case "geo48-store" -> {
+                // geo48-store name dest lon lat radiusMeters — plain STORE (no scores)
+                long n = redisson.<String>getGeo(a[0]).storeSearchTo(a[1],
+                        org.redisson.api.geo.GeoSearchArgs.from(Double.parseDouble(a[2]), Double.parseDouble(a[3]))
+                                .radius(Double.parseDouble(a[4]), org.redisson.api.geo.GeoUnit.METERS));
+                out.add("stored=" + n);
+            }
+            case "geo48-storesorted" -> {
+                // STOREDIST — dest ZSET scored by distance
+                long n = redisson.<String>getGeo(a[0]).storeSortedSearchTo(a[1],
+                        org.redisson.api.geo.GeoSearchArgs.from(Double.parseDouble(a[2]), Double.parseDouble(a[3]))
+                                .radius(Double.parseDouble(a[4]), org.redisson.api.geo.GeoUnit.METERS));
+                out.add("stored=" + n);
+            }
+            case "lock48-unlock" -> {
+                redisson.getLock(a[0]).unlock();
+                out.add("unlocked=ok");
+            }
+            case "lock48-watchdog" -> {
+                // no-arg lock(): no lease → Java's own watchdog renews every 30s/3
+                redisson.getLock(a[0]).lock();
+                out.add("locked=true");
+            }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }
         return out;

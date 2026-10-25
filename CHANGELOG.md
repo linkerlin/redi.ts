@@ -31,6 +31,38 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.2 — 2026-10-25
+
+Round 35 — `live-interop48ai` (probe commands `geo48-store/storesorted`,
+`lock48-unlock`, `lock48-watchdog`): geo store family, the Java-side
+watchdog, and lock re-entry counts — plus one live-caught library fix.
+
+- **`RGeo.storeSearchTo` FIX**: the radius/member paths of
+  `GEORADIUS … STORE`/`GEORADIUSBYMEMBER … STORE` were missing the
+  literal `STORE` token — the destination key landed as a bare
+  positional arg and Redis rejected the command (`ERR syntax error`).
+  The box path (`GEOSEARCHSTORE`, dest positional) and `STOREDIST`
+  (own token) were correct, which is why phase 20 never caught it:
+  its radius case used the sorted variant only. Fixed in
+  `buildStore`; phase 20 still 4/4.
+- RGeo store family bidirectional: TS/Java plain `STORE` destinations
+  keep the members' geohash-integer scores (~3.48e15, not 0) — both
+  languages read the identical set+scores; `STOREDIST` destinations
+  are distance-scored ZSETs readable as scored entries in either
+  language (palermo < near-west < catania from the Palermo origin,
+  200km radius).
+- Java-side watchdog: Java no-arg `lock()` (its own 30s/3 renewal)
+  stays held across a full renewal cycle — TS observes the TTL back
+  near 30s (unrenewed floor ~17.5s) and acquires only after the Java
+  `unlock()` (round 34 proved the TS-side watchdog; this closes the
+  mirror).
+- RLock re-entry count: two Java re-entries (HASH field count 2) gate
+  TS through BOTH unlocks — the count, not hash presence, controls
+  the lock.
+- 3/3 PASS (three test-side expectation fixes: geohash scores ≠ 0,
+  member/distance ordering, geo dest is a ZSET); full 37-file interop
+  regression: 118/118 TWICE consecutively; build green.
+
 ## 2.54.0 — 2026-10-24
 
 Interop-caught wire fixes + the complete Java-4.8.0 bidirectional e2e

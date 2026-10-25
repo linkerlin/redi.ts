@@ -460,8 +460,15 @@ return 0`;
       if (args.isCountAny()) params.push('ANY');
     }
     if (!hasBox && args.getOrder() !== undefined) params.push(args.getOrder()!);
-    if (sorted) params.push('STOREDIST');
-    if (!hasBox) params.push(destName);
+    // GEORADIUS/GEORADIUSBYMEMBER need the STORE/STOREDIST token before the
+    // destination key (GEOSEARCHSTORE takes the dest positionally instead)
+    if (hasBox) {
+      if (sorted) params.push('STOREDIST');
+    } else if (sorted) {
+      params.push('STOREDIST', destName);
+    } else {
+      params.push('STORE', destName);
+    }
     return { cmd, params };
   }
   private toEntry(e: any): GeoEntry<V> {
