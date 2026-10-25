@@ -31,6 +31,35 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.6 — 2026-10-25
+
+Round 43 of the Java-4.8.0 evidence suite (docs+test only): RGeo
+addIfExists (GEOADD XX) moves members cross-language; RRateLimiter
+PER_CLIENT budgets isolated per client (complements the OVERALL
+direction); RBitSet getByte/setByte/incrementAndGetByte — offsets are
+BIT offsets (both languages pass them to BITFIELD i8), cross-language
+agreement on the same field.
+
+Round 43 — `live-interop48aq` (probe commands `geo48-addifexists`,
+`rate48-setratepc`, `bs48-getbyte/setbyte`): three conditional /
+byte-level families.
+
+- RGeo `addIfExists` (GEOADD XX): updating an EXISTING member returns
+  true and MOVES it (cross-language dist shrinks); an absent member is
+  a no-op returning false (still addable afterwards); TS addIfExists
+  moves a Java-written member the same way.
+- RRateLimiter `RateType.PER_CLIENT`: budgets are isolated per client —
+  Java exhausting its own budget (true,true,false) leaves the TS side
+  untouched (also true,true,false) within the same window; complements
+  round 48e's shared-OVERALL direction.
+- RBitSet byte ops SEMANTICS: `getByte/setByte/incrementAndGetByte`
+  offsets are BIT offsets, not byte offsets — both languages pass them
+  straight to BITFIELD GET/SET/INCRBY i8 ("byte 1" lives at offset 8);
+  cross-language set/read/increment agree on the same field.
+- 3/3 PASS (one expectation fix after the bit-offset discovery);
+  full 45-file interop regression: 138/138 TWICE consecutively; build
+  green.
+
 ## 2.54.5 — 2026-10-25
 
 Round 42 of the Java-4.8.0 evidence suite (docs+test only): RTimeSeries

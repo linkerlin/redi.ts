@@ -2041,6 +2041,25 @@ public final class TsProbe48 {
                     }
                 }
             }
+            // --- Round 43: geo addIfExists / rate limiter PER_CLIENT / bitset bytes ---
+            case "geo48-addifexists" -> {
+                Boolean ok = redisson.<String>getGeo(a[0]).addIfExists(
+                        Double.parseDouble(a[1]), Double.parseDouble(a[2]), a[3]);
+                out.add("updated=" + ok);
+            }
+            case "rate48-setratepc" -> {
+                boolean ok = redisson.getRateLimiter(a[0]).trySetRate(
+                        RateType.PER_CLIENT, Long.parseLong(a[1]),
+                        java.time.Duration.ofSeconds(Long.parseLong(a[2])));
+                out.add("set=" + ok);
+            }
+            case "bs48-getbyte" -> {
+                out.add("byte=" + redisson.getBitSet(a[0]).getByte(Long.parseLong(a[1])));
+            }
+            case "bs48-setbyte" -> {
+                out.add("prev=" + redisson.getBitSet(a[0]).setByte(
+                        Long.parseLong(a[1]), Byte.parseByte(a[2])));
+            }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }
         return out;
