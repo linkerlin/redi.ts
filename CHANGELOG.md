@@ -31,6 +31,34 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.5 — 2026-10-25
+
+Round 42 of the Java-4.8.0 evidence suite (docs+test only): RTimeSeries
+remove family both ways, RRingBuffer readNewest/readOldest (slices come
+back in ring order, not newest-first), RStream readMany two-stream
+reads both directions.
+
+Round 42 — `live-interop48ap` (probe commands `ts48-getandremove/
+remove/removerange`, `rb48-add/readnewest/readoldest`,
+`stream48-readmany`): three read/remove families.
+
+- RTimeSeries (ZSET family) removal: Java `getAndRemove(ts)` /
+  `remove(ts)` on TS-added entries (value decodes exactly — integer-ish
+  doubles print without the trailing .0, so the test pins true
+  fractions) and TS `getAndRemove`/`removeRange` shrink Java's 4.8-args
+  series to zero.
+- RRingBuffer read family SEMANTICS: `readNewest(n)`/`readOldest(n)`
+  return their SLICE in ring (chronological) order — readNewest(2) on a
+  wrapped [three,four,five] is four,five, NOT five-first; Java and TS
+  agree on the same ring both directions.
+- RStream `readMany`: TS two-stream XREAD returns both Java-written
+  streams; Java's `StreamMultiReadArgs.greaterThan(id1, name2, id2)`
+  two-stream read returns TS entries. (The builder has no single-arg
+  form — only the 3/5-arg static overloads.)
+- 3/3 PASS (two test-side expectation fixes: Double printing, ring
+  slice order); full 44-file interop regression: 135/135 TWICE
+  consecutively; build green.
+
 ## 2.54.4 — 2026-10-25
 
 Round 41 of the Java-4.8.0 evidence suite (docs+test only): RSearch

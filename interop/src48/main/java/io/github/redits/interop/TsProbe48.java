@@ -2004,6 +2004,43 @@ public final class TsProbe48 {
                 redisson.<String>getBlockingQueue(a[0]).unsubscribe(bqs48Id);
                 out.add("unsub=ok");
             }
+            // --- Round 42: TimeSeries remove family / RingBuffer reads / stream readMany ---
+            case "ts48-getandremove" -> {
+                Object v = redisson.<Double, String>getTimeSeries(a[0]).getAndRemove(Long.parseLong(a[1]));
+                out.add("value=" + v);
+            }
+            case "ts48-remove" -> {
+                out.add("removed=" + redisson.<Double, String>getTimeSeries(a[0]).remove(Long.parseLong(a[1])));
+            }
+            case "ts48-removerange" -> {
+                out.add("count=" + redisson.<Double, String>getTimeSeries(a[0])
+                        .removeRange(Long.parseLong(a[1]), Long.parseLong(a[2])));
+            }
+            case "rb48-add" -> {
+                redisson.<String>getRingBuffer(a[0]).add(a[1]);
+                out.add("added=ok");
+            }
+            case "rb48-readnewest" -> {
+                var vs = redisson.<String>getRingBuffer(a[0]).readNewest(Integer.parseInt(a[1]));
+                out.add("newest=" + String.join(",", vs));
+            }
+            case "rb48-readoldest" -> {
+                var vs = redisson.<String>getRingBuffer(a[0]).readOldest(Integer.parseInt(a[1]));
+                out.add("oldest=" + String.join(",", vs));
+            }
+            case "stream48-readmany" -> {
+                // stream48-readmany <count> <name1> <name2> — two-stream XREAD
+                // from the beginning (greaterThan only has (id1, name2, id2) forms)
+                var zero = new org.redisson.api.stream.StreamMessageId(0);
+                var args2 = org.redisson.api.stream.StreamMultiReadArgs
+                        .greaterThan(zero, a[2], zero).count(Integer.parseInt(a[0]));
+                var res = redisson.<String, String>getStream(a[1]).read(args2);
+                for (var e : res.entrySet()) {
+                    for (var m : e.getValue().entrySet()) {
+                        out.add("stream=" + e.getKey() + " id=" + m.getKey() + " fields=" + m.getValue());
+                    }
+                }
+            }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }
         return out;
