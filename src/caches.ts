@@ -1053,6 +1053,67 @@ export class RSetCache<V = any> extends RedisKeyedStructure<V> {
       await this.redis.hdel(this.touchKey, enc);
     } catch { /* noop */ }
   }
+  /** Java 4.8 `addIfAbsent/IfExists/IfLess/IfGreater(Duration, V)` —
+   *  conditional ZADD guarded by the current expiry score (Lua verbatim
+   *  from RedissonSetCache: ARGV[1]=now, ARGV[2]=newExpiry, ARGV[3]=member). */
+  private static readonly ADDIF_LUA = {
+    absent: "local e = redis.call('zscore', KEYS[1], ARGV[3]) if e ~= false and tonumber(e) > tonumber(ARGV[1]) then return 0 end redis.call('zadd', KEYS[1], ARGV[2], ARGV[3]) return 1",
+    exists: "local e = redis.call('zscore', KEYS[1], ARGV[3]) if e ~= false then if tonumber(e) < tonumber(ARGV[1]) then return 0 end redis.call('zadd', KEYS[1], ARGV[2], ARGV[3]) return 1 end return 0",
+    less: "local e = redis.call('zscore', KEYS[1], ARGV[3]) if e ~= false then if tonumber(e) < tonumber(ARGV[1]) or tonumber(ARGV[2]) >= tonumber(e) then return 0 end redis.call('zadd', KEYS[1], ARGV[2], ARGV[3]) return 1 end return 0",
+    greater: "local e = redis.call('zscore', KEYS[1], ARGV[3]) if e ~= false then if tonumber(e) < tonumber(ARGV[1]) or tonumber(ARGV[2]) <= tonumber(e) then return 0 end redis.call('zadd', KEYS[1], ARGV[2], ARGV[3]) return 1 end return 0",
+  };
+  private async addIf(kind: keyof typeof RSetCache.ADDIF_LUA, value: V, ttlMs = 0): Promise<boolean> {
+    const now = await serverNowMs(this.redis);
+    const expiry = ttlMs > 0
+      ? now + ttlMs
+      : Number(92233720368547758n - BigInt(now)); // Java's no-TTL score
+    const r = await luaEval(this.redis, RSetCache.ADDIF_LUA[kind], 1, this.name,
+      String(now), String(expiry), this.encodeValue(value));
+    return Number(r) === 1;
+  }
+  /** Java `addIfAbsent(Duration, V)`: adds when absent or already expired. */
+  async addIfAbsent(value: V, ttlMs = 0): Promise<boolean> {
+    return this.addIf('absent', value, ttlMs);
+  }
+  /** Java `addIfExists(Duration, V)`: re-adds only an existing, unexpired member. */
+  async addIfExists(value: V, ttlMs = 0): Promise<boolean> {
+    return this.addIf('exists', value, ttlMs);
+  }
+  /** Java `addIfLess(Duration, V)`: only when the NEW expiry is earlier than the current one. */
+  async addIfLess(value: V, ttlMs: number): Promise<boolean> {
+    return this.addIf('less', value, ttlMs);
+  }
+  /** Java `addIfGreater(Duration, V)`: only when the NEW expiry is later. */
+  async addIfGreater(value: V, ttlMs: number): Promise<boolean> {
+    return this.addIf('greater', value, ttlMs);
+  }
+  /** Java `addIfAbsent(Map<V, Duration>)`: how many landed. */
+  async addAllIfAbsent(entries: Map<V, number>): Promise<number> {
+    let n = 0;
+    for (const [v, ttl] of entries) if (await this.addIfAbsent(v, ttl)) n++;
+    return n;
+  }
+  async addAllIfExists(entries: Map<V, number>): Promise<number> {
+    let n = 0;
+    for (const [v, ttl] of entries) if (await this.addIfExists(v, ttl)) n++;
+    return n;
+  }
+  async addAllIfLess(entries: Map<V, number>): Promise<number> {
+    let n = 0;
+    for (const [v, ttl] of entries) if (await this.addIfLess(v, ttl)) n++;
+    return n;
+  }
+  async addAllIfGreater(entries: Map<V, number>): Promise<number> {
+    let n = 0;
+    for (const [v, ttl] of entries) if (await this.addIfGreater(v, ttl)) n++;
+    return n;
+  }
+  /** Java `tryAdd(V...)`: add with NO TTL (Long.MAX/100 score). */
+  async tryAdd(...values: V[]): Promise<boolean> {
+    let any = false;
+    for (const v of values) if (await this.addIfAbsent(v, 0)) any = true;
+    return any;
+  }
   async add(value: V, ttlMs = 0, maxIdleMs = 0): Promise<boolean> {
     const now = await serverNowMs(this.redis);
     await this.purge(now);

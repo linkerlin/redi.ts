@@ -896,6 +896,23 @@ return 1`;
   async set(index: number, value: V): Promise<void> {
     await this.redis.lset(this.name, index, this.encodeValue(value));
   }
+  /** Java `addBefore(V existingElement, V newElement)`: LINSERT BEFORE —
+   *  the new list length, or -1 when the pivot is absent (same as Java). */
+  async addBefore(existingElement: V, newElement: V): Promise<number> {
+    return toNumber(await (this.redis as any).linsert(
+      this.name, 'BEFORE', this.encodeValue(existingElement), this.encodeValue(newElement)), -1);
+  }
+  /** Java `addAfter(V existingElement, V newElement)`: LINSERT AFTER. */
+  async addAfter(existingElement: V, newElement: V): Promise<number> {
+    return toNumber(await (this.redis as any).linsert(
+      this.name, 'AFTER', this.encodeValue(existingElement), this.encodeValue(newElement)), -1);
+  }
+  /** Java `Collection.addAll(Collection)`: batch RPUSH; false for empty. */
+  async addAll(values: V[]): Promise<boolean> {
+    if (values.length === 0) return false;
+    await this.redis.rpush(this.name, ...values.map((v) => this.encodeValue(v)));
+    return true;
+  }
   async size(): Promise<number> {
     return this.redis.llen(this.name);
   }
@@ -1963,6 +1980,94 @@ export class RScoredSortedSet<V = any> extends RedisDataStructure {
     const r = await this.redis.zrevrank(this.name, this.encodeValue(value));
     return r === null ? null : r;
   }
+  /** Java `rankEntry(V)`/`revRankEntry(V)`: rank + current score, or null. */
+  async rankEntry(value: V): Promise<{ rank: number; score: number } | null> {
+    const rank = await this.rank(value);
+    if (rank === null || rank === -1) return null;
+    const score = await this.getScore(value);
+    return { rank, score: Number(score) };
+  }
+  async revRankEntry(value: V): Promise<{ rank: number; score: number } | null> {
+    const rank = await this.revRank(value);
+    if (rank === null) return null;
+    const score = await this.getScore(value);
+    return { rank, score: Number(score) };
+  }
+  /** Java `pollFirstEntries(count)`/`pollLastEntries(count)`: ZPOPMIN/MAX n. */
+  async pollFirstEntries(count: number): Promise<ScoredEntry<V>[]> {
+    const raw = await (this.redis as any).zpopmin(this.name, count);
+    return this.decodeScoredPairs(raw);
+  }
+  async pollLastEntries(count: number): Promise<ScoredEntry<V>[]> {
+    const raw = await (this.redis as any).zpopmax(this.name, count);
+    return this.decodeScoredPairs(raw);
+  }
+  /** ZPOPMIN/MAX reply [member, score, member, score...] → entries. */
+  private decodeScoredPairs(raw: unknown): ScoredEntry<V>[] {
+    const out: ScoredEntry<V>[] = [];
+    if (Array.isArray(raw)) {
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        out.push({ value: this.decodeValue(String(raw[i])) as V, score: Number(raw[i + 1]) });
+      }
+    }
+    return out;
+  }
+  /** Java `isEmpty()`. */
+  async isEmpty(): Promise<boolean> {
+    return (await this.size()) === 0;
+  }
+  /** Java `toArray()`. */
+  async toArray(): Promise<V[]> {
+    return this.range(0, -1);
+  }
+  /** Java `readAll()`. */
+  async readAll(): Promise<V[]> {
+    return this.range(0, -1);
+  }
+  /** Java `removeAll(Collection)`: true when anything was removed. */
+  async removeAll(values: V[]): Promise<boolean> {
+    if (values.length === 0) return false;
+    const n = await this.redis.zrem(this.name, ...values.map((v) => this.encodeValue(v)));
+    return Number(n) > 0;
+  }
+  /** Java `retainAll(Collection)`: true when others were removed. */
+  async retainAll(values: V[]): Promise<boolean> {
+    const keep = new Set(values.map((v) => this.encodeValue(v)));
+    const all = await this.range(0, -1);
+    const drop: V[] = [];
+    for (const v of all) if (!keep.has(this.encodeValue(v))) drop.push(v);
+    if (drop.length === 0) return false;
+    await this.redis.zrem(this.name, ...drop.map((v) => this.encodeValue(v)));
+    return true;
+  }
+  /** Java `rangeTo(dest, startIndex, endIndex)` / `revRangeTo`: ZRANGESTORE. */
+  async rangeTo(destName: string, startIndex: number, endIndex: number): Promise<number>;
+  async rangeTo(destName: string, startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<number>;
+  async rangeTo(destName: string, a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<number> {
+    return this.rangeToImpl(destName, false, a, b, c, d, offset, count);
+  }
+  async revRangeTo(destName: string, startIndex: number, endIndex: number): Promise<number>;
+  async revRangeTo(destName: string, startScore: number, startScoreInclusive: boolean, endScore: number, endScoreInclusive: boolean, offset?: number, count?: number): Promise<number>;
+  async revRangeTo(destName: string, a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<number> {
+    return this.rangeToImpl(destName, true, a, b, c, d, offset, count);
+  }
+  private async rangeToImpl(destName: string, rev: boolean, a: number, b: number | boolean, c?: number, d?: boolean, offset?: number, count?: number): Promise<number> {
+    const args: (string | number)[] = [destName, this.name];
+    if (typeof b === 'boolean') {
+      // score range: rev swaps bounds (Java passes max first with REV)
+      const lo = rev ? c! : a;
+      const hi = rev ? a : c!;
+      const loInc = rev ? d! : b;
+      const hiInc = rev ? b : d;
+      args.push((loInc ? '[' : '(') + lo, (hiInc ? '[' : '(') + hi, 'BYSCORE');
+      if (rev) args.push('REV');
+      if (offset !== undefined && count !== undefined) args.push('LIMIT', offset, count);
+    } else {
+      if (rev) args.push(b, a, 'REV');
+      else args.push(a, b);
+    }
+    return toNumber(await (this.redis as any).call('ZRANGESTORE', ...args));
+  }
   async size(): Promise<number> {
     return this.redis.zcard(this.name);
   }
@@ -2337,6 +2442,77 @@ export class RLexSortedSet extends RedisDataStructure {
   }
   async countByLex(min: string, max: string): Promise<number> {
     return this.redis.zlexcount(this.name, min, max);
+  }
+  /** inclusive/exclusive lex bound token ('[' / '(' + value) — Java's
+   *  range(from, fromInclusive, to, toInclusive) family builds these. */
+  private lexBound(value: string, inclusive: boolean): string {
+    return (inclusive ? '[' : '(') + value;
+  }
+  /** Java `range(from, fromInclusive, to, toInclusive[, offset, count])`. */
+  async range(from: string, fromInclusive: boolean, to: string, toInclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.rangeByLex(this.lexBound(from, fromInclusive), this.lexBound(to, toInclusive), offset, count);
+  }
+  /** Java `rangeHead(value, inclusive[, offset, count])`: (-inf, value]. */
+  async rangeHead(value: string, inclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.rangeByLex('-', this.lexBound(value, inclusive), offset, count);
+  }
+  /** Java `rangeTail(value, inclusive[, offset, count])`: [value, +inf). */
+  async rangeTail(value: string, inclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.rangeByLex(this.lexBound(value, inclusive), '+', offset, count);
+  }
+  /** Java `rangeReversed(from, fromInclusive, to, toInclusive[, offset, count])`:
+   *  ZREVRANGEBYLEX takes max before min. */
+  async rangeReversed(from: string, fromInclusive: boolean, to: string, toInclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.revRangeByLex(this.lexBound(to, toInclusive), this.lexBound(from, fromInclusive), offset, count);
+  }
+  async rangeHeadReversed(value: string, inclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.revRangeByLex(this.lexBound(value, inclusive), '-', offset, count);
+  }
+  async rangeTailReversed(value: string, inclusive: boolean, offset = 0, count = -1): Promise<string[]> {
+    return this.revRangeByLex('+', this.lexBound(value, inclusive), offset, count);
+  }
+  private async revRangeByLex(max: string, min: string, offset = 0, count = -1): Promise<string[]> {
+    const args: (string | number)[] = [this.name, max, min];
+    if (count >= 0) args.push('LIMIT', offset, count);
+    return (this.redis as any).zrevrangebylex(...args);
+  }
+  /** Java `count(from, fromInclusive, to, toInclusive)`. */
+  async count(from: string, fromInclusive: boolean, to: string, toInclusive: boolean): Promise<number> {
+    return this.countByLex(this.lexBound(from, fromInclusive), this.lexBound(to, toInclusive));
+  }
+  async countHead(value: string, inclusive: boolean): Promise<number> {
+    return this.countByLex('-', this.lexBound(value, inclusive));
+  }
+  async countTail(value: string, inclusive: boolean): Promise<number> {
+    return this.countByLex(this.lexBound(value, inclusive), '+');
+  }
+  /** Java `removeRange(from, fromInclusive, to, toInclusive)`: removed count. */
+  async removeRange(from: string, fromInclusive: boolean, to: string, toInclusive: boolean): Promise<number> {
+    return this.removeRangeByLex(this.lexBound(from, fromInclusive), this.lexBound(to, toInclusive));
+  }
+  async removeRangeHead(value: string, inclusive: boolean): Promise<number> {
+    return this.removeRangeByLex('-', this.lexBound(value, inclusive));
+  }
+  async removeRangeTail(value: string, inclusive: boolean): Promise<number> {
+    return this.removeRangeByLex(this.lexBound(value, inclusive), '+');
+  }
+  /** Java `rank(String)`/`revRank(String)`: -1 when absent. */
+  async revRank(value: string): Promise<number> {
+    const r = await this.redis.zrevrank(this.name, value);
+    return r === null ? -1 : Number(r);
+  }
+  async pollFirst(): Promise<string | null> {
+    const r = await (this.redis as any).zpopmin(this.name);
+    return Array.isArray(r) && r.length > 0 ? String(r[0]) : null;
+  }
+  async pollLast(): Promise<string | null> {
+    const r = await (this.redis as any).zpopmax(this.name);
+    return Array.isArray(r) && r.length > 0 ? String(r[0]) : null;
+  }
+  /** Java `random()`. */
+  async random(): Promise<string | null> {
+    const r = await (this.redis as any).zrandmember(this.name);
+    return r === null || r === undefined ? null : String(r);
   }
   async rank(value: string): Promise<number> {
     const r = await this.redis.zrank(this.name, value);

@@ -2060,6 +2060,120 @@ public final class TsProbe48 {
                 out.add("prev=" + redisson.getBitSet(a[0]).setByte(
                         Long.parseLong(a[1]), Byte.parseByte(a[2])));
             }
+            // --- Round 44: conditional expire / TS native rules / stream ackdel ---
+            case "exp48-if" -> {
+                // a[1]=set|notset|greater|less, a[2]=ttlMs (Duration overloads)
+                java.time.Duration d = java.time.Duration.ofMillis(Long.parseLong(a[2]));
+                boolean ok;
+                switch (a[1]) {
+                    case "set" -> ok = redisson.getBucket(a[0]).expireIfSet(d);
+                    case "notset" -> ok = redisson.getBucket(a[0]).expireIfNotSet(d);
+                    case "greater" -> ok = redisson.getBucket(a[0]).expireIfGreater(d);
+                    default -> ok = redisson.getBucket(a[0]).expireIfLess(d);
+                }
+                out.add("ok=" + ok);
+            }
+            case "tsn48-addrule" -> {
+                // tsn48-addrule <src> <dest> <agg> <bucketMs> — dest must exist
+                redisson.getTimeSeriesNative(a[0]).createRule(org.redisson.api.tsnative.TSRuleArgs
+                        .destination(a[1], org.redisson.api.tsnative.TSAggregation.valueOf(a[2]),
+                                java.time.Duration.ofMillis(Long.parseLong(a[3]))));
+                out.add("rule=ok");
+            }
+            case "tsn48-ruledest" -> {
+                var dest = redisson.getTimeSeriesNative(a[0]);
+                out.add("firstTs=" + dest.firstTimestamp() + " size=" + dest.size());
+            }
+            case "stream48-ackdel" -> {
+                // stream48-ackdel <name> <group> <refpolicy> <ids...> — XACKDEL
+                var res = redisson.<String, String>getStream(a[0]).ack(
+                        org.redisson.api.stream.StreamAckArgs.group(a[1])
+                                .ids(java.util.Arrays.stream(a, 3, a.length)
+                                        .map(id -> {
+                                            String[] q = id.split("-");
+                                            return new org.redisson.api.stream.StreamMessageId(
+                                                    Long.parseLong(q[0]), Long.parseLong(q[1]));
+                                        }).toArray(org.redisson.api.stream.StreamMessageId[]::new))
+                                .removeReferences());
+                for (var e : res.entrySet()) {
+                    out.add("id=" + e.getKey() + " status=" + e.getValue());
+                }
+            }
+            // --- Round 45: list LINSERT / stream XNACK / deque LMOVE ---
+            case "list48-addbefore" -> {
+                out.add("len=" + redisson.<String>getList(a[0]).addBefore(a[1], a[2]));
+            }
+            case "list48-addafter" -> {
+                out.add("len=" + redisson.<String>getList(a[0]).addAfter(a[1], a[2]));
+            }
+            case "stream48-nack" -> {
+                // stream48-nack <name> <group> <mode> <ids...> — XNACK (8.8+)
+                long n = redisson.<String, String>getStream(a[0]).nack(
+                        org.redisson.api.stream.StreamNackArgs.group(a[1],
+                                org.redisson.api.stream.StreamNackMode.valueOf(a[2]))
+                                .ids(java.util.Arrays.stream(a, 3, a.length)
+                                        .map(id -> {
+                                            String[] q = id.split("-");
+                                            return new org.redisson.api.stream.StreamMessageId(
+                                                    Long.parseLong(q[0]), Long.parseLong(q[1]));
+                                        }).toArray(org.redisson.api.stream.StreamMessageId[]::new)));
+                out.add("nacked=" + n);
+            }
+            case "bd48-movefirst" -> {
+                // DequeMoveArgs.pollFirst().addLastTo(dest) — LMOVE LEFT RIGHT
+                Object v = redisson.<String>getBlockingDeque(a[0]).move(java.time.Duration.ZERO,
+                        org.redisson.api.queue.DequeMoveArgs.pollFirst().addLastTo(a[1]));
+                out.add("value=" + v);
+            }
+            // --- Round 46: audit-closed families (lex / scored / setcache) ---
+            case "lex48-pollfirst" -> {
+                out.add("value=" + redisson.getLexSortedSet(a[0]).pollFirst());
+            }
+            case "lex48-polllast" -> {
+                out.add("value=" + redisson.getLexSortedSet(a[0]).pollLast());
+            }
+            case "lex48-revrank" -> {
+                Integer r = redisson.getLexSortedSet(a[0]).revRank(a[1]);
+                out.add("revrank=" + r);
+            }
+            case "lex48-rangehead" -> {
+                for (String v : redisson.getLexSortedSet(a[0]).rangeHead(a[1], a[2].equals("1"))) {
+                    out.add("v=" + v);
+                }
+            }
+            case "zset48-rankentry" -> {
+                var re = redisson.<String>getScoredSortedSet(a[0]).rankEntry(a[1]);
+                out.add(re == null ? "null" : "rank=" + re.getRank() + " score=" + re.getScore());
+            }
+            case "zset48-pollentries" -> {
+                var es = a[1].equals("first")
+                        ? redisson.<String>getScoredSortedSet(a[0]).pollFirstEntries(Integer.parseInt(a[2]))
+                        : redisson.<String>getScoredSortedSet(a[0]).pollLastEntries(Integer.parseInt(a[2]));
+                for (var e : es) {
+                    out.add("value=" + e.getValue() + "@" + e.getScore());
+                }
+            }
+            case "zset48-rangeto" -> {
+                int n = redisson.<String>getScoredSortedSet(a[0]).rangeTo(a[1],
+                        Integer.parseInt(a[2]), Integer.parseInt(a[3]));
+                out.add("stored=" + n);
+            }
+            case "zset48-retainall" -> {
+                java.util.List<String> keep = java.util.Arrays.asList(java.util.Arrays.copyOfRange(a, 1, a.length));
+                out.add("changed=" + redisson.<String>getScoredSortedSet(a[0]).retainAll(keep));
+            }
+            case "sc48-addif" -> {
+                // sc48-addif name absent|exists|less|greater value ttlMs
+                java.time.Duration d = java.time.Duration.ofMillis(Long.parseLong(a[3]));
+                boolean ok;
+                switch (a[1]) {
+                    case "absent" -> ok = redisson.<String>getSetCache(a[0]).addIfAbsent(d, a[2]);
+                    case "exists" -> ok = redisson.<String>getSetCache(a[0]).addIfExists(d, a[2]);
+                    case "less" -> ok = redisson.<String>getSetCache(a[0]).addIfLess(d, a[2]);
+                    default -> ok = redisson.<String>getSetCache(a[0]).addIfGreater(d, a[2]);
+                }
+                out.add("ok=" + ok);
+            }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }
         return out;

@@ -20,6 +20,7 @@ function mockClient(): any {
 
 const make = () => Redisson.create({ client: mockClient() });
 
+
 describe('Redisson core (mock)', () => {
   it('bucket', async () => {
     const r = make();
@@ -132,6 +133,36 @@ describe('Redisson core (mock)', () => {
     await l.add(1, 2, 3);
     expect(await l.get(0)).toBe(1);
     expect(await l.size()).toBe(3);
+    expect(await l.addBefore(2, 5)).toBe(4);   // [1, 5, 2, 3]
+    expect(await l.addAfter(2, 6)).toBe(5);    // [1, 5, 2, 6, 3]
+    expect(await l.readAll()).toEqual([1, 5, 2, 6, 3]);
+    expect(await l.addBefore(99, 0)).toBe(-1); // absent pivot
+    // round-46 families — some subcommands (zlexcount/zpopmin) are absent
+    // from ioredis-mock: skip those paths like the HLL/Geo block above
+    try {
+      const lx2 = r.getLexSortedSet('lx2audit');
+      for (const v of ['b', 'a', 'c']) await lx2.add(v);
+      expect(await lx2.rangeHead('b', true)).toEqual(['a', 'b']);
+      expect(await lx2.rangeTail('b', false)).toEqual(['c']);
+      expect(await lx2.countHead('c', true)).toBe(3);
+      expect(await lx2.revRank('a')).toBe(2);
+      expect(await lx2.pollFirst()).toBe('a');
+    } catch (e) {
+      if (!/Unsupported command/.test(String((e as Error).message))) throw e;
+    }
+    const zs2 = r.getScoredSortedSet<number>('z2audit');
+    await zs2.add(1, 10); await zs2.add(2, 20); await zs2.add(3, 30);
+    expect(await zs2.rankEntry(20)).toEqual({ rank: 1, score: 2 });
+    expect((await zs2.pollFirstEntries(2)).map((e) => e.value)).toEqual([10, 20]);
+    expect(await zs2.readAll()).toEqual([30]);
+    expect(await zs2.retainAll([30, 99])).toBe(false);
+    const sc2 = r.getSetCache<string>('sc2audit');
+    expect(await sc2.addIfAbsent('x', 60000)).toBe(true);
+    expect(await sc2.addIfAbsent('x', 60000)).toBe(false);
+    expect(await sc2.addIfExists('x', 60000)).toBe(true);
+    expect(await sc2.addIfGreater('x', 120000)).toBe(true);
+    expect(await sc2.addIfLess('x', 30000)).toBe(true);
+    expect(await sc2.addIfLess('x', 300000)).toBe(false);
     const q = r.getQueue<number>('q1');
     await q.offer(7);
     expect(await q.poll()).toBe(7);

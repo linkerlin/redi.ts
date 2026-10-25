@@ -31,6 +31,110 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.7 — 2026-10-25
+
+Rounds 44-45 (docs+test only).
+
+Round 44 — `live-interop48ar` (probe commands `exp48-if`,
+`tsn48-addrule/ruledest`, `stream48-ackdel`): three families the
+earlier rounds did not cover.
+
+- RExpirable conditional expire (4.8 `expireIfSet/IfNotSet/IfGreater/
+  IfLess`, Duration overloads): all four conditions exercised
+  cross-language — NotSet arms only without a TTL (second attempt
+  false), Set only with one, Greater only above the current TTL, Less
+  only below it; each side observes the other's arming via PTTL.
+- RTimeSeriesNative rules (TS.CREATERULE): Java attaches an AVG 10s
+  compaction rule over TS-written raw samples → dest fills with the
+  compacted value (AVG 4,6 → 5); TS attaches a SUM rule over
+  Java-written samples (10,20 → 30). Dest series must pre-exist.
+- RStream XACKDEL (Redis 8.2+): Java's `ack(StreamAckArgs.
+  removeReferences())` ack+deletes TS-consumed PEL entries — the
+  stream drops to 0; TS `ackWithDelete('DELREF', ...)` returns
+  per-id statuses (0/-1 for absent).
+- 3/3 PASS; full 46-file interop regression: 141/141 TWICE
+  consecutively (host IO slowdown made imports ~2min/file — old files
+  equally slow, not a code change); build green.
+
+## 2.55.0 — 2026-10-25
+
+Round 46 — systematic API-surface audit + the three biggest closures.
+**Audit method**: every `org.redisson.api.R*` interface in the 4.8.0 jar + the three biggest closures.
+**Audit method**: every `org.redisson.api.R*` interface in the 4.8.0 jar
+javap'd (116 sync interfaces, 2109 methods), diffed against per-class TS
+method inventories → 28 candidate rows triaged into real gaps /
+convention-differences (TS is async-first; `loadAndReplace`=load(code,
+true); HLL `addAll`=add varargs) / documented non-goals (mapReduce and
+`distributedIterator` ride RExecutorService; listener surface modeled
+differently; RBinaryStream's channel/stream facades are Java I/O over
+the same STRING wire proven in round 37).
+
+Closed this round (NEW TS APIs + interop evidence
+`live-interop48at`, 3 tests):
+
+- **RLexSortedSet full family (~17 methods)**: range/rangeHead/rangeTail
+  (+Reversed, inclusive-flag bound tokens), count/countHead/countTail,
+  removeRange family, revRank, pollFirst/pollLast, random.
+- **RScoredSortedSet additions (12)**: rankEntry/revRankEntry,
+  pollFirstEntries/pollLastEntries (ZPOPMIN/MAX n),
+  rangeTo/revRangeTo (ZRANGESTORE), removeAll/retainAll, isEmpty,
+  toArray, readAll.
+- **RSetCache conditional family (Java 4.8 Lua ported verbatim)**:
+  addIfAbsent/IfExists/IfLess/IfGreater(Duration, V) + addAll variants
+  + tryAdd. Semantics note: addIfLess SUCCEEDS when the new TTL is
+  shorter (it shortens) — verified both languages.
+- Audit's remaining ledger (next rounds): RScoredSortedSet
+  poll*EntriesFromAny (BZMPOP) + Duration variants; RBucket
+  getAndClearExpire (GETEX)/findCommon(LCS)/getDigest/setIfAbsent
+  verify; RBloomFilter config getters; RBloomFilterNative
+  getInfo/insert/scanDump/loadChunk; RSemaphore releaseIfExists;
+  RPES getPermits/tryRelease; RBlockingDeque subscribeOnLastElements;
+  RMapCache updateEntryExpiration/getAllWithTTLOnly/
+  expireEntriesIfNotSet; RStream trimNonStrict; RList
+  fastRemove/fastSet/subList; multimap getAll/replaceValues.
+- **VACUITY CORRECTION (r44/r45)**: the r44 probe source did not
+  compile (see r45's process fix) — every "green" full regression in
+  those rounds ran with the probe DOWN, and probe-gated assertions
+  silently skipped-as-passed. Re-validated live this round and fixed
+  on the merits, with three semantic discoveries: `StreamCreateGroupArgs`
+  defaults to `$` (only NEW entries deliver — create the group before
+  writing); TS.CREATERULE needs BOTH series to exist and compaction
+  only processes POST-rule samples (bucket closes on a later-bucket
+  write); Java `expireIfSet/NotSet` map exactly to PEXPIRE XX/NX.
+- ENV: the WSL 6390 relay died mid-round (TCP accepts, bytes never
+  arrive; container-internal PONG fine) — Windows Docker Desktop
+  redis:8 on **6391** is the working alternate; suite runs unchanged
+  via REDIS_URL.
+- 3/3 PASS live (48ar/48as/48at together 9/9); mock 123/123 (lex
+  subcommands absent in ioredis-mock skip per law 6c); build green;
+  full 48-file interop regression: **147/147 TWICE with ZERO skip
+  lines** (vacuity grep for probe-unavailable/unreachable = 0 — the
+  runs are provably non-vacuous).
+
+Round 45 — `live-interop48as` (probe commands `list48-addbefore/addafter`,
+`stream48-nack`, `bd48-movefirst`): three families the earlier rounds
+did not cover — one of them a freshly closed API gap.
+
+- **RList `addBefore`/`addAfter` (LINSERT) — NEW TS API**: the 1:1
+  matrix had no counterpart for Java's pivot inserts; both languages
+  now insert relative to a pivot and read the identical order, absent
+  pivots return -1 everywhere (LINSERT semantics). Mock assertions in
+  redisson.test.ts.
+- RStream `XNACK` (Redis 8.8+): Java `nack(StreamNackArgs)` requeues
+  TS-consumed PEL entries — a NEW consumer re-reads them; TS `nack()`
+  requeues for the next consumer identically. Gated on server ≥8.8.
+- RBlockingDeque `move` (LMOVE): Java `DequeMoveArgs.pollFirst()
+  .addLastTo(dest)` pops the TS deque head into the dest tail; TS
+  `move(dest, 'LEFT', 'RIGHT')` mirrors it back.
+- PROCESS FIX: the round-44 probe source did not actually compile
+  (`group().removeReferences()` — `group()` returns StreamMessageIdArgs
+  which lacks the references methods; ids() must come first). The r44
+  tests had passed against the earlier-compiled class, masking it;
+  now fixed to `group().ids(...).removeReferences()` and recompiled.
+- 3/3 PASS solo; mock 123/123; wire+mock+interop subset 154/154; full
+  47-file interop regression: 144/144 TWICE consecutively (import
+  still ~2min/file — host IO, unchanged from r44); build green.
+
 ## 2.54.6 — 2026-10-25
 
 Round 43 of the Java-4.8.0 evidence suite (docs+test only): RGeo
