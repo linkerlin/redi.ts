@@ -204,6 +204,8 @@ public final class TsProbe48 {
     private static CountDownLatch mce48Latch = new CountDownLatch(1);
     private static String mce48Result = null;
     private static int mce48Id = -1;
+    private static final java.util.List<String> bqs48Seen = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private static int bqs48Id = -1;
     private static CountDownLatch mlk48BgRelease = new CountDownLatch(1);
     private static CountDownLatch mlk48BgDone = new CountDownLatch(1);
 
@@ -1970,6 +1972,37 @@ public final class TsProbe48 {
             case "mce48-rmlistener" -> {
                 redisson.getMapCache(a[0]).removeListener(mce48Id);
                 out.add("removed=ok");
+            }
+            // --- Round 41: search synonyms / queue continuous subscription ---
+            case "fts48-synupdate" -> {
+                // updateSynonyms(index, groupId, terms...)
+                redisson.getSearch().updateSynonyms(a[0], a[1],
+                        java.util.Arrays.copyOfRange(a, 2, a.length));
+                out.add("syn=ok");
+            }
+            case "fts48-syndump" -> {
+                var d = redisson.getSearch().dumpSynonyms(a[0]);
+                var terms = new ArrayList<String>(d.keySet());
+                java.util.Collections.sort(terms);
+                for (String t : terms) {
+                    out.add("term=" + t + " groups=" + d.get(t));
+                }
+            }
+            case "bqs48-subscribe" -> {
+                // continuous consume: take() loop delivering to the list
+                bqs48Seen.clear();
+                bqs48Id = redisson.<String>getBlockingQueue(a[0])
+                        .subscribeOnElements((java.util.function.Consumer<String>) v -> bqs48Seen.add(String.valueOf(v)));
+                out.add("subscribed=" + bqs48Id);
+            }
+            case "bqs48-seen" -> {
+                synchronized (bqs48Seen) {
+                    out.add("n=" + bqs48Seen.size() + " items=" + String.join(",", bqs48Seen));
+                }
+            }
+            case "bqs48-unsubscribe" -> {
+                redisson.<String>getBlockingQueue(a[0]).unsubscribe(bqs48Id);
+                out.add("unsub=ok");
             }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }

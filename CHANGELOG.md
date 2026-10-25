@@ -31,6 +31,28 @@ paths and lock TTL semantics the earlier rounds did not cover.
   regression: 115/115 TWICE consecutively after the slack fix; build
   green.
 
+## 2.54.4 — 2026-10-25
+
+Round 41 of the Java-4.8.0 evidence suite (docs+test only): RSearch
+synonym groups shared both ways (FT.SYNUPDATE/FT.SYNDUMP; SYNDUMP
+needs an existing index) and RBlockingQueue subscribeOnElements
+continuous cross-language drain with unsubscribe stopping the pump.
+
+Round 41 — `live-interop48ao` (probe commands `fts48-synupdate/syndump`,
+`bqs48-subscribe/seen/unsubscribe`): search synonyms and continuous
+queue consumption.
+
+- RSearch synonyms: Java `updateSynonyms(index, groupId, terms...)` →
+  TS `dumpSynonyms` reads term→groups; TS updates a second group → Java
+  dumps the merged view (dog → [grp1, grp2]). FT.SYNUPDATE requires the
+  index to exist — the test creates it first via `search48-create`.
+- RBlockingQueue `subscribeOnElements`: continuous cross-language drain
+  — a Java background subscriber (take() loop) consumes every TS offer
+  one at a time in order and `unsubscribe` stops the pump; a TS
+  subscriber drains Java's offers the same way (queue length back to 0).
+- 2/2 PASS; full 43-file interop regression: 132/132 TWICE
+  consecutively; build green.
+
 ## 2.54.3 — 2026-10-25
 
 Rounds 36-40 of the Java-4.8.0 evidence suite (docs+test only; no
