@@ -141,7 +141,17 @@ return 1`;
   async getHashIterations(): Promise<number> {
     await this.ensureConfig();
     return this.hashIters;
+  }  /** Java `getExpectedInsertions()`: config-hash field. */
+  async getExpectedInsertions(): Promise<number> {
+    await this.ensureConfig();
+    return this.expected;
   }
+  /** Java `getFalseProbability()`: config-hash field. */
+  async getFalseProbability(): Promise<number> {
+    await this.ensureConfig();
+    return this.falseProb;
+  }
+
   override async delete(): Promise<boolean> {
     await this.redis.del(this.name, this.configKey());
     this.loaded = false;
@@ -3382,15 +3392,25 @@ end`;
 
 // -- Native probabilistic facades (BF/CF/TOPK/TDIGEST/GCRA) -------------------------
 
-async function tryDo(redis: Redis, ...args: (string | number)[]): Promise<any> {
-  try {
-    return await (redis as any).call(...args as string[]);
-  } catch (e: any) {
-    const msg = String(e?.message ?? e);
-    if (msg.includes('unknown command') || msg.includes('wrong number')) throw e;
-    throw e;
-  }
+async function tryDo(redis: Redis, ...args: (string | number | Buffer)[]): Promise<any> {
+  const call = (redis as any).call;
+  if (typeof call !== 'function') throw new Error(`Unsupported command: ${String(args[0]).toUpperCase()}`);
+  return call.apply(redis, args);
 }
+
+/** TS shape of Java's `BloomFilterInsertArgs.elements(c)` chain: BF.INSERT
+ *  with optional CAPACITY / NOCREATE. */
+export interface BloomFilterInsertArgs {
+  elements: string[];
+  capacity?: number;
+  noCreate?: boolean;
+}
+
+export const BloomFilterInsertArgs = {
+  elements: (...elements: string[]): BloomFilterInsertArgs => ({ elements }),
+  capacity: (capacity: number, elements: string[]): BloomFilterInsertArgs => ({ capacity, elements }),
+  noCreate: (capacity: number, elements: string[]): BloomFilterInsertArgs => ({ capacity, noCreate: true, elements }),
+};
 
 export class RBloomFilterNative extends RedisDataStructure {
   async reserve(capacity: number, errorRate: number): Promise<void> {
@@ -3400,15 +3420,73 @@ export class RBloomFilterNative extends RedisDataStructure {
   async init(errorRate: number, capacity: number): Promise<void> {
     await this.reserve(capacity, errorRate);
   }
-  async add(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'BF.ADD', this.name, element)) === 1;
+  async add(element: string): Promise<boolean>;
+  /** Java `add(Collection)`: BF.INSERT over many; returns the newly added. */
+  async add(elements: string[]): Promise<string[]>;
+  async add(a: string | string[]): Promise<boolean | string[]> {
+    if (Array.isArray(a)) {
+      const r = (await tryDo(this.redis, 'BF.INSERT', this.name, 'ITEMS', ...a)) as number[];
+      return a.filter((_, i) => r[i] === 1);
+    }
+    return (toNumber(await tryDo(this.redis, 'BF.ADD', this.name, a)) === 1);
   }
-  async exists(element: string): Promise<boolean> {
-    return toNumber(await tryDo(this.redis, 'BF.EXISTS', this.name, element)) === 1;
+  async exists(element: string): Promise<boolean>;
+  /** Java `exists(Collection)`: BF.MEXISTS; returns the members that exist. */
+  async exists(elements: string[]): Promise<string[]>;
+  async exists(a: string | string[]): Promise<boolean | string[]> {
+    if (Array.isArray(a)) {
+      const r = (await tryDo(this.redis, 'BF.MEXISTS', this.name, ...a)) as number[];
+      return a.filter((_, i) => r[i] === 1);
+    }
+    return (toNumber(await tryDo(this.redis, 'BF.EXISTS', this.name, a)) === 1);
   }
   /** Java `count()`: BF.CARD — approximate number of items added. */
   async count(): Promise<number> {
     return toNumber(await tryDo(this.redis, 'BF.CARD', this.name));
+  }
+  /** Java `insert(BloomFilterInsertArgs)`: BF.INSERT with CAPACITY/NOCREATE. */
+  async insert(args: BloomFilterInsertArgs): Promise<string[]> {
+    const a: (string | number)[] = [];
+    if (args.capacity !== undefined) a.push('CAPACITY', args.capacity);
+    if (args.noCreate) a.push('NOCREATE');
+    a.push('ITEMS', ...args.elements);
+    const r = (await tryDo(this.redis, 'BF.INSERT', this.name, ...a)) as number[];
+    return args.elements.filter((_, i) => r[i] === 1);
+  }
+  /** Java `getInfo()`: BF.INFO — the five shaped fields of BloomFilterInfo. */
+  async getInfo(): Promise<{ capacity: number; size: number; subFilterCount: number; itemCount: number; expansionRate: number }>;
+  /** Java `getInfo(BloomFilterInfoOption)`: single field. */
+  async getInfo(option: 'CAPACITY' | 'SIZE' | 'FILTERS' | 'ITEMS' | 'EXPANSION'): Promise<number>;
+  async getInfo(option?: 'CAPACITY' | 'SIZE' | 'FILTERS' | 'ITEMS' | 'EXPANSION'): Promise<any> {
+    if (option !== undefined) return toNumber(await tryDo(this.redis, 'BF.INFO', this.name, option));
+    const flat = (await tryDo(this.redis, 'BF.INFO', this.name)) as (string | number)[];
+    const m: Record<string, number> = {};
+    for (let i = 0; i < flat.length; i += 2) {
+      m[String(flat[i]).toLowerCase().replace(/[^a-z]/g, '')] = Number(flat[i + 1]);
+    }
+    return {
+      capacity: m['capacity'],
+      size: m['size'],
+      subFilterCount: m['numberoffilters'],
+      itemCount: m['numberofitemsinserted'],
+      expansionRate: m['expansionrate'],
+    };
+  }
+  /** Java `scanDump(iterator)`: BF.SCANDUMP — iterator 0 until it returns 0.
+   *  Chunk bytes are arbitrary binary: real redis must take callBuffer
+   *  (string replies get UTF-8-mangled to replacement chars); the mock is
+   *  in-process passthrough and has no callBuffer. */
+  async scanDump(iterator = 0): Promise<{ iterator: number; data: Buffer | null }> {
+    const raw = (this.redis as any).callBuffer
+      ? await (this.redis as any).callBuffer('BF.SCANDUMP', this.name, iterator)
+      : await tryDo(this.redis, 'BF.SCANDUMP', this.name, iterator);
+    const [it, data] = raw as [number, Buffer];
+    const buf = data === null || data === undefined || (data as Buffer).length === 0 ? null : Buffer.from(data as Buffer);
+    return { iterator: Number(it), data: buf };
+  }
+  /** Java `loadChunk(iterator, data)`: BF.LOADCHUNK. */
+  async loadChunk(iterator: number, data: Buffer): Promise<void> {
+    await tryDo(this.redis, 'BF.LOADCHUNK', this.name, iterator, data);
   }
 }
 

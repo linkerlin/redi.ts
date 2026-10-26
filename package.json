@@ -1,7 +1,7 @@
 {
   "name": "redi.ts",
-  "version": "2.55.0",
-  "description": "TypeScript 1:1 port of Redisson — wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
+  "version": "2.55.1",
+  "description": "TypeScript 1:1 port of Redisson \u2014 wire-compatible with Java Redisson (JsonJacksonCodec), redi.py and redi.go",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/linkerlin/redi.ts.git"
@@ -22,7 +22,14 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "README.md", "README_EN.md", "COMPATIBILITY.md", "CHANGELOG.md", "AGENTS.md"],
+  "files": [
+    "dist",
+    "README.md",
+    "README_EN.md",
+    "COMPATIBILITY.md",
+    "CHANGELOG.md",
+    "AGENTS.md"
+  ],
   "scripts": {
     "test": "vitest run",
     "build": "node scripts/build.mjs",
@@ -33,7 +40,17 @@
     "predocs": "node scripts/typedoc-toolchain.mjs",
     "bench": "node scripts/bench.mjs"
   },
-  "keywords": ["redis", "redisson", "distributed", "lock", "map", "queue", "topic", "rate-limiter", "bloom-filter"],
+  "keywords": [
+    "redis",
+    "redisson",
+    "distributed",
+    "lock",
+    "map",
+    "queue",
+    "topic",
+    "rate-limiter",
+    "bloom-filter"
+  ],
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {

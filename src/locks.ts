@@ -395,8 +395,17 @@ end
 return 0`;
 
 const SEM_RELEASE = `local value = redis.call('incrby', KEYS[1], ARGV[1])
-redis.call('publish', KEYS[2], ARGV[1])
+redis.call('publish', KEYS[2], value)
 return value`;
+
+// Java releaseIfExists: no-op on a missing key (exists check first); publishes
+// the NEW counter value, not the delta.
+const SEM_RELIFEXISTS = `if redis.call('exists', KEYS[1]) == 0 then
+    return 0
+end
+local value = redis.call('incrby', KEYS[1], ARGV[1])
+redis.call('publish', KEYS[2], value)
+return 1`;
 
 const SEM_DRAIN = `local value = redis.call('get', KEYS[1])
 if value == false then
@@ -436,7 +445,19 @@ else
     return 0
 end`;
 
-const PES_ACQUIRE = `local key = KEYS[1]
+// Members arrive as HEX ids and are decoded to the 16 raw bytes Java stores
+// (ByteBufUtil.decodeHexDump) INSIDE Lua — eval args stay plain strings (mock
+// can't compare fresh Buffer instances), the wire member is byte-identical.
+const PES_UNHEX = `local function unhex(s)
+    local out = {}
+    for i = 1, #s, 2 do
+        out[#out+1] = string.char(tonumber(s:sub(i, i+1), 16))
+    end
+    return table.concat(out)
+end
+`;
+
+const PES_ACQUIRE = PES_UNHEX + `local key = KEYS[1]
 local permits_key = KEYS[2]
 local permits = tonumber(ARGV[1])
 local lease_ms = tonumber(ARGV[2])
@@ -452,17 +473,79 @@ if available < permits then
 end
 redis.call('decrby', key, permits)
 for i = 4, #ARGV do
-    redis.call('zadd', permits_key, now + lease_ms, ARGV[i])
+    redis.call('zadd', permits_key, now + lease_ms, unhex(ARGV[i]))
 end
 return 1`;
 
-const PES_RELEASE = `local removed = redis.call('zrem', KEYS[2], ARGV[1])
+const PES_RELEASE = PES_UNHEX + `local removed = redis.call('zrem', KEYS[2], unhex(ARGV[1]))
 if removed == 1 then
-    redis.call('incrby', KEYS[1], 1)
-    redis.call('publish', KEYS[3], ARGV[1])
+    local value = redis.call('incrby', KEYS[1], 1)
+    redis.call('publish', KEYS[3], value)
     return 1
 end
 return 0`;
+
+// Java tryRelease(String) verbatim (KEYS name/channel/timeout): removes even an
+// EXPIRED permit (counter still restored) but returns 0 for it.
+const PES_TRYRELEASE = PES_UNHEX + `local expire = redis.call('zscore', KEYS[3], unhex(ARGV[1]));
+local removed = redis.call('zrem', KEYS[3], unhex(ARGV[1]));
+if tonumber(removed) ~= 1 then
+    return 0;
+end;
+local value = redis.call('incrby', KEYS[1], ARGV[2]);
+redis.call('publish', KEYS[2], value);
+if tonumber(expire) <= tonumber(ARGV[3]) then
+    return 0;
+end;
+return 1;`;
+
+// Java tryRelease(List) verbatim: ALL-OR-NOTHING — any missing/expired id
+// aborts with 0 removals. (Java's ARGV[3] is the publish-command slot; here
+// 'publish' is inlined, so member ids start at ARGV[3] not ARGV[4].)
+const PES_TRYRELEASE_IDS = PES_UNHEX + `for i = 3, #ARGV, 1 do
+    local expire = redis.call('zscore', KEYS[3], unhex(ARGV[i]));
+    if expire == false or tonumber(expire) <= tonumber(ARGV[2]) then
+        return 0;
+    end;
+end;
+local expiredIds = redis.call('zrangebyscore', KEYS[3], 0, ARGV[2], 'limit', 0, -1);
+if #expiredIds > 0 then
+    redis.call('zrem', KEYS[3], unpack(expiredIds));
+    local value = redis.call('incrby', KEYS[1], #expiredIds);
+    if tonumber(value) > 0 then
+        redis.call('publish', KEYS[2], value);
+    end;
+end;
+local keys = {};
+for i = 3, #ARGV, 1 do
+    table.insert(keys, unhex(ARGV[i]));
+end;
+if #keys > 0 then
+    local removed = redis.call('zrem', KEYS[3], unpack(keys));
+    redis.call('incrby', KEYS[1], removed);
+    redis.call('publish', KEYS[2], removed);
+    return removed;
+end;
+return 0;`;
+
+// Java getPermits() verbatim: purge expired, then available + acquired.
+const PES_GETPERMITS = `local expiredIds = redis.call('zrangebyscore', KEYS[2], 0, ARGV[1], 'limit', 0, -1);
+if #expiredIds > 0 then
+    redis.call('zrem', KEYS[2], unpack(expiredIds));
+    local value = redis.call('incrby', KEYS[1], #expiredIds);
+    if tonumber(value) > 0 then
+        redis.call('publish', KEYS[3], value);
+    end;
+end;
+local available = redis.call('get', KEYS[1]);
+if available == false then
+    return 0
+end;
+local acquired = redis.call('zcount', KEYS[2], 0, '+inf');
+if acquired == false then
+    return tonumber(available)
+end;
+return tonumber(available) + acquired;`;
 
 const PES_PURGE = `local expired = redis.call('zrangebyscore', KEYS[2], 0, ARGV[1])
 if #expired > 0 then
@@ -1253,6 +1336,13 @@ export class RSemaphore extends RedisDataStructure {
   async release(permits = 1): Promise<number> {
     return toNumber(await luaEval(this.redis, SEM_RELEASE, 2, this.name, this.channel, String(permits)));
   }
+  /** Java `releaseIfExists(int)`: increments only when the counter key EXISTS
+   *  (never resurrects a deleted semaphore); 0 permits → false. */
+  async releaseIfExists(permits: number): Promise<boolean> {
+    if (permits < 0) throw new Error("Permits amount can't be negative");
+    if (permits === 0) return false;
+    return toNumber(await luaEval(this.redis, SEM_RELIFEXISTS, 2, this.name, this.channel, String(permits))) === 1;
+  }
   async drainPermits(): Promise<number> {
     return toNumber(await luaEval(this.redis, SEM_DRAIN, 1, this.name));
   }
@@ -1343,8 +1433,8 @@ export class RPermitExpirableSemaphore extends RedisDataStructure {
    *  (Buffer args are raw bytes on real Redis; ioredis-mock serializes Buffer
    *  eval args to the same JSON form on both acquire and release, so its
    *  internally-symmetric paths keep working.) */
-  private member(permitId: string): Buffer {
-    return Buffer.from(permitId, 'hex');
+  private member(permitId: string): string {
+    return permitId;
   }
   async tryAcquire(leaseMs: number, permits = 1): Promise<string[] | null> {
     const now = await serverNowMs(this.redis);
@@ -1367,29 +1457,44 @@ export class RPermitExpirableSemaphore extends RedisDataStructure {
   async release(permitId: string): Promise<boolean> {
     return toNumber(await luaEval(this.redis, PES_RELEASE, 3, this.name, this.timeoutKey, this.channel, this.member(permitId))) === 1;
   }
+  /** Java `getPermits()`: purge expired permits, then available + acquired
+   *  (= total configured permits for a live semaphore). */
+  async getPermits(): Promise<number> {
+    const now = await serverNowMs(this.redis);
+    return toNumber(await luaEval(this.redis, PES_GETPERMITS, 3, this.name, this.timeoutKey, this.channel, String(now)));
+  }
+  /** Java `tryRelease(String)` — removes an expired permit too (counter is
+   *  restored either way) but returns false for it; `tryRelease(List)` —
+   *  ALL-OR-NOTHING: any missing/expired id aborts with 0 removals. */
+  async tryRelease(permitId: string): Promise<boolean>;
+  async tryRelease(permitIds: string[]): Promise<number>;
+  async tryRelease(a: string | string[]): Promise<boolean | number> {
+    if (typeof a === 'string') {
+      const now = await serverNowMs(this.redis);
+      return toNumber(await luaEval(this.redis, PES_TRYRELEASE, 3,
+        this.name, this.channel, this.timeoutKey, this.member(a), '1', String(now))) === 1;
+    }
+    if (a.length === 0) return 0;
+    const now = await serverNowMs(this.redis);
+    return toNumber(await luaEval(this.redis, PES_TRYRELEASE_IDS, 3,
+      this.name, this.channel, this.timeoutKey, String(a.length), String(now), ...a.map((i) => this.member(i))));
+  }
+  /** Legacy TS alias — now Java tryRelease(List) semantics (all-or-nothing). */
   async releaseAll(permitIds: string[]): Promise<number> {
-    if (permitIds.length === 0) return 0;
-    const s = `local removed = 0
-for i = 1, #ARGV do
-    removed = removed + redis.call('zrem', KEYS[2], ARGV[i])
-end
-if removed > 0 then
-    redis.call('incrby', KEYS[1], removed)
-    redis.call('publish', KEYS[3], removed)
-end
-return removed`;
-    return toNumber(await luaEval(this.redis, s, 3, this.name, this.timeoutKey, this.channel, ...permitIds.map((i) => this.member(i))));
+    return this.tryRelease(permitIds) as Promise<number>;
   }
   async updateLeaseTime(permitId: string, leaseMs: number): Promise<boolean> {
-    const score = await this.redis.zscore(this.timeoutKey, this.member(permitId));
-    if (score === null) return false;
     const now = await serverNowMs(this.redis);
-    await this.redis.zadd(this.timeoutKey, 'XX', String(now + leaseMs), this.member(permitId));
-    return true;
+    return toNumber(await luaEval(this.redis, PES_UNHEX + `local expire = redis.call('zscore', KEYS[1], unhex(ARGV[1]))
+if expire == false then return 0 end
+redis.call('zadd', KEYS[1], ARGV[2], unhex(ARGV[1]))
+return 1`, 1, this.timeoutKey, this.member(permitId), String(now + leaseMs))) === 1;
   }
   async getLeaseTime(permitId: string): Promise<number> {
-    const score = await this.redis.zscore(this.timeoutKey, this.member(permitId));
-    if (score === null) return -1;
+    const score = await luaEval(this.redis, PES_UNHEX + `local expire = redis.call('zscore', KEYS[1], unhex(ARGV[1]))
+if expire == false then return -1 end
+return expire`, 1, this.timeoutKey, this.member(permitId));
+    if (Number(score) < 0) return -1;
     const now = await serverNowMs(this.redis);
     return Math.max(0, Number(score) - now);
   }

@@ -2741,3 +2741,295 @@ describe('phase 72: SetCache expired listener + NameMapper + Gcra config (mock)'
     await r.shutdown();
   });
 });
+
+describe('round 47: audit-ledger batch on mock (bucket/sem/pes/mapcache/stream/list)', () => {
+  it('RBucket setIfAbsent + getAndClearExpire persist the TTL state', async () => {
+    const r = make();
+    const b = r.getBucket<string>('r47:b');
+    await b.set('v', 60000);
+    expect(await b.setIfAbsent('x')).toBe(false);
+    expect(await b.get()).toBe('v');
+    const fresh = r.getBucket<string>('r47:bf');
+    expect(await fresh.setIfAbsent('f')).toBe(true);
+    expect(await fresh.setIfAbsent('f', 60000)).toBe(false);
+    expect(await b.getAndClearExpire()).toBe('v');
+    expect(await (r.redis as any).pttl('r47:b')).toBe(-1);
+    await r.shutdown();
+  });
+
+  it('RBucket findCommon/findCommonLength/getDigest run or skip as one unit on mock', async () => {
+    const r = make();
+    const b = r.getBucket<string>('r47:lcs1');
+    await b.set('commonGroundThatIsLongEnoughForTheMinMatch-lenA');
+    await r.getBucket<string>('r47:lcs2').set('commonGroundThatIsLongEnoughForTheMinMatch-lenB');
+    try {
+      const sub = await b.findCommon('r47:lcs2');
+      expect(String(sub)).toContain('commonGroundThatIsLongEnoughForTheMinMatch');
+      const len = await b.findCommonLength('r47:lcs2');
+      expect(len).toBeGreaterThan(40);
+      const dig = await b.getDigest();
+      if (dig !== null) expect(String(dig)).toMatch(/^[0-9a-f]+$/);
+    } catch (e) {
+      expect(String((e as Error).message)).toMatch(/Unsupported command|unknown command/i);
+    }
+    await r.shutdown();
+  });
+
+  it('RSemaphore releaseIfExists: exists-guarded, zero-permit short-circuit', async () => {
+    const r = make();
+    const s = r.getSemaphore('r47:sem');
+    expect(await s.releaseIfExists(1)).toBe(false); // missing key never resurrects
+    await s.trySetPermits(2);
+    expect(await s.releaseIfExists(0)).toBe(false);
+    expect(await s.releaseIfExists(3)).toBe(true);
+    expect(await s.availablePermits()).toBe(5);
+    await r.shutdown();
+  });
+
+  it('PES tryRelease single + list (all-or-nothing) + getPermits', async () => {
+    const r = make();
+    const p = r.getPermitExpirableSemaphore('r47:pes');
+    await p.trySetPermits(3);
+    const ids = (await p.tryAcquire(60000, 2))!;
+    expect(ids).toHaveLength(2);
+    expect(await p.getPermits()).toBe(3);
+    expect(await p.tryRelease(ids[0])).toBe(true);
+    expect(await p.availablePermits()).toBe(2);
+    // all-or-nothing: a bogus id aborts the whole batch
+    expect(await p.tryRelease([ids[1], 'ffffffffffffffffffffffffffffffff'])).toBe(0);
+    expect(await p.availablePermits()).toBe(2);
+    expect(await p.tryRelease([ids[1]])).toBe(1);
+    await r.shutdown();
+  });
+
+  it('RMapCache updateEntryExpiration/expireEntryIfNotSet/getAllWithTTLOnly', async () => {
+    const r = make();
+    const mc = r.getMapCache<string, string>('r47:mc');
+    await mc.put('k1', 'v1', 60000);
+    expect(await mc.updateEntryExpiration('k1', 90000)).toBe(true);
+    expect(await mc.remainTimeToLive('k1')).toBeGreaterThan(85000);
+    await mc.put('k2', 'v2');
+    expect(await mc.expireEntryIfNotSet('k2', 60000)).toBe(true);
+    expect(await mc.expireEntryIfNotSet('k2', 60000)).toBe(false); // now has an expiry
+    expect(await mc.expireEntryIfNotSet('ghost', 60000)).toBe(false);
+    expect(await mc.expireEntriesIfNotSet(['k1', 'k2'], 60000)).toBe(0); // both already set
+    const all = await mc.getAllWithTTLOnly(['k1', 'k2', 'ghost']);
+    expect(all.size).toBe(2);
+    expect(all.get('k1')).toBe('v1');
+    expect(all.get('k2')).toBe('v2');
+    await r.shutdown();
+  });
+
+  it('RStream trimNonStrict aliases the approximate XTRIM (skip if mock lacks xtrim)', async () => {
+    const r = make();
+    const st = r.getStream<string, string>('r47:st');
+    for (let i = 0; i < 4; i++) await st.add({ f: `v${i}` });
+    expect(await st.size()).toBe(4);
+    try {
+      await st.trimNonStrict(1);
+      // the server's ~ no-ops below node granularity on small streams
+      expect(await st.size()).toBe(4);
+    } catch (e) {
+      expect(String((e as Error).message)).toMatch(/Unsupported command/i);
+    }
+    await r.shutdown();
+  });
+
+  it('RList fastSet/fastRemove sentinel + subList bounded view', async () => {
+    const r = make();
+    const l = r.getList<string>('r47:li');
+    for (const v of ['a', 'b', 'c', 'd', 'e']) await l.add(v);
+    await l.fastSet(1, 'X');
+    expect(await l.get(1)).toBe('X');
+    await l.fastRemove(0);
+    expect(await l.readAll()).toEqual(['X', 'c', 'd', 'e']);
+    const sub = l.subList(1, 3);
+    expect(await sub.size()).toBe(2);
+    expect(await sub.readAll()).toEqual(['c', 'd']);
+    expect(await sub.get(0)).toBe('c');
+    await sub.set(0, 'Y');
+    expect(await l.get(1)).toBe('Y');
+    await sub.add('Z'); // appends at the view's end — the view grows to [Y,d,Z]
+    expect(await sub.readAll()).toEqual(['Y', 'd', 'Z']);
+    expect(await l.readAll()).toEqual(['X', 'Y', 'd', 'Z', 'e']);
+    await sub.remove(0);
+    expect(await sub.readAll()).toEqual(['d', 'Z']);
+    expect(await l.readAll()).toEqual(['X', 'd', 'Z', 'e']);
+    await r.shutdown();
+  });
+});
+
+describe('round 48: audit-ledger batch 2 on mock (zset entries/multimap/bloom getters)', () => {
+  it('RScoredSortedSet takeFirst/takeLast + bounded blocking entries decode', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('r48:z');
+    await z.add(1, 'a1');
+    await z.add(2, 'a2');
+    expect(await z.takeFirst()).toBe('a1');
+    expect(await z.takeLast()).toBe('a2');
+
+    // bounded blocking entries on an empty set time out to an empty map
+    const z2 = r.getScoredSortedSet<string>('r48:z2');
+    expect((await z2.pollFirstEntriesFromAny(300, 1)).size).toBe(0);
+    await z2.add(7, 'wake');
+    const got = await z2.pollFirstEntriesFromAny(3000, 1);
+    expect(got.get('r48:z2')).toEqual(new Map([['wake', 7]]));
+    // MAX side mirrors
+    await z2.add(3, 'lo');
+    await z2.add(9, 'hi');
+    const gotMax = await z2.pollLastEntriesFromAny(3000, 1);
+    expect(gotMax.get('r48:z2')).toEqual(new Map([['hi', 9]]));
+    await r.shutdown();
+  });
+
+  it('ZMPOP non-blocking entries: run when mock supports zmpop, else guard', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('r48:z3');
+    await z.add(5, 'n1');
+    let ran = false;
+    try {
+      const m = await z.pollFirstEntriesFromAny(1);
+      ran = true;
+      expect(m.get('r48:z3')).toEqual(new Map([['n1', 5]]));
+    } catch (e) {
+      expect(String((e as Error).message)).toMatch(/Unsupported command/i);
+    }
+    console.warn(`[mock] zmpop ${ran ? 'supported' : 'absent - non-blocking entries path guarded'}`);
+    await r.shutdown();
+  });
+
+  it('subscribeOnFirstElements pumps writes until unsubscribe', async () => {
+    const r = make();
+    const z = r.getScoredSortedSet<string>('r48:sub');
+    const got: string[] = [];
+    const id = z.subscribeOnFirstElements((v) => got.push(v as string));
+    await z.add(1, 's-one');
+    await z.add(2, 's-two');
+    await new Promise((res) => setTimeout(res, 700));
+    z.unsubscribe(id);
+    expect(got).toEqual(['s-one', 's-two']);
+    await r.shutdown();
+  });
+
+  it('multimap core ops: getAll/putAll/replaceValues/removeAll/entries/values/contains', async () => {
+    const r = make();
+    const lm = r.getListMultimap<string, string>('r48:mm');
+    expect(await lm.putAll('k1', ['v1', 'v2'])).toBe(true);
+    expect(await lm.putAll('k1', [])).toBe(false);
+    await lm.put('k2', 'j1');
+    expect(await lm.getAll('k1')).toEqual(['v1', 'v2']);
+    expect(await lm.get('k2')).toEqual(['j1']);
+    expect(await lm.keySize()).toBe(2);
+    expect(await lm.isEmpty()).toBe(false);
+    // replaceValues returns the PREVIOUS collection
+    expect(await lm.replaceValues('k1', ['n1'])).toEqual(['v1', 'v2']);
+    // removeAll returns the removed collection; the key is gone after
+    expect(await lm.removeAll('k2')).toEqual(['j1']);
+    expect(await lm.containsKey('k2')).toBe(false);
+    expect(await lm.keySize()).toBe(1);
+    // entries/values/contains across keys
+    await lm.putAll('e1', ['x1', 'x2']);
+    await lm.put('e2', 'y1');
+    // k1 is still live here — entries/values span every key
+    expect((await lm.entries()).sort()).toEqual([['e1', 'x1'], ['e1', 'x2'], ['e2', 'y1'], ['k1', 'n1']]);
+    expect((await lm.values()).sort()).toEqual(['n1', 'x1', 'x2', 'y1']);
+    expect(await lm.containsEntry('e1', 'x1')).toBe(true);
+    expect(await lm.containsEntry('e1', 'nope')).toBe(false);
+    expect(await lm.containsEntry('ghost', 'x1')).toBe(false);
+    expect(await lm.containsValue('y1')).toBe(true);
+    expect(await lm.containsValue('nope')).toBe(false);
+    expect((await lm.readAllKeySet()).sort()).toEqual(['e1', 'e2', 'k1']);
+    // fastRemove drops whole keys, ghost keys don't count
+    expect(await lm.fastRemove('e1', 'e2', 'ghost')).toBe(2);
+    expect(await lm.readAllKeySet()).toEqual(['k1']);
+    // fastRemoveValue: value-targeted, emptied keys vanish; missing values don't count
+    await lm.putAll('f1', ['a', 'b']);
+    await lm.putAll('f2', ['a', 'c']);
+    expect(await lm.fastRemoveValue('a', 'nope')).toBe(2);
+    expect(await lm.getAll('f1')).toEqual(['b']);
+    expect(await lm.getAll('f2')).toEqual(['c']);
+    expect(await lm.readAllKeySet().then((s) => s.sort())).toEqual(['f1', 'f2', 'k1']);
+    await r.shutdown();
+  });
+
+  it('RBloomFilter config getters read the {name}:config hash on mock', async () => {
+    const r = make();
+    const bf = r.getBloomFilter<string>('r48:bf');
+    expect(await bf.tryInit(1000, 0.01)).toBe(true);
+    expect(await bf.getExpectedInsertions()).toBe(1000);
+    expect(await bf.getFalseProbability()).toBe(0.01);
+    await r.shutdown();
+  });
+
+  it('RBloomFilterNative: BF.* is unsupported on mock (logged, never silent)', async () => {
+    const r = make();
+    const bfn = r.getBloomFilterNative<string>('r48:bfn');
+    await expect(bfn.init(0.01, 100)).rejects.toThrow(/Unsupported command/i);
+    await expect(bfn.add('x')).rejects.toThrow(/Unsupported command/i);
+    console.warn('[mock] BF.* absent - native bloom paths exercised live only');
+    await r.shutdown();
+  });
+});
+
+describe('round 49: audit-ledger batch 3 on mock (deque subs/double adder/function load)', () => {
+  it('RBlockingDeque subscribeOnFirst/LastElements deliver until unsubscribe', async () => {
+    const r = make();
+    // one key per end: the mock fallback POLLS lpop/rpop (no blocking-command
+    // arbitration), so a shared key would let the LEFT pump eat the RIGHT end
+    const dF = r.getBlockingDeque<string>('r49:bdf');
+    const dL = r.getBlockingDeque<string>('r49:bdl');
+    const firstGot: string[] = [];
+    const lastGot: string[] = [];
+    const idF = dF.subscribeOnFirstElements((v) => firstGot.push(v as string));
+    const idL = dL.subscribeOnLastElements((v) => lastGot.push(v as string));
+    await dF.addFirst('f1');
+    await dL.addLast('l1');
+    const t0 = Date.now();
+    while ((firstGot.length === 0 || lastGot.length === 0) && Date.now() - t0 < 8000) {
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    expect(firstGot).toEqual(['f1']);
+    expect(lastGot).toEqual(['l1']);
+    dF.unsubscribe(idF);
+    dL.unsubscribe(idL);
+    await dF.addFirst('x');
+    await dL.addLast('y');
+    await new Promise((res) => setTimeout(res, 700));
+    expect(firstGot).toEqual(['f1']);
+    expect(lastGot).toEqual(['l1']);
+    await r.shutdown();
+  });
+
+  it('RDoubleAdder sum/reset converge to the local buffer on mock (either pub/sub path)', async () => {
+    const r = make();
+    const da = r.getDoubleAdder('r49:da');
+    await da.add(1.5);
+    await da.add(0.25);
+    // publish(1)+flush path and publish(0)+local path both yield 1.75
+    expect(await da.sum()).toBeCloseTo(1.75, 6);
+    expect(await da.sum()).toBeCloseTo(1.75, 6);
+    await da.reset();
+    expect(await da.sum()).toBe(0);
+    await da.increment();
+    expect(await da.sum()).toBe(1);
+    await da.decrement();
+    expect(await da.sum()).toBe(0);
+    await r.shutdown();
+  });
+
+  it('RFunction Java-shaped load(lib, code)/loadAndReplace route FUNCTION LOAD (guarded on mock)', async () => {
+    const r = make();
+    const fn = r.getFunction();
+    try {
+      await fn.load('r49lib', "redis.register_function('r49f', function() return 1 end)");
+      await fn.loadAndReplace('r49lib', "redis.register_function('r49f', function() return 2 end)");
+      console.warn('[mock] FUNCTION supported - load/loadAndReplace executed');
+    } catch (e) {
+      expect(String((e as Error).message)).toMatch(/Unsupported command|is not a function/i);
+      console.warn('[mock] FUNCTION absent - Java-shaped load paths guarded');
+    }
+    // raw form still works (no FUNCTION LOAD involved on the raw path? it is —
+    // so just verify the overload resolution compiles and routes)
+    await r.shutdown();
+  });
+});

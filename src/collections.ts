@@ -105,6 +105,43 @@ return 0`;
     const s = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
     return toNumber(await luaEval(this.redis, s, 1, this.name, this.encodeValue(expect))) === 1;
   }
+  /** Java `setIfAbsent(V)` is a literal SETNX; the Duration overload is SET PX NX —
+   *  the same wire shape as trySet. */
+  async setIfAbsent(value: V, ttlMs?: number): Promise<boolean> {
+    return this.trySet(value, ttlMs);
+  }
+  /** Java `getAndClearExpire()`: GETEX key PERSIST — read and drop the TTL atomically. */
+  async getAndClearExpire(): Promise<V | null> {
+    try {
+      const raw = await this.redis.getex(this.name, 'PERSIST');
+      return raw === null ? null : (this.decodeValue(raw) as V);
+    } catch {
+      const v = await this.get();
+      if (v !== null) await this.redis.persist(this.name);
+      return v;
+    }
+  }
+  /** Java `findCommon(String)`: LCS key1 key2 MINMATCHLEN 30 (codec-decoded). */
+  async findCommon(otherKey: string): Promise<V | null> {
+    const r = await this.callRaw('lcs', this.name, otherKey, 'MINMATCHLEN', 30);
+    return r === null || r === undefined ? null : (this.decodeValue(r as string) as V);
+  }
+  /** Java `findCommonLength(String)`: LCS key1 key2 LEN. */
+  async findCommonLength(otherKey: string): Promise<number> {
+    return toNumber(await this.callRaw('lcs', this.name, otherKey, 'LEN'));
+  }
+  /** Java `getDigest()`: DIGEST key (Redis ≥8) — hex digest via StringCodec. */
+  async getDigest(): Promise<string | null> {
+    return ((await this.callRaw('digest', this.name)) as string | null) ?? null;
+  }
+  /** ioredis exposes arbitrary verbs via call(); mocks may lack both — raise
+   *  the test-visible "Unsupported command" so skip-guards fire uniformly. */
+  private async callRaw(cmd: string, ...args: (string | number)[]): Promise<unknown> {
+    const r = this.redis as any;
+    if (typeof r.call === 'function') return r.call(cmd, ...args);
+    if (typeof r[cmd] === 'function') return r[cmd](...args);
+    throw new Error(`Unsupported command: ${cmd.toUpperCase()}`);
+  }
   async size(): Promise<number> {
     return this.redis.strlen(this.name);
   }
@@ -942,6 +979,78 @@ return -1`;
     for (let i = all.length - 1; i >= 0; i--) if (all[i] === enc) return i;
     return -1;
   }
+  /** Java `fastSet(int, V)`: plain LSET (no read-back). */
+  async fastSet(index: number, value: V): Promise<void> {
+    await this.redis.lset(this.name, index, this.encodeValue(value));
+  }
+  /** Java `fastRemove(int)` (BaseRedissonList): sentinel overwrite + single
+   *  LREM — one O(n) shift instead of remove()'s value scan. */
+  async fastRemove(index: number): Promise<void> {
+    const s = `redis.call('lset', KEYS[1], ARGV[1], 'DELETED_BY_REDISSON');redis.call('lrem', KEYS[1], 1, 'DELETED_BY_REDISSON')`;
+    await luaEval(this.redis, s, 1, this.name, String(index));
+  }
+  /** Java `subList(fromIndex, toIndex)`: RedissonSubList — a bounded view over
+   *  the SAME key (no copy): readAll is LRANGE from..to-1, get(i) is
+   *  LINDEX from+i, size is the clamped LLEN delta. */
+  subList(fromIndex: number, toIndex: number): RSubListView<V> {
+    return new RSubListView<V>(this.redis, this.name, this.codec, fromIndex, toIndex);
+  }
+}
+
+/** Java RedissonSubList: index-bounded view of the parent list key. The upper
+ *  bound is mutable like Java's AtomicInteger toIndex — add/remove move it. */
+export class RSubListView<V = any> {
+  constructor(private redis: Redis, private name: string, private codec: Codec,
+              private fromIndex: number, private toIndex: number) {}
+  private dec(raw: string | Buffer | null): V | null {
+    return raw === null ? null : (this.codec.decode(raw as string) as V);
+  }
+  private enc(v: V): string {
+    return this.codec.encode(v);
+  }
+  async size(): Promise<number> {
+    const len = await this.redis.llen(this.name);
+    return Math.max(0, Math.min(this.toIndex, len) - this.fromIndex);
+  }
+  async get(index: number): Promise<V | null> {
+    const sz = await this.size();
+    if (index < 0 || index >= sz) throw new Error('Index: ' + index + ', Size: ' + sz);
+    return this.dec(await this.redis.lindex(this.name, this.fromIndex + index));
+  }
+  async readAll(): Promise<V[]> {
+    const raw = await this.redis.lrange(this.name, this.fromIndex, this.toIndex - 1);
+    return raw.map((r) => this.dec(r) as V);
+  }
+  async set(index: number, value: V): Promise<V | null> {
+    const old = await this.get(index);
+    await this.redis.lset(this.name, this.fromIndex + index, this.enc(value));
+    return old;
+  }
+  /** Append at the view's end (inserts before the underlying toIndex element;
+   *  the view's upper bound grows, like Java's AtomicInteger). */
+  async add(value: V): Promise<boolean> {
+    const at = this.fromIndex + (await this.size());
+    const s = `local len = redis.call('llen', KEYS[1])
+local idx = tonumber(ARGV[1])
+if idx < 0 then idx = len + idx end
+if idx < 0 or idx > len then return redis.error_reply('index out of bounds') end
+local tail = redis.call('lrange', KEYS[1], idx, -1)
+redis.call('ltrim', KEYS[1], 0, idx - 1)
+redis.call('rpush', KEYS[1], ARGV[2])
+for i, v in ipairs(tail) do redis.call('rpush', KEYS[1], v) end
+return 1`;
+    await luaEval(this.redis, s, 1, this.name, String(at), this.enc(value));
+    this.toIndex += 1;
+    return true;
+  }
+  async remove(index: number): Promise<boolean> {
+    const sz = await this.size();
+    if (index < 0 || index >= sz) throw new Error('Index: ' + index + ', Size: ' + sz);
+    const s = `redis.call('lset', KEYS[1], ARGV[1], 'DELETED_BY_REDISSON');redis.call('lrem', KEYS[1], 1, 'DELETED_BY_REDISSON')`;
+    await luaEval(this.redis, s, 1, this.name, String(this.fromIndex + index));
+    this.toIndex -= 1;
+    return true;
+  }
 }
 
 export class RQueue<V = any> extends RedisDataStructure {
@@ -1490,6 +1599,86 @@ async function blockingZPopFromAny(
   });
 }
 
+/** ZMPOP (timeoutMs === 0, non-blocking) / BZMPOP (parking on a dedicated
+ *  connection; null = forever) multi-key pop with COUNT. Returns the popped
+ *  [member, score] pairs keyed by source key, or null when nothing popped. */
+async function zmpopFromAny(
+  redis: Redis,
+  names: string[],
+  side: 'MIN' | 'MAX',
+  timeoutMs: number | null,
+  count: number,
+): Promise<Map<string, { value: string; score: number }[]> | null> {
+  // member/score replies come flat ([m,s,m,s]) or as nested pairs ([[m,s],...])
+  // depending on server version — accept both (cf. the RESP2 module-reply rule)
+  const pairsOf = (entries: any[]): { value: string; score: number }[] => {
+    const pairs: { value: string; score: number }[] = [];
+    if (entries.length > 0 && Array.isArray(entries[0])) {
+      for (const p of entries) pairs.push({ value: String(p[0]), score: Number(p[1]) });
+    } else {
+      for (let i = 0; i < entries.length; i += 2) pairs.push({ value: String(entries[i]), score: Number(entries[i + 1]) });
+    }
+    return pairs;
+  };
+  const parse = (r: any): Map<string, { value: string; score: number }[]> | null => {
+    if (r === null || r === undefined) return null;
+    const key = String(r[0]);
+    const entries = Array.isArray(r[1]) ? r[1] : [];
+    return new Map([[key, pairsOf(entries)]]);
+  };
+  const raw = redis as any;
+  const scanOnce = async (): Promise<Map<string, { value: string; score: number }[]> | null> => {
+    for (const n of names) {
+      const e: any = side === 'MIN' ? await raw.zpopmin(n, count) : await raw.zpopmax(n, count);
+      if (Array.isArray(e) && e.length > 0) return new Map([[n, pairsOf(e)]]);
+    }
+    return null;
+  };
+  if (timeoutMs !== null && timeoutMs <= 0) {
+    // ioredis-mock stubs zmpop with a thrower — fall back to the per-key
+    // zpopmin scan (same non-blocking semantics, one key at a time)
+    try {
+      if (typeof raw.zmpop === 'function') return parse(await raw.zmpop(names.length, ...names, side, 'COUNT', count));
+      if (typeof raw.call === 'function') return parse(await raw.call('zmpop', String(names.length), ...names, side, 'COUNT', String(count)));
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+    }
+    return scanOnce();
+  }
+  const immediate = await (async () => {
+    if (timeoutMs === 0) return null;
+    for (const n of names) {
+      const e: any = side === 'MIN' ? await raw.zpopmin(n, count) : await raw.zpopmax(n, count);
+      if (Array.isArray(e) && e.length > 0) return new Map([[n, pairsOf(e)]]);
+    }
+    return null;
+  })();
+  if (immediate !== null) return immediate;
+  return withDedicatedRedis(redis, async (conn, dedicated) => {
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
+    const poll = async (): Promise<Map<string, { value: string; score: number }[]> | null> => {
+      for (;;) {
+        for (const n of names) {
+          const e: any = side === 'MIN' ? await raw.zpopmin(n, count) : await raw.zpopmax(n, count);
+          if (Array.isArray(e) && e.length > 0) return new Map([[n, pairsOf(e)]]);
+        }
+        const remain = deadline === Infinity ? 50 : deadline - Date.now();
+        if (remain <= 0) return null;
+        await sleep(Math.min(50, remain));
+      }
+    };
+    if (!dedicated) return poll();
+    try {
+      const seconds = timeoutMs === null ? 0 : String(timeoutMs / 1000);
+      const r: any = await (conn as any).bzmpop(seconds, names.length, ...names, side, 'COUNT', count);
+      return parse(r);
+    } catch (e) {
+      if (!isUnsupportedCommand(e)) throw e;
+      return poll();
+    }
+  });
+}
+
 const QUEUE_DRAIN = `local max = tonumber(ARGV[1])
 local len = redis.call('llen', KEYS[1])
 local count = len
@@ -1625,6 +1814,19 @@ export class RBlockingDeque<V = any> extends RDeque<V> {
   /** Java `unsubscribe(listenerId)`. Unknown ids are ignored. */
   unsubscribe(listenerId: number): void {
     unregisterElementSubscription(this, listenerId);
+  }
+  /** Java `subscribeOnFirstElements(consumer)` — takeFirst pump, the same
+   *  ElementsSubscribeService the blocking queue uses. */
+  subscribeOnFirstElements(consumer: (value: V) => unknown): number {
+    return this.subscribeOnElements(consumer);
+  }
+  private async takeLastForElementSubscription(signal: AbortSignal): Promise<V | null> {
+    const raw = await blockingListPop(this.redis, this.name, 'RIGHT', null, signal);
+    return raw === null ? null : (this.decodeValue(raw) as V);
+  }
+  /** Java `subscribeOnLastElements(consumer)` — takeLast pump. */
+  subscribeOnLastElements(consumer: (value: V) => unknown): number {
+    return registerElementSubscription(this, consumer, (signal) => this.takeLastForElementSubscription(signal));
   }
   async takeLast(): Promise<V> {
     for (;;) {
@@ -2232,16 +2434,94 @@ return redis.call('zrevrank', KEYS[1], ARGV[2])`;
     const e = await blockingZPop(this.redis, this.name, 'MAX', timeoutMs);
     return e === null ? null : { value: this.decodeValue(e.value) as V, score: e.score };
   }
-  /** Java `pollFirstFromAny(...)`: BZMPOP MIN over this set + names; returns
-   *  the source key plus member/score. `timeoutMs === null` blocks forever. */
-  async pollFirstFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null> {
+  /** Java `takeFirst()`: BZPOPMIN blocking forever. */
+  async takeFirst(): Promise<V | null> {
+    const e = await blockingZPop(this.redis, this.name, 'MIN', null);
+    return e === null ? null : (this.decodeValue(e.value) as V);
+  }
+  /** Java `takeLast()`: BZPOPMAX blocking forever. */
+  async takeLast(): Promise<V | null> {
+    const e = await blockingZPop(this.redis, this.name, 'MAX', null);
+    return e === null ? null : (this.decodeValue(e.value) as V);
+  }
+  /** Java `subscribeOnFirstElements(consumer)`: continuous BZPOPMIN take.
+   *  Async consumers provide back-pressure; failures retry after one second. */
+  subscribeOnFirstElements(consumer: (value: V) => unknown): number {
+    // bounded take: unsubscribe stops the pump within one timeout slice
+    return registerElementSubscription(this, consumer, async () => {
+      const e = await blockingZPop(this.redis, this.name, 'MIN', 1000);
+      return e === null ? null : (this.decodeValue(e.value) as V);
+    });
+  }
+  /** Java `subscribeOnLastElements(consumer)`: continuous BZPOPMAX take. */
+  subscribeOnLastElements(consumer: (value: V) => unknown): number {
+    return registerElementSubscription(this, consumer, async () => {
+      const e = await blockingZPop(this.redis, this.name, 'MAX', 1000);
+      return e === null ? null : (this.decodeValue(e.value) as V);
+    });
+  }
+  /** Java `unsubscribe(listenerId)`. Unknown ids are ignored. */
+  unsubscribe(listenerId: number): void {
+    unregisterElementSubscription(this, listenerId);
+  }
+  /** Java 4.8.0 overloads (javap): `V pollFirstFromAny(long, TimeUnit, names...)`
+   *  → single entry; `List<V> pollFirstFromAny(Duration, int count, names...)`
+   *  → VALUES list. TS: (timeoutMs, names...) is the single form; (timeoutMs,
+   *  count, names...) the VALUES form — `timeoutMs === null` blocks forever. */
+  async pollFirstFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null>;
+  async pollFirstFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<V[]>;
+  async pollFirstFromAny(a: number | null, b?: number | string, ...rest: string[]): Promise<V[] | { key: string; value: V; score: number } | null> {
+    // (timeoutMs, names...) single → b string/undefined; (timeoutMs, count, names...) → b number
+    if (typeof b === 'number') {
+      const m = await zmpopFromAny(this.redis, [this.name, ...rest], 'MIN', a, b);
+      return m === null ? [] : [...m.values()][0].map((e) => this.decodeValue(e.value) as V);
+    }
+    return this.pollFirstFromAnySingle(a, b === undefined ? [] : [b, ...rest]);
+  }
+  private async pollFirstFromAnySingle(timeoutMs: number | null, otherNames: string[]): Promise<{ key: string; value: V; score: number } | null> {
     const r = await blockingZPopFromAny(this.redis, [this.name, ...otherNames], 'MIN', timeoutMs);
     return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V, score: r.score };
   }
-  /** Java `pollLastFromAny(...)`: BZMPOP MAX. */
-  async pollLastFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null> {
-    const r = await blockingZPopFromAny(this.redis, [this.name, ...otherNames], 'MAX', timeoutMs);
+  /** Java 4.8.0 overloads (javap): `V pollLastFromAny(long, TimeUnit, names...)`
+   *  → single entry; `List<V> pollLastFromAny(Duration, int count, names...)`
+   *  → VALUES list. Same TS shapes as pollFirstFromAny. */
+  async pollLastFromAny(timeoutMs: number | null, ...otherNames: string[]): Promise<{ key: string; value: V; score: number } | null>;
+  async pollLastFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<V[]>;
+  async pollLastFromAny(a: number | null, b?: number | string, ...rest: string[]): Promise<V[] | { key: string; value: V; score: number } | null> {
+    if (typeof b === 'number') {
+      const m = await zmpopFromAny(this.redis, [this.name, ...rest], 'MAX', a, b);
+      return m === null ? [] : [...m.values()][0].map((e) => this.decodeValue(e.value) as V);
+    }
+    const r = await blockingZPopFromAny(this.redis, [this.name, ...(b === undefined ? [] : [b, ...rest])], 'MAX', a);
     return r === null ? null : { key: r.key, value: this.decodeValue(r.value) as V, score: r.score };
+  }
+  /** Java `pollFirstEntriesFromAny(int count, names...)`: ZMPOP MIN (non-blocking). */
+  async pollFirstEntriesFromAny(count: number, ...otherNames: string[]): Promise<Map<string, Map<V, number>>>;
+  /** Java `pollFirstEntriesFromAny(Duration, count, names...)`: BZMPOP MIN ENTRIES. */
+  async pollFirstEntriesFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, Map<V, number>>>;
+  async pollFirstEntriesFromAny(a: number | null, b?: number | string, ...rest: string[]): Promise<Map<string, Map<V, number>>> {
+    if (typeof b === 'number') return this.decodeZmpopEntries(await zmpopFromAny(this.redis, [this.name, ...rest], 'MIN', a, b));
+    const count = a as number; const names = b === undefined ? [] : [b, ...rest];
+    return this.decodeZmpopEntries(await zmpopFromAny(this.redis, [this.name, ...names], 'MIN', 0, count));
+  }
+  /** Java `pollLastEntriesFromAny(int count, names...)`: ZMPOP MAX (non-blocking). */
+  async pollLastEntriesFromAny(count: number, ...otherNames: string[]): Promise<Map<string, Map<V, number>>>;
+  /** Java `pollLastEntriesFromAny(Duration, count, names...)`: BZMPOP MAX ENTRIES. */
+  async pollLastEntriesFromAny(timeoutMs: number | null, count: number, ...otherNames: string[]): Promise<Map<string, Map<V, number>>>;
+  async pollLastEntriesFromAny(a: number | null, b?: number | string, ...rest: string[]): Promise<Map<string, Map<V, number>>> {
+    if (typeof b === 'number') return this.decodeZmpopEntries(await zmpopFromAny(this.redis, [this.name, ...rest], 'MAX', a, b));
+    const count = a as number; const names = b === undefined ? [] : [b, ...rest];
+    return this.decodeZmpopEntries(await zmpopFromAny(this.redis, [this.name, ...names], 'MAX', 0, count));
+  }
+  private decodeZmpopEntries(m: Map<string, { value: string; score: number }[]> | null): Map<string, Map<V, number>> {
+    const out = new Map<string, Map<V, number>>();
+    if (m === null) return out;
+    for (const [key, pairs] of m) {
+      const inner = new Map<V, number>();
+      for (const e of pairs) inner.set(this.decodeValue(e.value) as V, e.score);
+      out.set(key, inner);
+    }
+    return out;
   }
   async first(): Promise<V | null> {
     const m = await this.redis.zrange(this.name, 0, 0);

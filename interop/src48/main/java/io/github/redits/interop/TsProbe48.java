@@ -175,6 +175,7 @@ public final class TsProbe48 {
     // thread; the REPL blocks on bgwaitacquired/bgjoin only AFTER the wake
     // already happened, so these latches never deadlock the loop)
     private static CountDownLatch fair48Latch = new CountDownLatch(1);
+    private static String fair48Acquired = null;
     private static CountDownLatch fair48Go = new CountDownLatch(1);
     private static CountDownLatch fair48Done = new CountDownLatch(1);
     private static String fair48Result = null;
@@ -206,6 +207,10 @@ public final class TsProbe48 {
     private static int mce48Id = -1;
     private static final java.util.List<String> bqs48Seen = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private static int bqs48Id = -1;
+    private static final java.util.List<String> bd48FirstSeen = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private static final java.util.List<String> bd48LastSeen = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private static int bd48FirstId = -1;
+    private static int bd48LastId = -1;
     private static CountDownLatch mlk48BgRelease = new CountDownLatch(1);
     private static CountDownLatch mlk48BgDone = new CountDownLatch(1);
 
@@ -894,10 +899,14 @@ public final class TsProbe48 {
                 fair48Go = new CountDownLatch(1);
                 fair48Done = new CountDownLatch(1);
                 fair48Result = null;
+                fair48Acquired = null;
                 RLock fl = redisson.getFairLock(a[0]);
                 Thread t = new Thread(() -> {
                     try {
                         boolean ok = fl.tryLock(waitMs, leaseMs, TimeUnit.MILLISECONDS);
+                        // bgwaitacquired reads THIS (never mutated after signal);
+                        // fair48Result later gains " released=1" for bgjoin.
+                        fair48Acquired = "acquired=" + ok;
                         fair48Result = "acquired=" + ok;
                         fair48Latch.countDown();
                         if (ok) {
@@ -920,7 +929,7 @@ public final class TsProbe48 {
             }
             case "flock48-bgwaitacquired" -> {
                 boolean r = fair48Latch.await(Long.parseLong(a[0]), TimeUnit.MILLISECONDS);
-                out.add(r ? fair48Result : "timeout");
+                out.add(r ? fair48Acquired : "timeout");
             }
             case "flock48-bggo" -> {
                 fair48Go.countDown();
@@ -2004,6 +2013,86 @@ public final class TsProbe48 {
                 redisson.<String>getBlockingQueue(a[0]).unsubscribe(bqs48Id);
                 out.add("unsub=ok");
             }
+            // --- Round 49: RBlockingDeque first/last element subscriptions ---
+            case "bd48-subfirst" -> {
+                bd48FirstSeen.clear();
+                bd48FirstId = redisson.<String>getBlockingDeque(a[0])
+                        .subscribeOnFirstElements((java.util.function.Consumer<String>) v -> bd48FirstSeen.add(String.valueOf(v)));
+                out.add("subscribed=" + bd48FirstId);
+            }
+            case "bd48-sublast" -> {
+                bd48LastSeen.clear();
+                bd48LastId = redisson.<String>getBlockingDeque(a[0])
+                        .subscribeOnLastElements((java.util.function.Consumer<String>) v -> bd48LastSeen.add(String.valueOf(v)));
+                out.add("subscribed=" + bd48LastId);
+            }
+            case "bd48-seen" -> {
+                synchronized (bd48FirstSeen) {
+                    synchronized (bd48LastSeen) {
+                        out.add("first=" + String.join(",", bd48FirstSeen) + " last=" + String.join(",", bd48LastSeen));
+                    }
+                }
+            }
+            case "bd48-unsubscribe" -> {
+                redisson.<String>getBlockingDeque(a[0]).unsubscribe(bd48FirstId);
+                redisson.<String>getBlockingDeque(a[0]).unsubscribe(bd48LastId);
+                out.add("unsub=ok");
+            }
+            // --- Round 49: RDoubleAdder cross-language flush ---
+            case "adder48-dcohort" -> {
+                // adder48-dcohort name delta signal — same contract as the long
+                // cohort: add locally, mark ready, wait for the TS signal, sum()
+                String signal = a[2];
+                String readyKey = signal + ":ready";
+                String resultKey = signal + ":result";
+                var adder = redisson.getDoubleAdder(a[0]);
+                adder.add(Double.parseDouble(a[1]));
+                redisson.<String>getBucket(readyKey).set("1");
+                long deadline = System.currentTimeMillis() + 90000;
+                boolean seen = false;
+                while (System.currentTimeMillis() < deadline) {
+                    if (redisson.<String>getBucket(signal).isExists()) {
+                        seen = true;
+                        break;
+                    }
+                    Thread.sleep(200);
+                }
+                String verdict = seen ? "sum=" + adder.sum() : "nosignal";
+                try {
+                    redisson.<String>getBucket(resultKey).set(verdict);
+                } catch (Exception ignored) {
+                }
+                out.add(verdict);
+            }
+            case "adder48-dadd" -> {
+                redisson.getDoubleAdder(a[0]).add(Double.parseDouble(a[1]));
+                out.add("added=ok");
+            }
+            case "adder48-dsum" -> {
+                double v = redisson.getDoubleAdder(a[0]).sum();
+                out.add("sum=" + v);
+            }
+            case "adder48-dreset" -> {
+                redisson.getDoubleAdder(a[0]).reset();
+                out.add("reset=ok");
+            }
+            // --- Round 49: RFunction load (no REPLACE) fails on existing lib ---
+            case "fn48-loadplain" -> {
+                try {
+                    redisson.getFunction().load(a[0], a[1]);
+                    out.add("loaded=ok");
+                } catch (Exception e) {
+                    String msg = String.valueOf(e.getMessage()).split("\n")[0];
+                    out.add("err=" + msg);
+                }
+            }
+            case "fn48-loadandreplace" -> {
+                // body is space-free (probe args split on spaces); the value
+                // is interpolated into the Lua string literal
+                String body = "redis.register_function{function_name='p49tsf',callback=function(keys,args)return('\"" + a[1] + "\"')end,flags={'no-writes'}}";
+                redisson.getFunction().loadAndReplace(a[0], body);
+                out.add("replaced=ok");
+            }
             // --- Round 42: TimeSeries remove family / RingBuffer reads / stream readMany ---
             case "ts48-getandremove" -> {
                 Object v = redisson.<Double, String>getTimeSeries(a[0]).getAndRemove(Long.parseLong(a[1]));
@@ -2173,6 +2262,178 @@ public final class TsProbe48 {
                     default -> ok = redisson.<String>getSetCache(a[0]).addIfGreater(d, a[2]);
                 }
                 out.add("ok=" + ok);
+            }
+            // --- Round 47: bucket GETEX/LCS/DIGEST, semaphore releaseIfExists,
+            // PES tryRelease/getPermits, MapCache entry-expiry family, stream
+            // trimNonStrict, list fastSet/fastRemove/subList ---
+            case "rb48-sia" -> {
+                out.add("ok=" + redisson.<String>getBucket(a[0]).setIfAbsent(a[1]));
+            }
+            case "rb48-getclear" -> {
+                String v = redisson.<String>getBucket(a[0]).getAndClearExpire();
+                out.add("value=" + v);
+            }
+            case "rb48-lcs" -> {
+                String v = redisson.<String>getBucket(a[0]).findCommon(a[1]);
+                out.add("common=" + v);
+            }
+            case "rb48-lcslen" -> {
+                out.add("len=" + redisson.<String>getBucket(a[0]).findCommonLength(a[1]));
+            }
+            case "rb48-digest" -> {
+                out.add("digest=" + redisson.<String>getBucket(a[0]).getDigest());
+            }
+            case "sem48-relifexists" -> {
+                out.add("ok=" + redisson.getSemaphore(a[0]).releaseIfExists(Integer.parseInt(a[1])));
+            }
+            case "pes48-getpermits" -> {
+                out.add("permits=" + redisson.getPermitExpirableSemaphore(a[0]).getPermits());
+            }
+            case "pes48-tryrelease" -> {
+                out.add("ok=" + redisson.getPermitExpirableSemaphore(a[0]).tryRelease(a[1]));
+            }
+            case "pes48-tryreleaseids" -> {
+                var ids = java.util.Arrays.asList(a[1].split(","));
+                out.add("released=" + redisson.getPermitExpirableSemaphore(a[0]).tryRelease(ids));
+            }
+            case "mc48-updatettl" -> {
+                boolean ok = redisson.<String, String>getMapCache(a[0]).updateEntryExpiration(a[1],
+                        Long.parseLong(a[2]), TimeUnit.MILLISECONDS,
+                        Long.parseLong(a[3]), TimeUnit.MILLISECONDS);
+                out.add("ok=" + ok);
+            }
+            case "mc48-entryns" -> {
+                boolean ok = redisson.<String, String>getMapCache(a[0]).expireEntryIfNotSet(a[1],
+                        java.time.Duration.ofMillis(Long.parseLong(a[2])),
+                        Long.parseLong(a[3]) > 0 ? java.time.Duration.ofMillis(Long.parseLong(a[3])) : null);
+                out.add("ok=" + ok);
+            }
+            case "mc48-getallttl" -> {
+                var m = redisson.<String, String>getMapCache(a[0]).getAllWithTTLOnly(
+                        new java.util.HashSet<>(java.util.Arrays.asList(a[1].split(","))));
+                for (var e : m.entrySet()) out.add(e.getKey() + "=" + e.getValue());
+            }
+            case "stream48-trimns" -> {
+                long removed = redisson.<String, String>getStream(a[0]).trimNonStrict(
+                        org.redisson.api.stream.StreamTrimArgs.maxLen(Integer.parseInt(a[1])).noLimit());
+                out.add("removed=" + removed);
+            }
+            case "list48-fastset" -> {
+                redisson.<String>getList(a[0]).fastSet(Integer.parseInt(a[1]), a[2]);
+                out.add("set=ok");
+            }
+            case "list48-fastremove" -> {
+                redisson.<String>getList(a[0]).fastRemove(Integer.parseInt(a[1]));
+                out.add("removed=ok");
+            }
+            case "list48-sublist" -> {
+                var vs = redisson.<String>getList(a[0]).subList(Integer.parseInt(a[1]), Integer.parseInt(a[2])).readAll();
+                out.add("sub=" + String.join(",", vs));
+            }
+            // --- Round 48: ZMPOP/BZMPOP entries family, zset bg takeFirst,
+            // bloom config getters, BF-native insert/info/scandump/loadchunk,
+            // multimap core ops ---
+            case "zset48-zmpop" -> {
+                // zset48-zmpop <MIN|MAX> <count> <name1,name2>
+                int count = Integer.parseInt(a[1]);
+                String[] names = a[2].split(",");
+                String[] rest = java.util.Arrays.copyOfRange(names, 1, names.length);
+                var m = a[1].equals("MIN")
+                        ? redisson.<String>getScoredSortedSet(names[0]).pollFirstEntriesFromAny(count, rest)
+                        : redisson.<String>getScoredSortedSet(names[0]).pollLastEntriesFromAny(count, rest);
+                for (var e : m.entrySet()) {
+                    for (var e2 : e.getValue().entrySet()) out.add(e.getKey() + "|" + e2.getKey() + "@" + e2.getValue());
+                }
+            }
+            case "zset48-bzmpop" -> {
+                // zset48-bzmpop <MIN|MAX> <timeoutS> <count> <name1,name2>
+                java.time.Duration d = java.time.Duration.ofSeconds(Long.parseLong(a[1]));
+                int count = Integer.parseInt(a[2]);
+                String[] names = a[3].split(",");
+                String[] rest = java.util.Arrays.copyOfRange(names, 1, names.length);
+                var m = a[1].equals("MIN")
+                        ? redisson.<String>getScoredSortedSet(names[0]).pollFirstEntriesFromAny(d, count, rest)
+                        : redisson.<String>getScoredSortedSet(names[0]).pollLastEntriesFromAny(d, count, rest);
+                for (var e : m.entrySet()) {
+                    for (var e2 : e.getValue().entrySet()) out.add(e.getKey() + "|" + e2.getKey() + "@" + e2.getValue());
+                }
+            }
+            case "bf48-init" -> {
+                // bf48-init <name> <expectedInsertions> <falseProbability>
+                boolean ok = redisson.getBloomFilter(a[0]).tryInit(Long.parseLong(a[1]), Double.parseDouble(a[2]));
+                out.add("ok=" + ok);
+            }
+            case "bf48-cfg" -> {
+                var bf = redisson.getBloomFilter(a[0]);
+                out.add("exp=" + bf.getExpectedInsertions() + " fp=" + bf.getFalseProbability()
+                        + " size=" + bf.getSize() + " iters=" + bf.getHashIterations());
+            }
+            case "bfn48-addmany" -> {
+                java.util.Set<String> added = redisson.<String>getBloomFilterNative(a[0]).add(java.util.Arrays.asList(a[1].split(",")));
+                out.add("added=" + String.join(",", added));
+            }
+            case "bfn48-insert" -> {
+                // bfn48-insert <name> <capacity|0> <nocreate|0|1> <i1,i2>
+                var opt = org.redisson.api.bloomfilter.BloomFilterInsertArgs.<String>elements(java.util.Arrays.asList(a[3].split(",")));
+                if (!a[1].equals("0")) opt = opt.capacity(Long.parseLong(a[1]));
+                opt = opt.noCreate(a[2].equals("1"));
+                java.util.Set<String> added = redisson.<String>getBloomFilterNative(a[0]).insert(opt);
+                out.add("added=" + String.join(",", added));
+            }
+            case "bfn48-existsmany" -> {
+                java.util.Set<String> got = redisson.<String>getBloomFilterNative(a[0]).exists(java.util.Arrays.asList(a[1].split(",")));
+                out.add("exists=" + String.join(",", got));
+            }
+            case "bfn48-info" -> {
+                var i = redisson.<String>getBloomFilterNative(a[0]).getInfo();
+                out.add("info=" + i.getCapacity() + "," + i.getSize() + "," + i.getSubFilterCount() + "," + i.getItemCount() + "," + i.getExpansionRate());
+            }
+            case "bfn48-scandump" -> {
+                // one line per chunk: chunk=<iter> <hex>; replayable via loadChunk
+                long it = 0;
+                for (;;) {
+                    var c = redisson.<String>getBloomFilterNative(a[0]).scanDump(it);
+                    if (c.getIterator() == 0) break;
+                    it = c.getIterator();
+                    out.add("chunk=" + it + " " + java.util.HexFormat.of().formatHex(c.getData()));
+                }
+                out.add("dumpend");
+            }
+            case "bfn48-loadchunk" -> {
+                // bfn48-loadchunk <name> <iter> <hexdata>
+                redisson.<String>getBloomFilterNative(a[0]).loadChunk(Long.parseLong(a[1]), java.util.HexFormat.of().parseHex(a[2]));
+                out.add("loaded=ok");
+            }
+            case "mm48-putall" -> {
+                redisson.<String, String>getListMultimap(a[0]).putAll(a[1], java.util.Arrays.asList(a[2].split(",")));
+                out.add("putall=ok");
+            }
+            case "mm48-getalllist" -> {
+                var vs = redisson.<String, String>getListMultimap(a[0]).getAll(a[1]);
+                out.add("values=" + String.join(",", vs));
+            }
+            case "mm48-replacevalues" -> {
+                var prev = redisson.<String, String>getListMultimap(a[0]).replaceValues(a[1], java.util.Arrays.asList(a[2].split(",")));
+                out.add("prev=" + String.join(",", prev));
+            }
+            case "mm48-removeall" -> {
+                var prev = redisson.<String, String>getListMultimap(a[0]).removeAll(a[1]);
+                out.add("prev=" + String.join(",", prev));
+            }
+            case "mm48-entries" -> {
+                for (var e : redisson.<String, String>getListMultimap(a[0]).entries()) out.add(e.getKey() + "=" + e.getValue());
+            }
+            case "mm48-containsentry" -> {
+                out.add("ok=" + redisson.<String, String>getListMultimap(a[0]).containsEntry(a[1], a[2]));
+            }
+            case "mm48-keysize" -> {
+                out.add("keys=" + redisson.<String, String>getListMultimap(a[0]).keySize());
+            }
+            case "mm48-fastremove" -> {
+                out.add("removed=" + redisson.<String, String>getListMultimap(a[0]).fastRemove(java.util.Arrays.copyOfRange(a, 1, a.length)));
+            }
+            case "mm48-readallkeyset" -> {
+                out.add("keys=" + String.join(",", redisson.<String, String>getListMultimap(a[0]).readAllKeySet()));
             }
             default -> throw new IllegalArgumentException("unknown command: " + cmd);
         }

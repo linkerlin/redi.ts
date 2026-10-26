@@ -333,6 +333,13 @@ export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
       if (idleScore !== null) expireAt = Math.min(expireAt, Number(idleScore));
     }
     if (expireAt <= now) return false;
+    await this.writeEntryExpiry(field, payload, ttlMs, maxIdleMs, now);
+    return true;
+  }
+
+  /** Shared RMapCache expiry write: repack the value with the new maxIdle and
+   *  rewrite both score sets (0 = remove). Java's per-entry scripts do the same. */
+  private async writeEntryExpiry(field: string, payload: string, ttlMs: number, maxIdleMs: number, now: number): Promise<void> {
     const ttlAt = ttlMs > 0 ? now + ttlMs : 0;
     const idleAt = maxIdleMs > 0 ? now + maxIdleMs : 0;
     await this.redis.hset(this.name, field, Buffer.from(packMapCacheValue(payload, maxIdleMs), 'latin1'));
@@ -341,7 +348,54 @@ export class RMapCache<K = any, V = any> extends RedisKeyedStructure<K> {
     if (idleAt > 0) await this.redis.zadd(this.idleKey, String(idleAt), field);
     else await this.redis.zrem(this.idleKey, field);
     await this.touchAccess(field, now);
+  }
+
+  /** Java `updateEntryExpiration(K, ttl, unit, maxIdle, unit)`: delegating
+   *  wrapper — durations ≤ 0 become null (→ score removal), others pass through. */
+  async updateEntryExpiration(key: K, ttlMs: number, maxIdleMs = 0): Promise<boolean> {
+    return this.expireEntry(key, ttlMs > 0 ? ttlMs : 0, maxIdleMs > 0 ? maxIdleMs : 0);
+  }
+
+  /** Java `expireEntryIfNotSet(K, ttl, maxIdle)`: only when the entry has NO
+   *  current expiry (Java's MaxLong sentinel check). */
+  async expireEntryIfNotSet(key: K, ttlMs: number, maxIdleMs = 0): Promise<boolean> {
+    const field = this.encodeKey(key);
+    const raw = await this.readStoredBuffer(field);
+    const buf = this.toBuf(raw);
+    if (buf === null) return false;
+    const now = await serverNowMs(this.redis);
+    const u = unpackMapCacheValue(buf);
+    const payload = u.ok ? u.codec : buf.toString('utf8');
+    const curMaxIdle = u.ok ? u.maxIdle : 0;
+    // effective expiry = min(ttl score, idle score when packed maxIdle is set)
+    const ttlScore = await this.redis.zscore(this.ttlKey, field);
+    let expireAt = ttlScore === null ? Infinity : Number(ttlScore);
+    if (curMaxIdle !== 0) {
+      const idleScore = await this.redis.zscore(this.idleKey, field);
+      if (idleScore !== null) expireAt = Math.min(expireAt, Number(idleScore));
+    }
+    if (expireAt !== Infinity) return false;
+    await this.writeEntryExpiry(field, payload, ttlMs, maxIdleMs, now);
     return true;
+  }
+
+  /** Java `expireEntriesIfNotSet(Set<K>, ttl, maxIdle)`: count of updated keys. */
+  async expireEntriesIfNotSet(keys: K[], ttlMs: number, maxIdleMs = 0): Promise<number> {
+    let n = 0;
+    for (const k of keys) if (await this.expireEntryIfNotSet(k, ttlMs, maxIdleMs)) n += 1;
+    return n;
+  }
+
+  /** Java `getAllWithTTLOnly(Set<K>)`: values without touching idle/access
+   *  bookkeeping, missing keys absent from the result (Java does one HMGET
+   *  batch Lua; the loop is wire-identical). */
+  async getAllWithTTLOnly(keys: K[]): Promise<Map<K, V>> {
+    const out = new Map<K, V>();
+    for (const k of keys) {
+      const v = await this.getWithTTLOnly(k);
+      if (v !== null) out.set(k, v);
+    }
+    return out;
   }
 
   /** Java RMapCache.remainTimeToLive(key): -2 when the entry is missing or
@@ -1449,6 +1503,114 @@ abstract class RMultimapBase<K = any, V = any> extends RedisKeyedStructure<K> {
   async containsKey(key: K): Promise<boolean> {
     return ((await this.redis.hexists(this.name, this.encodeKey(key))) as number) === 1;
   }
+  /** Java `keySize()`: HLEN — number of live keys (collections), not members. */
+  async keySize(): Promise<number> {
+    return this.redis.hlen(this.name);
+  }
+  async isEmpty(): Promise<boolean> {
+    return (await this.size()) === 0;
+  }
+  /** Java `getAll(K)`: snapshot copy of the collection (TS get already copies). */
+  async getAll(key: K): Promise<V[]> {
+    return this.get(key);
+  }
+  /** Java `putAll(K, Iterable<V>)`: batch append; false for empty input. */
+  async putAll(key: K, values: V[]): Promise<boolean> {
+    if (values.length === 0) return false;
+    const field = this.encodeKey(key);
+    const id = (await this.idFor(field, true))!;
+    const ck = this.collKey(id);
+    const enc = values.map((v) => this.encodeValue(v));
+    if (this.isSet) await this.redis.sadd(ck, ...enc);
+    else await this.redis.rpush(ck, ...enc);
+    return true;
+  }
+  /** Java `removeAll(K)`: the removed collection, key gone afterwards. */
+  async removeAll(key: K): Promise<V[]> {
+    const old = await this.get(key);
+    const field = this.encodeKey(key);
+    const id = await this.redis.hget(this.name, field);
+    if (id !== null) {
+      await this.redis.del(this.collKey(id));
+      await this.redis.hdel(this.name, field);
+    }
+    return old;
+  }
+  /** Java `replaceValues(K, Iterable)`: the PREVIOUS collection; empty input
+   *  removes the key (Guava semantics). */
+  async replaceValues(key: K, values: V[]): Promise<V[]> {
+    const old = await this.removeAll(key);
+    if (values.length > 0) await this.putAll(key, values);
+    return old;
+  }
+  /** Java `readAllKeySet()`: every key (same HKEYS view as keySet). */
+  async readAllKeySet(): Promise<K[]> {
+    return this.keySet();
+  }
+  /** Java `entries()`: [key, value] pairs across all collections. */
+  async entries(): Promise<[K, V][]> {
+    const out: [K, V][] = [];
+    for (const k of await this.keySet()) {
+      for (const v of await this.get(k)) out.push([k, v]);
+    }
+    return out;
+  }
+  /** Java `values()`: flattened entries(). */
+  async values(): Promise<V[]> {
+    return (await this.entries()).map(([, v]) => v);
+  }
+  /** Java `containsValue(Object)`: membership across every collection. */
+  async containsValue(value: V): Promise<boolean> {
+    const enc = this.encodeValue(value);
+    for (const id of Object.values(await this.redis.hgetall(this.name))) {
+      const ck = this.collKey(id);
+      const raw = this.isSet ? await this.redis.smembers(ck) : await this.redis.lrange(ck, 0, -1);
+      if (raw.includes(enc)) return true;
+    }
+    return false;
+  }
+  /** Java `containsEntry(K, V)`: key live AND value in its collection. */
+  async containsEntry(key: K, value: V): Promise<boolean> {
+    const field = this.encodeKey(key);
+    const id = await this.redis.hget(this.name, field);
+    if (id === null) return false;
+    const ck = this.collKey(id);
+    const raw = this.isSet ? await this.redis.smembers(ck) : await this.redis.lrange(ck, 0, -1);
+    return raw.includes(this.encodeValue(value));
+  }
+  /** Java `fastRemove(K...)`: DEL the collections + HDEL the fields in one
+   *  pass; returns the number of map entries removed. */
+  async fastRemove(...keys: K[]): Promise<number> {
+    let n = 0;
+    for (const k of keys) {
+      const field = this.encodeKey(k);
+      const id = await this.redis.hget(this.name, field);
+      if (id === null) continue;
+      await this.redis.del(this.collKey(id));
+      n += (await this.redis.hdel(this.name, field)) as number;
+    }
+    return n;
+  }
+  /** Java `fastRemoveValue(V...)`: drop the values from every collection;
+   *  emptied collections/fields are cleaned up. */
+  async fastRemoveValue(...values: V[]): Promise<number> {
+    let n = 0;
+    const encs = values.map((v) => this.encodeValue(v));
+    for (const field of await this.redis.hkeys(this.name)) {
+      const id = await this.redis.hget(this.name, field);
+      if (id === null) continue;
+      const ck = this.collKey(id);
+      for (const enc of encs) {
+        n += (this.isSet ? await this.redis.srem(ck, enc) : await this.redis.lrem(ck, 0, enc)) as number;
+      }
+      const left = this.isSet ? await this.redis.scard(ck) : await this.redis.llen(ck);
+      if (left === 0) {
+        await this.redis.del(ck);
+        await this.redis.hdel(this.name, field);
+      }
+    }
+    return n;
+  }
   async keySet(): Promise<K[]> {
     const fields = await this.redis.hkeys(this.name);
     return fields.map((f) => {
@@ -1467,7 +1629,7 @@ abstract class RMultimapBase<K = any, V = any> extends RedisKeyedStructure<K> {
     return [];
   }
 
-  private async removeAll(mode: 'del' | 'unlink'): Promise<boolean> {
+  private async removeAllKeys(mode: 'del' | 'unlink'): Promise<boolean> {
     const existed = ((await this.redis.exists(this.name)) as number) > 0;
     // Read the field→id map BEFORE deleting it: collections are only
     // discoverable through the HASH (AGENTS.md:9).
@@ -1485,17 +1647,17 @@ abstract class RMultimapBase<K = any, V = any> extends RedisKeyedStructure<K> {
   }
 
   async clear(): Promise<void> {
-    await this.removeAll('del');
+    await this.removeAllKeys('del');
   }
 
   // Java RedissonMultimap.deleteAsync() removes the HASH + every child
   // collection in one Lua script. Direct delete() must not orphan children.
   override async delete(): Promise<boolean> {
-    return this.removeAll('del');
+    return this.removeAllKeys('del');
   }
 
   override async unlink(): Promise<boolean> {
-    return this.removeAll('unlink');
+    return this.removeAllKeys('unlink');
   }
 }
 

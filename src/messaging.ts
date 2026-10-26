@@ -644,6 +644,10 @@ export class RStream extends RedisDataStructure {
       : [this.name, 'MAXLEN', maxLen];
     return (this.redis as any).xtrim(...args);
   }
+  /** Java `trimNonStrict(StreamTrimArgs)` with maxLen — XTRIM MAXLEN ~ n. */
+  async trimNonStrict(maxLen: number): Promise<number> {
+    return this.trim(maxLen, true);
+  }
   async deleteEntries(...ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
     return this.redis.xdel(this.name, ...ids);

@@ -1,3 +1,147 @@
+## 2.55.1 — 2026-10-25
+
+Round 49 of the Java-4.8.0 bidirectional evidence suite — audit-ledger
+batch 3, closing the remaining round-46 ledger. Two new TS APIs and
+cross-language proof for the adder wire:
+
+- RBlockingDeque: `subscribeOnFirstElements`/`subscribeOnLastElements`
+  (the deque variants of the ElementsSubscribeService pump — takeFirst/
+  takeLast delivering both directions; `subscribeOnElements` kept as the
+  LEFT-end alias). Evidence note: Java's `unsubscribe` cancels the pump
+  future but an in-flight BLPOP/BRPOP stays armed and consumes one more
+  element (`cancel(false)` does not interrupt the take) — the suite
+  isolates each direction on its own key.
+- RFunction: Java-shaped `load(libName, code)` /
+  `loadAndReplace(libName, code)` building the Redisson shebang
+  `"#!lua name=" + libName + " 
+ " + code` verbatim (Java loadAsync
+  concatenation). Plain `load` FAILS while the library name exists
+  (server-side duplicate rejection, asserted TS-side and Java-side);
+  `loadAndReplace` overwrites both directions. The raw
+  `load(code, replace?)` form is retained.
+- RDoubleAdder `sum()`/`reset()`: the adder wire is shared and proven —
+  `{name}:adder-topic`, `{name}:{id}:semaphore`/`:counter`,
+  `1:<id>`/`0:<id>` messages (Java RedissonBaseAdder verbatim). A TS sum
+  flushes the Java instance's LOCAL buffer and vice versa; both sides
+  converge on the same total (2.5 + 1.75 = 4.25 asserted both ways), and
+  reset clears both. Note: flush is NON-destructive on both languages
+  (Java `getAndAddAsync(counter.sum())` never resets its local) — only
+  reset does.
+- RDelayedQueue `offerAsync`: closed as a convention-difference — TS
+  `offer(value, delayMs)` IS the async form (Java `offer` =
+  `get(offerAsync)`); the staging wire itself was proven in round 33.
+
+Probe infra: round-49 commands (`bd48-subfirst/sublast/seen/unsubscribe`,
+`adder48-dcohort/dadd/dsum/dreset`, `fn48-loadplain/loadandreplace`).
+
+Evidence-infra findings of the round: ioredis-mock stubs `zmpop` with a
+thrower (fall back to the per-key zpopmin scan); `fn48-callread` passes
+no VALUES (functions derive from KEYS, and returned strings must be
+JSON-decodable — Jackson VALUE-result codec); the Java probe's
+scandump/loadchunk pair emits one `chunk=<iter> <hex>` line per chunk so
+LOADCHUNK replays exact iterator boundaries.
+
+Round 48 of the Java-4.8.0 bidirectional evidence suite — audit-ledger
+batch 2. Closes the next tranche of the round-46 ledger; **one
+cross-language wire fix** surfaced by the new probes:
+
+- **BF.SCANDUMP reply transport (wire fix #10)**: chunk bytes are
+  arbitrary binary — TS took the string-reply path, so ioredis UTF-8
+  decoded non-ASCII bytes into replacement chars (`efbfbd`) and the
+  "byte-identical chunks" assert failed with visibly different hex.
+  `scanDump` now goes through `callBuffer` on real Redis (the mock is
+  in-process passthrough and has no callBuffer).
+
+New TS API (Java 4.8.0 interface parity, `live-interop48av` 5/5):
+
+- RScoredSortedSet: the ZMPOP/BZMPOP ENTRIES family —
+  `pollFirstEntriesFromAny`/`pollLastEntriesFromAny` in both Java shapes
+  (`(count, names...)` non-blocking ZMPOP, `(timeoutMs, count, names...)`
+  parking on a dedicated connection), decoded from replies whose
+  member/score entries arrive flat (`[m,s,...]`) on some servers and as
+  nested pairs (`[[m,s],...]`) on redis 8 — both accepted.
+  `takeFirst`/`takeLast` (BZPOPMIN/MAX, forever) and
+  `subscribeOnFirstElements`/`subscribeOnLastElements` + `unsubscribe`
+  (the same ElementsSubscribeService pump the blocking queue uses,
+  round 41) wake cross-language.
+- `pollFirstFromAny`/`pollLastFromAny` overload set corrected against
+  javap: Java's `(long, TimeUnit, names...)` is the SINGLE-entry form —
+  the `(number, string...)` runtime shape routes there again (the
+  phase-24 mock test caught the misdispatch); `(timeoutMs, count,
+  names...)` is the VALUES form. ZMPOP is attempted first with an
+  Unsupported-command fallback to the per-key zpopmin scan (ioredis-mock
+  stubs `zmpop` with a thrower, so the mock exercises the fallback).
+- RMultimapBase (Set/List variants): `getAll`, `putAll`, `removeAll(key)`
+  (returns the removed collection, key gone), `replaceValues` (Guava
+  semantics: empty input removes the key), `keySize` (HLEN), `isEmpty`,
+  `readAllKeySet`, `entries`, `values`, `containsValue`, `containsEntry`,
+  `fastRemove(...keys)` (DEL collections + HDEL fields in one pass),
+  `fastRemoveValue(...values)` (emptied collections and fields cleaned
+  up).
+- RBloomFilter: `getExpectedInsertions`/`getFalseProbability` (read the
+  same `{name}:config` hash both languages write).
+- RBloomFilterNative: `add(Collection)` (BF.INSERT many),
+  `insert(BloomFilterInsertArgs)` (CAPACITY/NOCREATE chain),
+  `exists(Collection)` (BF.MEXISTS), `getInfo()` shaped +
+  single-option overload (BF.INFO), `scanDump`/`loadChunk` — chunks are
+  byte-identical both directions and membership survives a Java-dump →
+  TS-rebuild and a TS-dump → Java-rebuild round trip.
+
+Probe infra: round-48 commands (`zset48-zmpop/bzmpop` over the existing
+bg-poll pair, `bf48-init/cfg`, `bfn48-addmany/insert/existsmany/info/
+scandump/loadchunk` — scandump emits one `chunk=<iter> <hex>` line per
+chunk so LOADCHUNK replays the exact iterator boundaries, `mm48-putall/
+getalllist/replacevalues/removeall/entries/containsentry/keysize/
+fastremove/readallkeyset`).
+
+Round 47 of the Java-4.8.0 bidirectional evidence suite — audit-ledger
+batch 1 (docs+test+fixes). Closes the next tranche of the round-46
+ledger; **three cross-language wire fixes** surfaced by the new probes:
+
+- **RSemaphore publish payload (wire fix #7)**: TS release published the
+  DELTA while Java publishes the NEW counter value — a Java waiter
+  comparing the published total against its permit need would starve
+  when TS released N permits onto a counter of M. Both payloads now
+  asserted via a raw subscriber (`2,3,6,7,8` chain).
+- **PES release publish payload**: TS published the raw 16-byte member
+  buffer where Java publishes the new counter — same waiter-starvation
+  class. Fixed in `PES_RELEASE`/`tryRelease`/`tryRelease(List)`/
+  `getPermits` (all Java-Lua verbatim now).
+- **PES member transport**: eval args are now the HEX id; Lua decodes to
+  the 16 raw bytes with `string.char` (`PES_UNHEX`). Real-Redis members
+  stay byte-identical to Java's `decodeHexDump`; ioredis-mock (which
+  identity-compares Buffer objects inside eval) gains a symmetric
+  string path — `updateLeaseTime`/`getLeaseTime` moved to the same Lua.
+
+New TS API (Java 4.8.0 interface parity, `live-interop48au` 5/5):
+
+- RBucket: `setIfAbsent(value[, ttlMs])` (SETNX / SET PX NX),
+  `getAndClearExpire()` (GETEX PERSIST), `findCommon`/`findCommonLength`
+  (LCS MINMATCHLEN 30 / LEN — Redis LCS is the longest common
+  SUBSEQUENCE, asserted so), `getDigest()` (Redis ≥8 DIGEST).
+- RSemaphore: `releaseIfExists(permits)` (exists-guarded, 0 → false).
+- RPermitExpirableSemaphore: `tryRelease(id)` (removes an EXPIRED
+  permit but returns false), `tryRelease(ids)` ALL-OR-NOTHING (Java
+  verbatim: any missing/expired id aborts with 0 removals — TS
+  `releaseAll` now aliases this), `getPermits()` (purge + available +
+  acquired).
+- RMapCache: `updateEntryExpiration`, `expireEntryIfNotSet`,
+  `expireEntriesIfNotSet`, `getAllWithTTLOnly`.
+- RStream: `trimNonStrict(maxLen)` (XTRIM ~ — both languages no-op on
+  small streams, asserted identical).
+- RList: `fastSet` (LSET), `fastRemove` (Java's sentinel Lua verbatim:
+  lset 'DELETED_BY_REDISSON' + lrem 1), `subList(from, to)` returning an
+  `RSubListView` over the SAME key (LRANGE bounds, mutable upper bound
+  like Java's AtomicInteger toIndex).
+
+Probe infra: round-47 commands (`rb48-sia/getclear/lcs/lcslen/digest`,
+`sem48-relifexists`, `pes48-tryrelease/tryreleaseids/getpermits`,
+`mc48-updatettl/entryns/getallttl`, `stream48-trimns`,
+`list48-fastset/fastremove/sublist`); `flock48-bgwaitacquired` now
+reads a never-mutated `fair48Acquired` (the bg thread's post-release
+`fair48Result += " released=1"` raced into the acquisition assert —
+the 48am run-2 flake).
+
 ## 2.54.1 — 2026-10-25
 
 Round 34 of the Java-4.8.0 bidirectional evidence suite (docs+test

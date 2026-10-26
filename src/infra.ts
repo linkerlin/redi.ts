@@ -331,10 +331,30 @@ export class RFunction {
   private async call(...args: string[]): Promise<any> {
     return (this.redis as any).call(...args);
   }
-  async load(code: string, replace = false): Promise<string> {
-    return replace
-      ? (this.call('FUNCTION', 'LOAD', 'REPLACE', code) as Promise<string>)
-      : (this.call('FUNCTION', 'LOAD', code) as Promise<string>);
+  /** Redisson shebang builder — Java loadAsync concatenates
+   *  `"#!lua name=" + libraryName + " \n " + code` verbatim (the \n is a
+   *  two-char escape here; the FUNCTION LOAD payload is one string). */
+  private shebang(libName: string, code: string): string {
+    return '#!lua name=' + libName + ' \n ' + code;
+  }
+  /** Java `load(libName, code)`: FUNCTION LOAD of the Redisson-shaped
+   *  `#!lua name=<lib> \n <code>` body — FAILS while the library name is
+   *  already registered (the server rejects a duplicate name). */
+  async load(libName: string, code: string): Promise<void>;
+  /** Raw form: the caller's `code` carries its own `#!lua name=...` line. */
+  async load(code: string, replace?: boolean): Promise<string>;
+  async load(a: string, b?: string | boolean): Promise<string | void> {
+    if (typeof b === 'string') {
+      await this.call('FUNCTION', 'LOAD', this.shebang(a, b));
+      return;
+    }
+    return b === true
+      ? (this.call('FUNCTION', 'LOAD', 'REPLACE', a) as Promise<string>)
+      : (this.call('FUNCTION', 'LOAD', a) as Promise<string>);
+  }
+  /** Java `loadAndReplace(libName, code)`: FUNCTION LOAD REPLACE. */
+  async loadAndReplace(libName: string, code: string): Promise<void> {
+    await this.call('FUNCTION', 'LOAD', 'REPLACE', this.shebang(libName, code));
   }
   async delete(lib: string): Promise<void> {
     await this.call('FUNCTION', 'DELETE', lib);
